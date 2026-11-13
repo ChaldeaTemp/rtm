@@ -64,12 +64,17 @@ async function main(): Promise<void> {
         assert.ok(r.error && r.error.length > 0, `Expected clear error for unauthenticated ${item.agent}`);
       }
     }
+    assert.equal(probeResults.claude?.ok, true, "Expected claude (reclaude) live probe to succeed");
+    assert.equal(probeResults.codex?.ok, true, "Expected codex live probe to succeed");
 
     console.log("\n=== 3. Cross-Session MCP (peer_ask) & Lead Handoff ===");
+    const leadAgent: AgentId = readyAgents.includes("claude") ? "claude" : primaryAgent;
+    const peerAgent: AgentId = readyAgents.includes("codex") && leadAgent !== "codex" ? "codex" : primaryAgent;
+    hub.setLeadAgent(leadAgent);
     const leadResult = await hub.runLeadChat({
-      leadAgent: primaryAgent,
+      leadAgent,
       prompt:
-        `You MUST call the peer_ask MCP tool right now with agent="${primaryAgent}", session="worker-calc", and prompt="Calculate 37 * 43 and reply with only 1591. Do not call any tools.". After peer_ask returns, report the exact answer 1591 back to me.`,
+        `You MUST call the peer_ask MCP tool right now with agent="${peerAgent}", session="worker-calc", and prompt="Calculate 37 * 43 and reply with only 1591. Do not call any tools.". After peer_ask returns, report the exact answer 1591 back to me.`,
     });
     console.log("[lead result]", JSON.stringify(leadResult, null, 2));
     assert.ok(
@@ -81,23 +86,25 @@ async function main(): Promise<void> {
       `Expected lead output to contain 1591, got: ${leadResult.outputText}`,
     );
 
-    const otherAgent: AgentId = primaryAgent === "claude" ? "codex" : "claude";
-    hub.setLeadAgent(otherAgent);
-    const handoffPrompt = hub.ledger.buildLeadPrompt(otherAgent, "follow up question");
+    const nextLead: AgentId = leadAgent !== peerAgent ? peerAgent : (leadAgent === "claude" ? "codex" : "claude");
+    hub.setLeadAgent(nextLead);
+    const handoffPrompt = hub.ledger.buildLeadPrompt(
+      nextLead,
+      "Based on the handoff context, what exact multiplication result (4 digits) did we just verify via peer_ask? Reply with the number only.",
+    );
     console.log("[handoff prompt preview]\n" + handoffPrompt);
     assert.ok(handoffPrompt.includes("<handoff_context>"), "Expected <handoff_context> block");
     assert.ok(handoffPrompt.includes("1591"), "Expected handoff context to contain 1591");
     assert.ok(handoffPrompt.includes("peer_ask"), "Expected handoff context to record peer_ask");
 
-    hub.setLeadAgent(primaryAgent);
     const followUp = await hub.runLeadChat({
-      leadAgent: primaryAgent,
-      prompt: "What multiplication did we just verify via peer_ask?",
+      leadAgent: nextLead,
+      prompt: "Based on the handoff context, what exact multiplication result (4 digits) did we just verify via peer_ask? Reply with the number only.",
     });
     console.log("[followUp result]", JSON.stringify(followUp, null, 2));
     assert.ok(
       followUp.outputText.includes("1591") || followUp.outputText.includes("37"),
-      "Expected follow-up to preserve multi-turn context",
+      "Expected follow-up to preserve multi-turn handoff context",
     );
 
     console.log("\n=== 4. On-Demand git worktree Isolation ===");

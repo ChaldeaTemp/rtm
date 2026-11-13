@@ -12,7 +12,64 @@ const LOCAL_SECRETS_FILE = path.join(PROJECT_ROOT, ".agent-hub", "secrets.json")
 export interface ResolvedCommand {
   command: string;
   args: string[];
+  entrypointFile?: string;
   env?: Record<string, string>;
+}
+
+function findExecutableInPath(names: string[]): string | undefined {
+  const pathEnv = process.env.PATH ?? "";
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) {
+      continue;
+    }
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return undefined;
+}
+
+function resolveReclaudeExecutable(localSecrets: Record<string, string>): string | undefined {
+  const explicit = process.env.CLAUDE_CODE_EXECUTABLE || localSecrets.CLAUDE_CODE_EXECUTABLE;
+  if (explicit?.trim() && fs.existsSync(explicit.trim())) {
+    return explicit.trim();
+  }
+  if (process.platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+    const defaultWin = path.join(localAppData, "Programs", "reclaude", "bin", "reclaude.exe");
+    if (fs.existsSync(defaultWin)) {
+      return defaultWin;
+    }
+    return findExecutableInPath(["reclaude.exe", "rec.exe"]);
+  }
+  return findExecutableInPath(["reclaude", "rec"]);
+}
+
+function resolveAgyExecutable(localSecrets: Record<string, string>): string | undefined {
+  const explicit = process.env.AGY_EXECUTABLE || localSecrets.AGY_EXECUTABLE;
+  if (explicit?.trim() && fs.existsSync(explicit.trim())) {
+    return explicit.trim();
+  }
+  if (process.platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+    const defaultWin = path.join(localAppData, "agy", "bin", "agy.exe");
+    if (fs.existsSync(defaultWin)) {
+      return defaultWin;
+    }
+    return findExecutableInPath(["agy.exe"]);
+  }
+  for (const candidate of [
+    path.join(os.homedir(), ".local", "bin", "agy"),
+    "/usr/local/bin/agy",
+  ]) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return findExecutableInPath(["agy"]);
 }
 
 /**
@@ -43,7 +100,8 @@ export function resolveAdapterCommand(agent: AgentId): ResolvedCommand {
   const localSecrets = loadLocalSecrets();
 
   if (agent === "claude") {
-    const entry = path.join(
+    const reclaudeShim = path.join(PROJECT_ROOT, "bridges", "reclaude-acp.mjs");
+    const fallbackEntry = path.join(
       PROJECT_ROOT,
       "node_modules",
       "@agentclientprotocol",
@@ -51,10 +109,17 @@ export function resolveAdapterCommand(agent: AgentId): ResolvedCommand {
       "dist",
       "index.js",
     );
+    const entry = fs.existsSync(reclaudeShim) ? reclaudeShim : fallbackEntry;
+    const reclaudeExe = resolveReclaudeExecutable(localSecrets);
+    const env: Record<string, string> = { ...localSecrets };
+    if (reclaudeExe) {
+      env.CLAUDE_CODE_EXECUTABLE = reclaudeExe;
+    }
     return {
       command: process.execPath,
       args: [entry],
-      env: Object.keys(localSecrets).length ? localSecrets : undefined,
+      entrypointFile: entry,
+      env: Object.keys(env).length ? env : undefined,
     };
   }
 
@@ -70,6 +135,17 @@ export function resolveAdapterCommand(agent: AgentId): ResolvedCommand {
     return {
       command: process.execPath,
       args: [entry],
+      entrypointFile: entry,
+      env: Object.keys(localSecrets).length ? localSecrets : undefined,
+    };
+  }
+
+  const adapterMode = (process.env.AGY_ADAPTER_MODE || localSecrets.AGY_ADAPTER_MODE || "").toLowerCase();
+  const agyExe = adapterMode === "sdk" ? undefined : resolveAgyExecutable(localSecrets);
+  if (agyExe) {
+    return {
+      command: agyExe,
+      args: ["acp"],
       env: Object.keys(localSecrets).length ? localSecrets : undefined,
     };
   }
@@ -84,6 +160,7 @@ export function resolveAdapterCommand(agent: AgentId): ResolvedCommand {
   return {
     command: venvPython,
     args: [bridgeScript],
+    entrypointFile: bridgeScript,
     env: {
       ...localSecrets,
       PYTHONUTF8: "1",
@@ -178,6 +255,31 @@ function checkAgentAuthReady(agent: AgentId, localSecrets: Record<string, string
       return { authReady: true };
     }
 
+    const reclaudeExe = resolveReclaudeExecutable(localSecrets);
+    if (reclaudeExe) {
+      try {
+        const res = spawnSync(reclaudeExe, ["status"], {
+          encoding: "utf8",
+          timeout: 4000,
+          windowsHide: true,
+        });
+        if (res.status === 0 && res.stdout) {
+          const claudeBlock = res.stdout.match(/\[claude\]([\s\S]*?)(?:\r?\n\[|$)/i)?.[1] ?? "";
+          const hasLocalBind = /本机绑定[：:]\s*[1-9]\d*/.test(claudeBlock);
+          const hasDefaultOrg = /缺省组织[：:]\s*\S+/.test(claudeBlock) && !/未登录/.test(claudeBlock);
+          if (hasLocalBind || hasDefaultOrg) {
+            return { authReady: true };
+          }
+        }
+      } catch {
+        // Fall through to reclaude authHint
+      }
+      return {
+        authReady: false,
+        authHint: "reclaude 未绑定 Claude 账号：请运行 reclaude login 完成绑定",
+      };
+    }
+
     try {
       const res =
         process.platform === "win32"
@@ -222,12 +324,46 @@ function checkAgentAuthReady(agent: AgentId, localSecrets: Record<string, string
   }
 
   const hasGeminiKey = Boolean(process.env.GEMINI_API_KEY || localSecrets.GEMINI_API_KEY);
-  return hasGeminiKey
-    ? { authReady: true }
-    : {
-        authReady: false,
-        authHint: "未检测到 GEMINI_API_KEY：请在环境变量或 .agent-hub/secrets.json 中设置以启用 google-antigravity SDK",
-      };
+  if (hasGeminiKey) {
+    return { authReady: true };
+  }
+
+  const adapterMode = (process.env.AGY_ADAPTER_MODE || localSecrets.AGY_ADAPTER_MODE || "").toLowerCase();
+  const agyExe = adapterMode === "sdk" ? undefined : resolveAgyExecutable(localSecrets);
+  if (agyExe) {
+    if (process.platform === "win32") {
+      try {
+        const res = spawnSync("cmdkey", ["/list"], {
+          encoding: "utf8",
+          timeout: 3000,
+          windowsHide: true,
+        });
+        if (res.status === 0 && /gemini:antigravity/i.test(res.stdout ?? "")) {
+          return { authReady: true };
+        }
+      } catch {
+        // Fall through to authHint
+      }
+    } else {
+      const cliDir = path.join(os.homedir(), ".gemini", "antigravity-cli");
+      if (
+        fs.existsSync(path.join(cliDir, "oauth_creds.json")) ||
+        fs.existsSync(path.join(cliDir, "credentials.json"))
+      ) {
+        return { authReady: true };
+      }
+    }
+    return {
+      authReady: false,
+      authHint:
+        "Antigravity CLI 已安装但未登录：请在终端运行 agy 或 agy acp --login 完成一次 Google 账号登录（无需配置 GEMINI_API_KEY）",
+    };
+  }
+
+  return {
+    authReady: false,
+    authHint: "未检测到 GEMINI_API_KEY：请在环境变量或 .agent-hub/secrets.json 中设置以启用 google-antigravity SDK",
+  };
 }
 
 /**
@@ -239,7 +375,7 @@ export function checkAdaptersHealth(): AdapterHealth[] {
   return agents.map((agent) => {
     const resolved = resolveAdapterCommand(agent);
     const argv = [resolved.command, ...resolved.args];
-    const targetFile = resolved.args[0];
+    const targetFile = resolved.entrypointFile;
     const auth = checkAgentAuthReady(agent, localSecrets);
     if (!fs.existsSync(resolved.command)) {
       return {
