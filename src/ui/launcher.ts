@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { PROJECT_ROOT } from "../hub/process-tree.js";
 
 const WINDOWS_APP_BROWSERS = [
   path.join(process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)", "Microsoft\\Edge\\Application\\msedge.exe"),
@@ -25,16 +26,30 @@ function findAppBrowserExecutable(): string | undefined {
 export function openInteractiveWindow(
   url: string,
   preferAppWindow = true,
+  options?: { profileDir?: string },
 ): { mode: "app" | "browser"; executable?: string } {
   if (process.platform === "win32") {
     if (preferAppWindow) {
       const exe = findAppBrowserExecutable();
       if (exe) {
-        const child = spawn(exe, [`--app=${url}`, "--window-size=1380,880"], {
-          detached: true,
-          stdio: "ignore",
-          windowsHide: false,
-        });
+        const profileDir =
+          options?.profileDir ?? path.join(PROJECT_ROOT, ".agent-hub", "desktop-browser-profile");
+        fs.mkdirSync(profileDir, { recursive: true });
+        const child = spawn(
+          exe,
+          [
+            `--app=${url}`,
+            `--user-data-dir=${profileDir}`,
+            "--window-size=1420,900",
+            "--no-first-run",
+            "--no-default-browser-check",
+          ],
+          {
+            detached: true,
+            stdio: "ignore",
+            windowsHide: false,
+          },
+        );
         child.unref();
         return { mode: "app", executable: exe };
       }

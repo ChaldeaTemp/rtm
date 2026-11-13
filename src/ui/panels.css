@@ -855,3 +855,31 @@ main.stage[data-view="agents"] #chatComposerWrap {
   border: 1px solid var(--line-soft);
   padding: 1px 6px;
 }
+
+.cwd-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cwd-row .cwd-line {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.cwd-pick-btn {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  font-size: 11px;
+}
+
+.popover-cwd-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.popover-cwd-row .text-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}

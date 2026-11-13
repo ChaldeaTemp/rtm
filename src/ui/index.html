@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Agent Hub — 多 Agent 任务协同台</title>
+  <link rel="icon" type="image/svg+xml" href="/ui/icon.svg" />
+  <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link
@@ -26,11 +28,15 @@
             <span>agent-hub</span>
           </div>
           <div class="ws-status">
+            <span id="portBadge" class="mono" style="font-size:11px;color:var(--faint)"></span>
             <span id="wsDot" class="dot"></span>
             <span id="wsText">connecting</span>
           </div>
         </div>
-        <div id="cwdPill" class="cwd-line" title="">-</div>
+        <div class="cwd-row">
+          <div id="cwdPill" class="cwd-line" title="当前工作目录">-</div>
+          <button id="pickCwdBtn" class="mini-icon-btn cwd-pick-btn" type="button" title="选择并切换默认项目文件夹">目录</button>
+        </div>
       </div>
 
       <div class="new-task-area">
@@ -51,6 +57,16 @@
             placeholder="任务名称（留空自动命名）"
             autocomplete="off"
           />
+          <div class="popover-cwd-row">
+            <input
+              id="newTaskCwdInput"
+              class="text-input"
+              type="text"
+              placeholder="工作目录（留空沿用当前）"
+              autocomplete="off"
+            />
+            <button id="newTaskPickCwdBtn" type="button" class="alma-btn alma-btn-outline alma-btn-sm">浏览</button>
+          </div>
           <div class="popover-agents" id="newTaskAgents">
             <button type="button" class="popover-agent-opt active" data-agent="claude">claude</button>
             <button type="button" class="popover-agent-opt" data-agent="codex">codex</button>
@@ -76,9 +92,14 @@
           <span class="adapter-pill" data-adapter="codex"><span class="dot" data-auth-dot="codex"></span>codex</span>
           <span class="adapter-pill" data-adapter="agy"><span class="dot" data-auth-dot="agy"></span>agy</span>
         </div>
-        <button id="themeToggleBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="切换浅色 / 深色主题">
-          深色
-        </button>
+        <div style="display:flex;gap:6px;align-items:center">
+          <button id="themeToggleBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="切换浅色 / 深色主题">
+            深色
+          </button>
+          <button id="quitHubBtn" class="alma-btn alma-btn-danger alma-btn-sm" type="button" title="停止后台服务并关闭应用" hidden>
+            退出
+          </button>
+        </div>
       </div>
     </aside>
 

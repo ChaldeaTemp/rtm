@@ -25,6 +25,7 @@ import { openInteractiveWindow } from "../ui/launcher.js";
 import { AcpPool, buildSessionKey } from "./acp-pool.js";
 import { AgentRegistry } from "./agent-registry.js";
 import { ThreadLedger } from "./ledger.js";
+import { checkPortAvailable, findAvailablePort, pickNativeDirectory } from "./port-finder.js";
 import { PROJECT_ROOT } from "./process-tree.js";
 import { SharedResourceManager } from "./resources.js";
 import { summarizeWorkspaceChanges } from "./worktree.js";
@@ -189,6 +190,21 @@ const AgentIdOnlySchema = z.object({
   id: z.string().min(1),
 });
 
+const WorkspaceCwdSchema = z.object({
+  cwd: z.string().min(1),
+  groupId: z.string().optional(),
+});
+
+const WorkspacePickSchema = z.object({
+  initialDir: z.string().optional(),
+});
+
+const DESKTOP_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#151514"/>
+  <path d="M21 48 L32 16 L43 48 M25.5 36.5 H38.5" stroke="#f3f2ec" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <circle cx="49" cy="15" r="5" fill="#0d7148"/>
+</svg>`;
+
 function buildArtifactHtmlDocument(artifact: ArtifactRecord): string {
   const safeTitle = artifact.title.replace(/[<>&"]/g, (c) =>
     c === "<" ? "&lt;" : c === ">" ? "&gt;" : c === "&" ? "&amp;" : "&quot;",
@@ -288,6 +304,11 @@ export interface HubServerOptions {
   defaultLead?: AgentId;
   permissionMode?: PermissionMode;
   writeRuntimeFile?: boolean;
+  strictPort?: boolean;
+  desktopMode?: boolean;
+  autoExitOnWindowClose?: boolean;
+  autoExitGraceMs?: number;
+  onAutoExit?: () => void;
 }
 
 export interface RuntimeFileInfo {
@@ -349,7 +370,10 @@ function cloneMessage(msg: ChatMessageRecord): ChatMessageRecord {
 }
 
 export class AgentHubServer {
-  readonly baseCwd: string;
+  private _baseCwd: string;
+  get baseCwd(): string {
+    return this._baseCwd;
+  }
   readonly pool = new AcpPool();
   readonly registry: AgentRegistry;
   readonly resources: SharedResourceManager;
@@ -380,10 +404,22 @@ export class AgentHubServer {
   private url = "";
   private port = 0;
   private writeRuntimeFile: boolean;
+  private strictPort: boolean;
+  private desktopMode: boolean;
+  private autoExitOnWindowClose: boolean;
+  private autoExitGraceMs: number;
+  private onAutoExit?: () => void;
+  private hadWsClient = false;
+  private autoExitTimer?: ReturnType<typeof setTimeout>;
 
   constructor(options: HubServerOptions) {
-    this.baseCwd = path.resolve(options.baseCwd);
+    this._baseCwd = path.resolve(options.baseCwd);
     this.writeRuntimeFile = options.writeRuntimeFile ?? true;
+    this.strictPort = options.strictPort ?? false;
+    this.desktopMode = options.desktopMode ?? false;
+    this.autoExitOnWindowClose = options.autoExitOnWindowClose ?? false;
+    this.autoExitGraceMs = options.autoExitGraceMs ?? 5000;
+    this.onAutoExit = options.onAutoExit;
     this.registry = new AgentRegistry(this.baseCwd, { persistCache: this.writeRuntimeFile });
     this.resources = new SharedResourceManager(this.baseCwd);
     this.resources.setAgentRegistry(this.registry);
@@ -1039,7 +1075,70 @@ export class AgentHubServer {
       resourceBudgets: this.resources.getAgentBudgets(this.baseCwd),
       agents: this.registry.getHealthList(true),
       modelCatalogs: this.registry.getAllModelCatalogs(),
+      desktopMode: this.desktopMode,
+      port: this.port,
     };
+  }
+
+  /**
+   * Switches active workspace directory for default hub operations and target task group.
+   */
+  setWorkspaceCwd(rawCwd: string, groupId?: string): { baseCwd: string; group: TaskGroup } {
+    const resolved = path.resolve(rawCwd.trim());
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+      throw new Error(`Directory not found: ${resolved}`);
+    }
+    this._baseCwd = resolved;
+    const targetGroupId =
+      groupId && this.groups.has(groupId) ? groupId : this.defaultGroupId;
+    const group = this.groups.get(targetGroupId)!;
+    const now = Date.now();
+    group.cwd = resolved;
+    group.updatedAt = now;
+
+    if (targetGroupId !== this.defaultGroupId) {
+      const defGroup = this.groups.get(this.defaultGroupId);
+      if (defGroup) {
+        defGroup.cwd = resolved;
+        defGroup.updatedAt = now;
+      }
+    }
+
+    if (this.writeRuntimeFile && this.url) {
+      try {
+        fs.mkdirSync(path.dirname(RUNTIME_FILE), { recursive: true });
+        const runtimeInfo: RuntimeFileInfo = {
+          url: this.url,
+          port: this.port,
+          pid: process.pid,
+          baseCwd: this.baseCwd,
+          startedAt: Date.now(),
+        };
+        fs.writeFileSync(RUNTIME_FILE, JSON.stringify(runtimeInfo, null, 2), "utf8");
+      } catch {
+        // non-fatal
+      }
+    }
+
+    const budgets = this.resources.getAgentBudgets(this.baseCwd);
+    this.broadcast({
+      type: "workspace_changed",
+      baseCwd: this.baseCwd,
+      group: { ...group },
+      timestamp: now,
+    });
+    this.broadcast({
+      type: "group_updated",
+      group: { ...group },
+      timestamp: now,
+    });
+    this.broadcast({
+      type: "resources_updated",
+      budgets,
+      timestamp: now,
+    });
+
+    return { baseCwd: this.baseCwd, group: { ...group } };
   }
 
   private notifyTaskWaiters(taskId: string): void {
@@ -1610,11 +1709,35 @@ export class AgentHubServer {
         return;
       }
 
+      if (method === "GET" && pathname === "/ui/icon.svg") {
+        res.writeHead(200, { "Content-Type": "image/svg+xml; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(DESKTOP_ICON_SVG);
+        return;
+      }
+
+      if (method === "GET" && pathname === "/manifest.webmanifest") {
+        const manifest = {
+          name: "Agent Hub",
+          short_name: "AgentHub",
+          description: "Multi-agent collaborative workbench on ACP",
+          start_url: "/",
+          display: "standalone",
+          background_color: "#f3f2ec",
+          theme_color: "#f3f2ec",
+          icons: [{ src: "/ui/icon.svg", sizes: "any", type: "image/svg+xml" }],
+        };
+        res.writeHead(200, { "Content-Type": "application/manifest+json; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(JSON.stringify(manifest, null, 2));
+        return;
+      }
+
       if (method === "GET" && pathname === "/api/health") {
         const groupId = reqUrl.searchParams.get("groupId") || undefined;
         sendJson(res, 200, {
           ok: true,
           url: this.url,
+          port: this.port,
+          desktopMode: this.desktopMode,
           baseCwd: this.baseCwd,
           defaultGroupId: this.defaultGroupId,
           leadAgent: this.getLeadAgent(groupId),
@@ -1625,6 +1748,46 @@ export class AgentHubServer {
           sessions: this.pool.listSessions(),
           agents: this.registry.listEnabledIds(),
         });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/ports/check") {
+        const portParam = Number(reqUrl.searchParams.get("port"));
+        const check = await checkPortAvailable(portParam);
+        sendJson(res, 200, { ok: true, port: portParam, ...check });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/ports/suggest") {
+        const preferredParam = Number(reqUrl.searchParams.get("preferred") || "4317");
+        const suggested = await findAvailablePort(preferredParam);
+        sendJson(res, 200, { ok: true, port: suggested });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/workspace/pick-directory") {
+        const body = WorkspacePickSchema.parse(await readJsonBody(req));
+        const result = await pickNativeDirectory(body.initialDir || this.baseCwd);
+        sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/workspace/cwd") {
+        const body = WorkspaceCwdSchema.parse(await readJsonBody(req));
+        const result = this.setWorkspaceCwd(body.cwd, body.groupId);
+        sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/system/shutdown") {
+        sendJson(res, 200, { ok: true, shuttingDown: true });
+        setTimeout(() => {
+          if (this.onAutoExit) {
+            this.onAutoExit();
+          } else {
+            void this.stop().finally(() => process.exit(0));
+          }
+        }, 120);
         return;
       }
 
@@ -1973,6 +2136,34 @@ export class AgentHubServer {
     }
   }
 
+  private scheduleAutoExitCheck(delayMs: number): void {
+    if (!this.autoExitOnWindowClose || !this.hadWsClient) {
+      return;
+    }
+    if (this.autoExitTimer) {
+      clearTimeout(this.autoExitTimer);
+    }
+    this.autoExitTimer = setTimeout(() => {
+      this.autoExitTimer = undefined;
+      if (this.wsClients.size > 0) {
+        return;
+      }
+      const busy = this.pool
+        .listSessions()
+        .some((s) => s.status === "busy" || s.status === "starting");
+      if (busy) {
+        this.scheduleAutoExitCheck(2000);
+        return;
+      }
+      if (this.onAutoExit) {
+        this.onAutoExit();
+      } else {
+        void this.stop().finally(() => process.exit(0));
+      }
+    }, delayMs);
+    this.autoExitTimer.unref();
+  }
+
   async start(preferredPort = 4317): Promise<string> {
     const server = http.createServer((req, res) => {
       void this.handleRequest(req, res);
@@ -1982,10 +2173,18 @@ export class AgentHubServer {
     const wss = new WebSocketServer({ server, path: "/ws" });
     this.wss = wss;
     wss.on("connection", (ws) => {
+      this.hadWsClient = true;
+      if (this.autoExitTimer) {
+        clearTimeout(this.autoExitTimer);
+        this.autoExitTimer = undefined;
+      }
       this.wsClients.add(ws);
       ws.send(JSON.stringify(this.createSnapshot()));
       ws.on("close", () => {
         this.wsClients.delete(ws);
+        if (this.autoExitOnWindowClose && this.hadWsClient && this.wsClients.size === 0) {
+          this.scheduleAutoExitCheck(this.autoExitGraceMs);
+        }
       });
     });
 
@@ -2008,6 +2207,14 @@ export class AgentHubServer {
     let boundPort: number | undefined;
     if (preferredPort === 0) {
       boundPort = await listenOnPort(0);
+    } else if (this.strictPort) {
+      const check = await checkPortAvailable(preferredPort);
+      if (!check.available) {
+        throw new Error(
+          `Port ${preferredPort} is unavailable (${check.reason ?? "already in use"}).`,
+        );
+      }
+      boundPort = await listenOnPort(preferredPort);
     } else {
       for (let offset = 0; offset < 20; offset++) {
         try {
@@ -2045,6 +2252,10 @@ export class AgentHubServer {
   }
 
   async stop(): Promise<void> {
+    if (this.autoExitTimer) {
+      clearTimeout(this.autoExitTimer);
+      this.autoExitTimer = undefined;
+    }
     for (const [questionId, entry] of this.pendingQuestions.entries()) {
       clearTimeout(entry.timer);
       entry.resolve({ cancelled: true, answers: {} });

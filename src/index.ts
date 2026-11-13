@@ -1,6 +1,8 @@
+import { spawn } from "node:child_process";
 import path from "node:path";
 import type { AgentId, PermissionMode } from "./types.js";
-import { checkAdaptersHealth, pickDefaultLead } from "./hub/process-tree.js";
+import { findAvailablePort } from "./hub/port-finder.js";
+import { checkAdaptersHealth, pickDefaultLead, PROJECT_ROOT } from "./hub/process-tree.js";
 import { AgentHubServer, readRuntimeFile } from "./hub/server.js";
 import { runRepl } from "./cli/repl.js";
 import { openInteractiveWindow } from "./ui/launcher.js";
@@ -11,6 +13,11 @@ function parseCliFlags(argv: string[]): {
   cwd: string;
   port: number;
   openUi: boolean;
+  noOpen: boolean;
+  desktopMode: boolean;
+  strictPort: boolean;
+  autoExit: boolean;
+  autoExitGraceMs?: number;
   permissionMode: PermissionMode;
   positionals: string[];
 } {
@@ -19,6 +26,11 @@ function parseCliFlags(argv: string[]): {
   let cwd = process.cwd();
   let port = 4317;
   let openUi = false;
+  let noOpen = false;
+  let desktopMode = false;
+  let strictPort = false;
+  let autoExit = false;
+  let autoExitGraceMs: number | undefined;
   let permissionMode: PermissionMode = "approve-all";
   const positionals: string[] = [];
 
@@ -26,6 +38,20 @@ function parseCliFlags(argv: string[]): {
     const arg = argv[i]!;
     if (arg === "--ui" || arg === "--app") {
       openUi = true;
+    } else if (arg === "--desktop") {
+      desktopMode = true;
+      openUi = true;
+    } else if (arg === "--no-open") {
+      noOpen = true;
+    } else if (arg === "--strict-port") {
+      strictPort = true;
+    } else if (arg === "--auto-exit") {
+      autoExit = true;
+    } else if (arg === "--auto-exit-grace-ms" && argv[i + 1]) {
+      const val = Number(argv[++i]!);
+      if (Number.isFinite(val) && val >= 100) {
+        autoExitGraceMs = val;
+      }
     } else if (arg === "--lead" && argv[i + 1]) {
       const val = argv[++i]!.trim();
       if (val) {
@@ -43,7 +69,7 @@ function parseCliFlags(argv: string[]): {
       else if (val === "reads" || val === "approve-reads") permissionMode = "approve-reads";
       else if (val === "manual") permissionMode = "manual";
       else throw new Error(`Invalid --approve mode: ${val}`);
-    } else if (!command && (arg === "status" || arg === "exec" || arg === "ui")) {
+    } else if (!command && (arg === "status" || arg === "exec" || arg === "ui" || arg === "desktop")) {
       command = arg;
       if (arg === "ui") openUi = true;
     } else {
@@ -51,11 +77,46 @@ function parseCliFlags(argv: string[]): {
     }
   }
 
-  return { command, lead, cwd, port, openUi, permissionMode, positionals };
+  return {
+    command,
+    lead,
+    cwd,
+    port,
+    openUi,
+    noOpen,
+    desktopMode,
+    strictPort,
+    autoExit,
+    autoExitGraceMs,
+    permissionMode,
+    positionals,
+  };
 }
 
 async function main(): Promise<void> {
   const opts = parseCliFlags(process.argv.slice(2));
+
+  if (opts.command === "desktop") {
+    if (process.platform === "win32") {
+      const psScript = path.join(PROJECT_ROOT, "scripts", "desktop-launcher.ps1");
+      const child = spawn(
+        "powershell.exe",
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Sta", "-File", psScript],
+        {
+          cwd: PROJECT_ROOT,
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true,
+        },
+      );
+      child.unref();
+      return;
+    }
+    opts.desktopMode = true;
+    opts.openUi = true;
+    opts.autoExit = true;
+    opts.port = await findAvailablePort(opts.port);
+  }
 
   if (opts.command === "status") {
     const adapters = checkAdaptersHealth();
@@ -75,17 +136,32 @@ async function main(): Promise<void> {
 
   const defaultLead = pickDefaultLead(opts.lead);
 
-  const hub = new AgentHubServer({
+  let exiting = false;
+  let hub!: AgentHubServer;
+  const cleanup = async () => {
+    if (exiting) return;
+    exiting = true;
+    try {
+      await hub.stop();
+    } finally {
+      process.exit(0);
+    }
+  };
+
+  hub = new AgentHubServer({
     baseCwd: opts.cwd,
     port: opts.port,
     defaultLead,
     permissionMode: opts.permissionMode,
+    strictPort: opts.strictPort,
+    desktopMode: opts.desktopMode,
+    autoExitOnWindowClose: opts.autoExit,
+    autoExitGraceMs: opts.autoExitGraceMs,
+    onAutoExit: () => {
+      void cleanup();
+    },
   });
 
-  const cleanup = async () => {
-    await hub.stop();
-    process.exit(0);
-  };
   process.once("SIGINT", () => {
     void cleanup();
   });
@@ -106,14 +182,26 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (opts.openUi) {
+    if (opts.desktopMode) {
+      console.log(`Agent Hub desktop server listening at ${url} (cwd: ${hub.baseCwd})`);
+      if (opts.openUi && !opts.noOpen) {
+        const launched = openInteractiveWindow(url, true);
+        console.log(`Interactive UI opened (${launched.mode}) at ${url}`);
+      }
+      await new Promise<void>(() => {});
+      return;
+    }
+
+    if (opts.openUi && !opts.noOpen) {
       const launched = openInteractiveWindow(url, true);
       console.log(`Interactive UI opened (${launched.mode}) at ${url}`);
     }
 
     await runRepl(hub);
   } finally {
-    await hub.stop();
+    if (!exiting) {
+      await hub.stop();
+    }
   }
 }
 

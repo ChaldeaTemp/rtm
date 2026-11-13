@@ -12,11 +12,13 @@
     "typecheck": "tsc --noEmit",
     "start": "tsx src/index.ts",
     "ui": "tsx src/index.ts --ui",
+    "desktop": "tsx src/index.ts desktop",
     "status": "tsx src/index.ts status",
     "verify": "tsx scripts/verify-phase1.ts",
     "verify:phase2-3": "tsx scripts/verify-phase2-3.ts",
     "verify:phase4": "tsx scripts/verify-phase4.ts",
-    "verify:phase5": "tsx scripts/verify-phase5.ts"
+    "verify:phase5": "tsx scripts/verify-phase5.ts",
+    "verify:phase6": "tsx scripts/verify-phase6.ts"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "latest",

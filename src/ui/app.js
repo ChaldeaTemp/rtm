@@ -1,6 +1,8 @@
 const STATE = {
   defaultGroupId: "grp-default",
   baseCwd: "",
+  desktopMode: false,
+  port: 0,
   permissionMode: "approve-all",
   agents: [],
   modelCatalogs: new Map(),
@@ -36,17 +38,22 @@ const els = {
   workbench: document.getElementById("workbench"),
   wsDot: document.getElementById("wsDot"),
   wsText: document.getElementById("wsText"),
+  portBadge: document.getElementById("portBadge"),
   cwdPill: document.getElementById("cwdPill"),
+  pickCwdBtn: document.getElementById("pickCwdBtn"),
   toggleNewTaskBtn: document.getElementById("toggleNewTaskBtn"),
   quickLaunchRow: document.getElementById("quickLaunchRow"),
   newTaskPopover: document.getElementById("newTaskPopover"),
   newTaskTitleInput: document.getElementById("newTaskTitleInput"),
+  newTaskCwdInput: document.getElementById("newTaskCwdInput"),
+  newTaskPickCwdBtn: document.getElementById("newTaskPickCwdBtn"),
   newTaskAgents: document.getElementById("newTaskAgents"),
   cancelNewTaskBtn: document.getElementById("cancelNewTaskBtn"),
   groupCountBadge: document.getElementById("groupCountBadge"),
   groupList: document.getElementById("groupList"),
   adapterPills: document.getElementById("adapterPills"),
   themeToggleBtn: document.getElementById("themeToggleBtn"),
+  quitHubBtn: document.getElementById("quitHubBtn"),
   navResBadge: document.getElementById("navResBadge"),
   navTokBadge: document.getElementById("navTokBadge"),
   navAgentsBadge: document.getElementById("navAgentsBadge"),
@@ -1294,11 +1301,71 @@ function renderInspector() {
   }
 }
 
+function renderDesktopControls() {
+  const activeCwd = getActiveGroup()?.cwd || STATE.baseCwd || "";
+  if (els.cwdPill) {
+    els.cwdPill.textContent = activeCwd;
+    els.cwdPill.title = activeCwd;
+  }
+  const activePort = STATE.port || (location.port ? Number(location.port) : 0);
+  if (els.portBadge) {
+    els.portBadge.textContent = activePort ? `:${activePort}` : "";
+    els.portBadge.title = activePort ? `当前监听端口 ${activePort}` : "";
+  }
+  if (els.quitHubBtn) {
+    els.quitHubBtn.hidden = !STATE.desktopMode;
+  }
+}
+
+async function pickDirectoryDialog(initialDir) {
+  const res = await fetch("/api/workspace/pick-directory", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ initialDir: initialDir || undefined }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) {
+    appendLog(`选择目录失败: ${data.error || res.status}`);
+    return null;
+  }
+  if (data.cancelled || data.canceled || !data.path) {
+    return null;
+  }
+  return data.path;
+}
+
+async function changeActiveWorkspaceCwd() {
+  const activeGroup = getActiveGroup();
+  const initialDir = activeGroup?.cwd || STATE.baseCwd;
+  const picked = await pickDirectoryDialog(initialDir);
+  if (!picked) return;
+  const res = await fetch("/api/workspace/cwd", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      cwd: picked,
+      groupId: activeGroup?.groupId || STATE.activeGroupId,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) {
+    appendLog(`切换工作区失败: ${data.error || res.status}`);
+    return;
+  }
+  if (data.baseCwd) STATE.baseCwd = data.baseCwd;
+  if (data.group) STATE.taskGroups.set(data.group.groupId, data.group);
+  renderDesktopControls();
+  renderSidebarGroups();
+  renderStageHeaderAndTabs();
+  appendLog(`工作区已切换至: ${data.group?.cwd || data.baseCwd || picked}`);
+}
+
 function renderAll() {
   if (!STATE.taskGroups.has(STATE.activeGroupId)) {
     STATE.activeGroupId = STATE.defaultGroupId;
     STATE.activeStreamKey = `lead:${STATE.defaultGroupId}`;
   }
+  renderDesktopControls();
   renderAgentControls();
   renderSidebarGroups();
   renderStageHeaderAndTabs();
@@ -1386,6 +1453,9 @@ async function loadAdapterHealth() {
   try {
     const res = await fetch("/api/health");
     const data = await res.json();
+    if (typeof data.desktopMode === "boolean") STATE.desktopMode = data.desktopMode;
+    if (typeof data.port === "number") STATE.port = data.port;
+    renderDesktopControls();
     const list = Array.isArray(data.allAgents) ? data.allAgents : data.adapters;
     if (Array.isArray(list)) {
       STATE.agents = list;
@@ -1415,10 +1485,11 @@ function connectWs() {
     if (msg.type === "snapshot") {
       STATE.defaultGroupId = msg.defaultGroupId || "grp-default";
       STATE.baseCwd = msg.baseCwd || "";
+      STATE.desktopMode = Boolean(msg.desktopMode);
+      STATE.port = typeof msg.port === "number" ? msg.port : 0;
       STATE.permissionMode = msg.permissionMode || "approve-all";
       els.permSelect.value = STATE.permissionMode;
-      els.cwdPill.textContent = STATE.baseCwd;
-      els.cwdPill.title = STATE.baseCwd;
+      renderDesktopControls();
 
       STATE.taskGroups.clear();
       (msg.taskGroups || []).forEach((g) => STATE.taskGroups.set(g.groupId, g));
@@ -1505,8 +1576,17 @@ function connectWs() {
       window.HUB_APP?.onResourcesUpdated?.();
     } else if (msg.type === "group_created" || msg.type === "group_updated") {
       STATE.taskGroups.set(msg.group.groupId, msg.group);
+      renderDesktopControls();
       renderSidebarGroups();
       renderStageHeaderAndTabs();
+    } else if (msg.type === "workspace_changed") {
+      if (msg.baseCwd) STATE.baseCwd = msg.baseCwd;
+      if (msg.group) STATE.taskGroups.set(msg.group.groupId, msg.group);
+      renderDesktopControls();
+      renderSidebarGroups();
+      renderStageHeaderAndTabs();
+      window.HUB_APP?.onStateChange?.();
+      appendLog(`工作区目录已更新: ${msg.group?.cwd || msg.baseCwd}`);
     } else if (msg.type === "group_deleted") {
       STATE.taskGroups.delete(msg.groupId);
       for (const key of STATE.messagesByStream.keys()) {
@@ -1599,9 +1679,36 @@ function connectWs() {
 }
 
 // Event bindings
+if (els.pickCwdBtn) {
+  els.pickCwdBtn.onclick = () => void changeActiveWorkspaceCwd();
+}
+
+if (els.newTaskPickCwdBtn && els.newTaskCwdInput) {
+  els.newTaskPickCwdBtn.onclick = async () => {
+    const initial = els.newTaskCwdInput.value.trim() || getActiveGroup()?.cwd || STATE.baseCwd;
+    const picked = await pickDirectoryDialog(initial);
+    if (picked) els.newTaskCwdInput.value = picked;
+  };
+}
+
+if (els.quitHubBtn) {
+  els.quitHubBtn.onclick = async () => {
+    els.quitHubBtn.disabled = true;
+    try {
+      await fetch("/api/system/shutdown", { method: "POST" });
+    } catch {
+      // backend may close before response flushes
+    }
+    window.close();
+  };
+}
+
 els.toggleNewTaskBtn.onclick = () => {
   els.newTaskPopover.hidden = !els.newTaskPopover.hidden;
   if (!els.newTaskPopover.hidden) {
+    if (els.newTaskCwdInput && !els.newTaskCwdInput.value.trim()) {
+      els.newTaskCwdInput.placeholder = getActiveGroup()?.cwd || STATE.baseCwd || "默认工作区目录（可留空）";
+    }
     els.newTaskTitleInput.focus();
   }
 };
@@ -1613,9 +1720,15 @@ els.cancelNewTaskBtn.onclick = () => {
 els.newTaskPopover.onsubmit = async (e) => {
   e.preventDefault();
   const title = els.newTaskTitleInput.value.trim();
+  const cwd = els.newTaskCwdInput ? els.newTaskCwdInput.value.trim() : "";
   els.newTaskTitleInput.value = "";
+  if (els.newTaskCwdInput) els.newTaskCwdInput.value = "";
   els.newTaskPopover.hidden = true;
-  await createTaskGroup({ title: title || undefined, leadAgent: STATE.newTaskLead });
+  await createTaskGroup({
+    title: title || undefined,
+    leadAgent: STATE.newTaskLead,
+    cwd: cwd || undefined,
+  });
 };
 
 els.stageTaskTitle.onclick = () => {

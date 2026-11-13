@@ -337,6 +337,14 @@ export type HubEvent =
       telemetry: TelemetrySnapshot;
       resourceBudgets: AgentResourceBudget[];
       modelCatalogs: Record<string, AgentModelCatalog>;
+      desktopMode?: boolean;
+      port?: number;
+    }
+  | {
+      type: "workspace_changed";
+      baseCwd: string;
+      group: TaskGroup;
+      timestamp: number;
     }
   | {
       type: "models_updated";
