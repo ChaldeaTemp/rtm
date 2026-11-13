@@ -44,6 +44,10 @@ export interface RunTurnOptions {
   isolateWorktree?: boolean;
   callDepth?: number;
   injectPeerMcp?: boolean;
+  groupId?: string;
+  role?: "lead" | "sub";
+  label?: string;
+  parentSessionKey?: string;
 }
 
 export interface RunTurnResult {
@@ -130,10 +134,17 @@ export class AcpPool extends EventEmitter {
     isolateWorktree: boolean;
     callDepth: number;
     injectPeerMcp: boolean;
+    groupId?: string;
+    role?: "lead" | "sub";
+    label?: string;
+    parentSessionKey?: string;
   }): Promise<ManagedSession> {
     const sessionKey = buildSessionKey(options.agent, options.sessionName);
     const existing = this.sessions.get(sessionKey);
     if (existing && existing.record.status !== "closed" && existing.record.status !== "error") {
+      if (options.parentSessionKey && !existing.record.parentSessionKey) {
+        existing.record.parentSessionKey = options.parentSessionKey;
+      }
       return existing;
     }
 
@@ -160,6 +171,10 @@ export class AcpPool extends EventEmitter {
       isolateWorktree: boolean;
       callDepth: number;
       injectPeerMcp: boolean;
+      groupId?: string;
+      role?: "lead" | "sub";
+      label?: string;
+      parentSessionKey?: string;
     },
   ): Promise<ManagedSession> {
     const workspace = ensureSessionWorkspace(
@@ -171,6 +186,10 @@ export class AcpPool extends EventEmitter {
     const now = Date.now();
     const record: SessionRecord = {
       sessionKey,
+      groupId: options.groupId ?? "grp-default",
+      role: options.role ?? "lead",
+      label: options.label ?? options.sessionName,
+      parentSessionKey: options.parentSessionKey,
       agent: options.agent,
       name: options.sessionName,
       baseCwd: workspace.baseCwd,
@@ -251,6 +270,7 @@ export class AcpPool extends EventEmitter {
           callerAgent: options.agent,
           callerSession: sessionKey,
           depth: options.callDepth,
+          groupId: record.groupId,
         });
         builder.withMcpServer({
           name: "agent-hub-peers",
@@ -372,6 +392,10 @@ export class AcpPool extends EventEmitter {
       isolateWorktree: Boolean(options.isolateWorktree),
       callDepth: options.callDepth ?? 0,
       injectPeerMcp: options.injectPeerMcp ?? true,
+      groupId: options.groupId,
+      role: options.role,
+      label: options.label,
+      parentSessionKey: options.parentSessionKey,
     });
 
     const executeTurn = async (): Promise<RunTurnResult> => {
@@ -405,6 +429,7 @@ export class AcpPool extends EventEmitter {
               this.emitEvent({
                 type: "agent_chunk",
                 sessionKey: managed.record.sessionKey,
+                groupId: managed.record.groupId,
                 agent: managed.record.agent,
                 channel: "message",
                 text: update.content.text,
@@ -416,6 +441,7 @@ export class AcpPool extends EventEmitter {
               this.emitEvent({
                 type: "agent_chunk",
                 sessionKey: managed.record.sessionKey,
+                groupId: managed.record.groupId,
                 agent: managed.record.agent,
                 channel: "thought",
                 text: update.content.text,
@@ -431,6 +457,7 @@ export class AcpPool extends EventEmitter {
             this.emitEvent({
               type: "tool_event",
               sessionKey: managed.record.sessionKey,
+              groupId: managed.record.groupId,
               agent: managed.record.agent,
               toolCallId: update.toolCallId,
               title,
@@ -443,6 +470,7 @@ export class AcpPool extends EventEmitter {
             this.emitEvent({
               type: "tool_event",
               sessionKey: managed.record.sessionKey,
+              groupId: managed.record.groupId,
               agent: managed.record.agent,
               toolCallId: update.toolCallId,
               title: update.title || managed.record.lastTool || update.toolCallId,

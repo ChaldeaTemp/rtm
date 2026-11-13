@@ -3,744 +3,173 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Agent Hub · 多 Agent 协同中枢</title>
-  <style>
-    :root {
-      --bg: #0f1117;
-      --panel: #161a23;
-      --panel-2: #1d2230;
-      --border: #2a3142;
-      --text: #e6ebf5;
-      --muted: #8b95ad;
-      --accent: #5b8cff;
-      --accent-soft: rgba(91, 140, 255, 0.14);
-      --green: #3ddc97;
-      --amber: #f7b955;
-      --red: #ff6b6b;
-      --purple: #b388ff;
-    }
-    * { box-sizing: border-box; }
-    html, body {
-      margin: 0;
-      height: 100%;
-      background: var(--bg);
-      color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-      font-size: 14px;
-    }
-    .layout {
-      display: grid;
-      grid-template-rows: 56px 1fr;
-      height: 100vh;
-    }
-    header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 16px;
-      border-bottom: 1px solid var(--border);
-      background: var(--panel);
-      gap: 12px;
-    }
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      font-weight: 600;
-      letter-spacing: 0.2px;
-    }
-    .dot {
-      width: 9px;
-      height: 9px;
-      border-radius: 50%;
-      background: var(--amber);
-    }
-    .dot.ok { background: var(--green); }
-    .cwd-pill {
-      color: var(--muted);
-      font-family: Consolas, monospace;
-      font-size: 12px;
-      background: var(--panel-2);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 4px 8px;
-      max-width: 300px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .controls {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-    .lead-group {
-      display: inline-flex;
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 3px;
-      gap: 4px;
-    }
-    .lead-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      border: none;
-      background: transparent;
-      color: var(--muted);
-      padding: 5px 12px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-weight: 500;
-      transition: all 0.15s;
-    }
-    .auth-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--amber);
-      display: inline-block;
-    }
-    .auth-dot.ready { background: var(--green); }
-    .auth-dot.down { background: var(--red); }
-    .lead-btn:hover { color: var(--text); }
-    .lead-btn.active {
-      background: var(--accent);
-      color: #fff;
-    }
-    select {
-      background: var(--panel-2);
-      color: var(--text);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 6px 10px;
-      outline: none;
-    }
-    main {
-      display: grid;
-      grid-template-columns: 1fr 380px;
-      min-height: 0;
-    }
-    .chat-pane {
-      display: grid;
-      grid-template-rows: 1fr auto;
-      border-right: 1px solid var(--border);
-      min-height: 0;
-    }
-    .messages {
-      overflow-y: auto;
-      padding: 18px 20px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .msg {
-      padding: 12px 14px;
-      border-radius: 10px;
-      border: 1px solid var(--border);
-      background: var(--panel);
-      max-width: 92%;
-      white-space: pre-wrap;
-      line-height: 1.55;
-    }
-    .msg.user {
-      align-self: flex-end;
-      background: var(--accent-soft);
-      border-color: rgba(91, 140, 255, 0.35);
-    }
-    .msg.system-divider {
-      align-self: center;
-      font-size: 12px;
-      color: var(--muted);
-      background: transparent;
-      border-style: dashed;
-      padding: 4px 12px;
-    }
-    .msg-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      font-size: 12px;
-      color: var(--muted);
-      margin-bottom: 6px;
-    }
-    .badge {
-      display: inline-block;
-      font-size: 11px;
-      padding: 2px 7px;
-      border-radius: 999px;
-      border: 1px solid var(--border);
-      background: var(--panel-2);
-      color: var(--text);
-    }
-    .badge.busy { border-color: var(--amber); color: var(--amber); }
-    .badge.idle { border-color: var(--green); color: var(--green); }
-    .badge.error { border-color: var(--red); color: var(--red); }
-    .thought-box {
-      margin-top: 6px;
-      padding: 8px 10px;
-      background: #11151d;
-      border-left: 2px solid var(--purple);
-      font-size: 12px;
-      color: var(--muted);
-      white-space: pre-wrap;
-    }
-    .tool-chips {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-top: 8px;
-    }
-    .tool-chip {
-      font-size: 11px;
-      font-family: Consolas, monospace;
-      padding: 2px 8px;
-      border-radius: 6px;
-      background: rgba(179, 136, 255, 0.12);
-      border: 1px solid rgba(179, 136, 255, 0.3);
-      color: #d6c2ff;
-    }
-    .composer {
-      padding: 12px 16px;
-      border-top: 1px solid var(--border);
-      background: var(--panel);
-      display: flex;
-      gap: 10px;
-      align-items: flex-end;
-    }
-    textarea {
-      flex: 1;
-      resize: none;
-      min-height: 46px;
-      max-height: 160px;
-      background: var(--bg);
-      color: var(--text);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 10px 12px;
-      font-family: inherit;
-      font-size: 14px;
-      outline: none;
-    }
-    textarea:focus { border-color: var(--accent); }
-    button.send-btn {
-      background: var(--accent);
-      color: #fff;
-      border: none;
-      border-radius: 8px;
-      padding: 11px 18px;
-      font-weight: 600;
-      cursor: pointer;
-    }
-    button.send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .side-pane {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      padding: 14px;
-      overflow-y: auto;
-      background: #12151e;
-    }
-    .card {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 12px;
-    }
-    .card h3 {
-      margin: 0 0 10px 0;
-      font-size: 13px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .item {
-      padding: 8px 10px;
-      border-radius: 8px;
-      background: var(--panel-2);
-      border: 1px solid var(--border);
-      margin-bottom: 8px;
-    }
-    .item:last-child { margin-bottom: 0; }
-    .item-top {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-    }
-    .mini-btn {
-      font-size: 11px;
-      padding: 3px 8px;
-      border-radius: 5px;
-      border: 1px solid var(--border);
-      background: var(--bg);
-      color: var(--text);
-      cursor: pointer;
-    }
-    .mini-btn:hover { border-color: var(--accent); }
-    .mini-btn.danger:hover { border-color: var(--red); color: var(--red); }
-    .mono-sub {
-      font-family: Consolas, monospace;
-      font-size: 11px;
-      color: var(--muted);
-      margin-top: 4px;
-      word-break: break-all;
-    }
-    .perm-banner {
-      border-color: var(--amber);
-      background: rgba(247, 185, 85, 0.08);
-    }
-    .perm-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-top: 8px;
-    }
-    .stream-log {
-      font-family: Consolas, monospace;
-      font-size: 11px;
-      color: var(--muted);
-      max-height: 220px;
-      overflow-y: auto;
-      white-space: pre-wrap;
-      line-height: 1.45;
-    }
-  </style>
+  <title>Agent Hub — 多 Agent 任务协同台</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+    rel="stylesheet"
+    media="print"
+    onload="this.media='all'"
+  />
+  <link rel="stylesheet" href="/ui/styles.css" />
 </head>
 <body>
-  <div class="layout">
-    <header>
-      <div class="brand">
-        <span id="wsDot" class="dot"></span>
-        <span>Agent Hub</span>
-        <span id="cwdPill" class="cwd-pill" title="">-</span>
+  <div id="workbench" class="workbench">
+    <!-- Left Sidebar: Task Groups & Session Tree -->
+    <aside class="sidebar">
+      <div class="brand-bar">
+        <div class="brand-top">
+          <div class="brand-title">
+            <span class="brand-mark">A</span>
+            <span>agent-hub</span>
+          </div>
+          <div class="ws-status">
+            <span id="wsDot" class="dot"></span>
+            <span id="wsText">connecting</span>
+          </div>
+        </div>
+        <div id="cwdPill" class="cwd-line" title="">-</div>
       </div>
-      <div class="controls">
-        <span style="color:var(--muted);font-size:12px;">主导 Agent:</span>
-        <div class="lead-group" id="leadButtons">
-          <button class="lead-btn" data-agent="claude"><span class="auth-dot" data-auth-dot="claude"></span>Claude</button>
-          <button class="lead-btn" data-agent="codex"><span class="auth-dot" data-auth-dot="codex"></span>Codex</button>
-          <button class="lead-btn" data-agent="agy"><span class="auth-dot" data-auth-dot="agy"></span>Antigravity</button>
+
+      <div class="new-task-area">
+        <button id="toggleNewTaskBtn" class="alma-btn alma-btn-primary new-task-main" type="button">
+          + 新建并行任务
+        </button>
+        <div class="quick-launch-row" title="一键以指定主导 Agent 启动新的并行任务">
+          <button class="quick-btn" data-quick-lead="claude" type="button">+ claude</button>
+          <button class="quick-btn" data-quick-lead="codex" type="button">+ codex</button>
+          <button class="quick-btn" data-quick-lead="agy" type="button">+ agy</button>
         </div>
-        <select id="permSelect" title="权限审批策略">
-          <option value="approve-all">自动放行全部</option>
-          <option value="approve-reads">仅放行只读</option>
-          <option value="manual">手动弹窗审批</option>
-        </select>
+
+        <form id="newTaskPopover" class="new-task-popover" hidden>
+          <input
+            id="newTaskTitleInput"
+            class="text-input"
+            type="text"
+            placeholder="任务名称（留空自动命名）"
+            autocomplete="off"
+          />
+          <div class="popover-agents" id="newTaskAgents">
+            <button type="button" class="popover-agent-opt active" data-agent="claude">claude</button>
+            <button type="button" class="popover-agent-opt" data-agent="codex">codex</button>
+            <button type="button" class="popover-agent-opt" data-agent="agy">agy</button>
+          </div>
+          <div class="popover-actions">
+            <button id="cancelNewTaskBtn" type="button" class="alma-btn alma-btn-sm">取消</button>
+            <button type="submit" class="alma-btn alma-btn-primary alma-btn-sm">创建</button>
+          </div>
+        </form>
       </div>
-    </header>
 
-    <main>
-      <section class="chat-pane">
-        <div class="messages" id="messages"></div>
-        <div class="composer">
-          <textarea id="promptInput" placeholder="输入任务指令给当前主导 Agent（Enter 发送，Shift+Enter 换行）..."></textarea>
-          <button id="sendBtn" class="send-btn">发送</button>
+      <div class="section-label">
+        <span><span class="num">01</span>/ 任务分组</span>
+        <span id="groupCountBadge" class="mono">0</span>
+      </div>
+
+      <div id="groupList" class="group-list"></div>
+
+      <div class="sidebar-footer">
+        <div id="adapterPills" class="adapter-pills">
+          <span class="adapter-pill" data-adapter="claude"><span class="dot" data-auth-dot="claude"></span>claude</span>
+          <span class="adapter-pill" data-adapter="codex"><span class="dot" data-auth-dot="codex"></span>codex</span>
+          <span class="adapter-pill" data-adapter="agy"><span class="dot" data-auth-dot="agy"></span>agy</span>
         </div>
-      </section>
+        <button id="themeToggleBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="切换浅色 / 深色主题">
+          深色
+        </button>
+      </div>
+    </aside>
 
-      <aside class="side-pane">
-        <div id="permCard" class="card perm-banner" style="display:none;">
-          <h3>待审批权限请求</h3>
-          <div id="permList"></div>
+    <!-- Center Stage -->
+    <main class="stage">
+      <header class="stage-header">
+        <div class="stage-title-group">
+          <h1 id="stageTaskTitle" class="stage-task-title" title="点击重命名当前任务">-</h1>
+          <span id="streamBadge" class="stream-badge">主导会话</span>
         </div>
 
-        <div class="card">
-          <h3>活跃 ACP 会话</h3>
-          <div id="sessionList"><div class="mono-sub">暂无活跃会话</div></div>
+        <div class="stage-controls">
+          <div id="leadSwitcher" class="lead-switcher" title="为当前任务设置或切换主导 Agent">
+            <span class="lead-switch-label">主导</span>
+            <button class="lead-pill" data-agent="claude" type="button">claude</button>
+            <button class="lead-pill" data-agent="codex" type="button">codex</button>
+            <button class="lead-pill" data-agent="agy" type="button">agy</button>
+          </div>
+
+          <button id="backToLeadBtn" class="alma-btn alma-btn-outline" type="button" hidden>
+            ← 返回主导会话
+          </button>
+
+          <select id="permSelect" class="perm-select" title="工具审批策略">
+            <option value="approve-all">权限：自动批准</option>
+            <option value="approve-reads">权限：仅只读放行</option>
+            <option value="manual">权限：全部人工确认</option>
+          </select>
+
+          <button id="toggleInspectorBtn" class="alma-btn alma-btn-outline" type="button">
+            面板
+          </button>
         </div>
+      </header>
 
-        <div class="card">
-          <h3>跨 Agent 派单任务</h3>
-          <div id="taskList"><div class="mono-sub">暂无派单记录</div></div>
-        </div>
+      <div id="sessionTabs" class="session-tabs" hidden></div>
 
-        <div class="card">
-          <h3>实时协同事件流</h3>
-          <div id="streamLog" class="stream-log">等待事件...</div>
-        </div>
-      </aside>
-    </main>
-  </div>
+      <div id="permBanner" class="perm-banner" hidden></div>
 
-  <script>
-    const state = {
-      leadAgent: "claude",
-      permissionMode: "approve-all",
-      sessions: new Map(),
-      tasks: new Map(),
-      pendingPermissions: new Map(),
-      activeAssistantEl: null,
-      activeAssistantAgent: null,
-      activeTextEl: null,
-      activeThoughtEl: null,
-      activeToolsEl: null,
-      sending: false,
-    };
+      <section id="messages" class="messages"></section>
 
-    const messagesEl = document.getElementById("messages");
-    const promptInput = document.getElementById("promptInput");
-    const sendBtn = document.getElementById("sendBtn");
-    const wsDot = document.getElementById("wsDot");
-    const cwdPill = document.getElementById("cwdPill");
-    const permSelect = document.getElementById("permSelect");
-    const sessionListEl = document.getElementById("sessionList");
-    const taskListEl = document.getElementById("taskList");
-    const permCardEl = document.getElementById("permCard");
-    const permListEl = document.getElementById("permList");
-    const streamLogEl = document.getElementById("streamLog");
-
-    function appendLog(line) {
-      const ts = new Date().toLocaleTimeString();
-      streamLogEl.textContent += `\n[${ts}] ${line}`;
-      if (streamLogEl.textContent.length > 8000) {
-        streamLogEl.textContent = streamLogEl.textContent.slice(-6000);
-      }
-      streamLogEl.scrollTop = streamLogEl.scrollHeight;
-    }
-
-    function renderLeadButtons() {
-      document.querySelectorAll(".lead-btn").forEach((btn) => {
-        btn.classList.toggle("active", btn.dataset.agent === state.leadAgent);
-      });
-    }
-
-    function renderSessions() {
-      const list = [...state.sessions.values()];
-      if (!list.length) {
-        sessionListEl.innerHTML = `<div class="mono-sub">暂无活跃会话</div>`;
-        return;
-      }
-      sessionListEl.innerHTML = "";
-      for (const s of list) {
-        const div = document.createElement("div");
-        div.className = "item";
-        const usageText = s.usage?.usedTokens
-          ? ` | ctx: ${s.usage.usedTokens}${s.usage.maxTokens ? "/" + s.usage.maxTokens : ""}`
-          : "";
-        div.innerHTML = `
-          <div class="item-top">
-            <strong>${s.sessionKey}</strong>
-            <div>
-              <span class="badge ${s.status}">${s.status}</span>
-              ${s.status === "busy" ? `<button class="mini-btn danger" data-cancel="${s.sessionKey}">Cancel</button>` : ""}
+      <footer class="composer-wrap">
+        <div class="alma-box composer-box">
+          <span id="composerLabel" class="alma-box-label">主导会话</span>
+          <span class="alma-box-corner-tl">+</span>
+          <span class="alma-box-corner-tr">+</span>
+          <span class="alma-box-corner-bl">+</span>
+          <span class="alma-box-corner-br">+</span>
+          <textarea
+            id="promptInput"
+            class="composer-input"
+            rows="2"
+            placeholder="输入任务指令，Enter 发送，Shift+Enter 换行；当前任务与其它并行任务互不阻塞。"
+          ></textarea>
+          <div class="composer-foot">
+            <span id="composerHint" class="composer-hint">主导会话可调用 peer_ask / peer_dispatch 委派子会话</span>
+            <div class="composer-actions">
+              <button id="stopSessionBtn" class="alma-btn alma-btn-danger" type="button" hidden>停止</button>
+              <button id="sendBtn" class="alma-btn alma-btn-primary" type="button">发送 ↵</button>
             </div>
           </div>
-          <div class="mono-sub">${s.isWorktree ? "worktree: " + (s.branch || s.effectiveCwd) : s.effectiveCwd}${usageText}</div>
-          ${s.lastTool ? `<div class="mono-sub">last tool: ${escapeHtml(s.lastTool)}</div>` : ""}
-        `;
-        sessionListEl.appendChild(div);
-      }
-      sessionListEl.querySelectorAll("[data-cancel]").forEach((btn) => {
-        btn.onclick = () => {
-          fetch("/api/peer/cancel", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sessionKey: btn.dataset.cancel }),
-          });
-        };
-      });
-    }
-
-    function renderTasks() {
-      const list = [...state.tasks.values()].slice(-10).reverse();
-      if (!list.length) {
-        taskListEl.innerHTML = `<div class="mono-sub">暂无派单记录</div>`;
-        return;
-      }
-      taskListEl.innerHTML = "";
-      for (const t of list) {
-        const div = document.createElement("div");
-        div.className = "item";
-        const statusCls = t.status === "completed" ? "idle" : t.status === "failed" ? "error" : "busy";
-        div.innerHTML = `
-          <div class="item-top">
-            <span>${t.callerAgent} → <strong>${t.targetAgent}</strong></span>
-            <span class="badge ${statusCls}">${t.status}</span>
-          </div>
-          <div class="mono-sub">${escapeHtml(t.prompt.slice(0, 120))}</div>
-          ${t.branch ? `<div class="mono-sub">branch: ${escapeHtml(t.branch)}</div>` : ""}
-        `;
-        taskListEl.appendChild(div);
-      }
-    }
-
-    function renderPermissions() {
-      const list = [...state.pendingPermissions.values()];
-      permCardEl.style.display = list.length ? "block" : "none";
-      permListEl.innerHTML = "";
-      for (const p of list) {
-        const div = document.createElement("div");
-        div.className = "item";
-        div.innerHTML = `
-          <div><strong>[${p.sessionKey}]</strong> ${escapeHtml(p.toolTitle)}</div>
-          <div class="mono-sub">${escapeHtml(JSON.stringify(p.rawInput ?? {}))}</div>
-          <div class="perm-actions"></div>
-        `;
-        const actionsEl = div.querySelector(".perm-actions");
-        for (const opt of p.options) {
-          const btn = document.createElement("button");
-          btn.className = "mini-btn";
-          btn.textContent = opt.name;
-          btn.onclick = () => resolvePerm(p.requestId, opt.optionId);
-          actionsEl.appendChild(btn);
-        }
-        const cancelBtn = document.createElement("button");
-        cancelBtn.className = "mini-btn danger";
-        cancelBtn.textContent = "取消";
-        cancelBtn.onclick = () => resolvePerm(p.requestId, "cancel");
-        actionsEl.appendChild(cancelBtn);
-        permListEl.appendChild(div);
-      }
-    }
-
-    function resolvePerm(requestId, optionId) {
-      fetch("/api/permissions/resolve", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ requestId, optionId }),
-      });
-    }
-
-    function escapeHtml(str) {
-      return String(str)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
-    }
-
-    function addUserBubble(text) {
-      const el = document.createElement("div");
-      el.className = "msg user";
-      el.textContent = text;
-      messagesEl.appendChild(el);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-    }
-
-    function addDivider(text) {
-      const el = document.createElement("div");
-      el.className = "msg system-divider";
-      el.textContent = text;
-      messagesEl.appendChild(el);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-    }
-
-    function ensureAssistantBubble(agent) {
-      if (state.activeAssistantEl && state.activeAssistantAgent === agent) {
-        return;
-      }
-      const box = document.createElement("div");
-      box.className = "msg";
-      box.innerHTML = `
-        <div class="msg-head">
-          <strong>${agent.toUpperCase()} (Lead)</strong>
-          <span class="badge busy">streaming</span>
         </div>
-        <div class="msg-body"></div>
-        <details class="thought-wrap" style="display:none;margin-top:6px;">
-          <summary style="cursor:pointer;font-size:12px;color:var(--muted);">思考过程</summary>
-          <div class="thought-box"></div>
-        </details>
-        <div class="tool-chips"></div>
-      `;
-      messagesEl.appendChild(box);
-      state.activeAssistantEl = box;
-      state.activeAssistantAgent = agent;
-      state.activeTextEl = box.querySelector(".msg-body");
-      state.activeThoughtEl = box.querySelector(".thought-box");
-      state.activeToolsEl = box.querySelector(".tool-chips");
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-    }
+      </footer>
+    </main>
 
-    function finishAssistantBubble() {
-      if (state.activeAssistantEl) {
-        const badge = state.activeAssistantEl.querySelector(".badge");
-        if (badge) {
-          badge.className = "badge idle";
-          badge.textContent = "done";
-        }
-      }
-      state.activeAssistantEl = null;
-      state.activeAssistantAgent = null;
-      state.activeTextEl = null;
-      state.activeThoughtEl = null;
-      state.activeToolsEl = null;
-    }
+    <!-- Right Inspector -->
+    <aside class="inspector">
+      <div class="inspector-section sessions-sec">
+        <div class="section-label">
+          <span><span class="num">01</span>/ 当前任务会话</span>
+          <span id="inspSessionCount" class="mono">0</span>
+        </div>
+        <div id="inspSessions" class="inspector-list"></div>
+      </div>
 
-    async function sendPrompt() {
-      const prompt = promptInput.value.trim();
-      if (!prompt || state.sending) return;
-      state.sending = true;
-      sendBtn.disabled = true;
-      promptInput.value = "";
-      addUserBubble(prompt);
-      ensureAssistantBubble(state.leadAgent);
+      <div class="inspector-section tasks-sec">
+        <div class="section-label">
+          <span><span class="num">02</span>/ 协同委派记录</span>
+          <span id="inspTaskCount" class="mono">0</span>
+        </div>
+        <div id="inspTasks" class="inspector-list"></div>
+      </div>
 
-      try {
-        const res = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt }),
-        });
-        const data = await res.json();
-        if (!res.ok || data.ok === false) {
-          if (state.activeTextEl) {
-            state.activeTextEl.textContent += `\n[Error] ${data.error || res.status}`;
-          }
-        } else if (state.activeTextEl && !state.activeTextEl.textContent) {
-          state.activeTextEl.textContent = data.outputText || "(empty)";
-        }
-      } catch (err) {
-        if (state.activeTextEl) {
-          state.activeTextEl.textContent += `\n[Network Error] ${err.message}`;
-        }
-      } finally {
-        finishAssistantBubble();
-        state.sending = false;
-        sendBtn.disabled = false;
-        promptInput.focus();
-      }
-    }
+      <div class="inspector-section logs-sec">
+        <div class="section-label">
+          <span><span class="num">03</span>/ 事件日志</span>
+        </div>
+        <div id="logFeed" class="log-feed"></div>
+      </div>
+    </aside>
+  </div>
 
-    document.querySelectorAll(".lead-btn").forEach((btn) => {
-      btn.onclick = async () => {
-        const agent = btn.dataset.agent;
-        await fetch("/api/lead", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ agent }),
-        });
-      };
-    });
-
-    permSelect.onchange = async () => {
-      await fetch("/api/permissions/mode", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: permSelect.value }),
-      });
-    };
-
-    sendBtn.onclick = sendPrompt;
-    promptInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        sendPrompt();
-      }
-    });
-
-    function connectWs() {
-      const proto = location.protocol === "https:" ? "wss:" : "ws:";
-      const ws = new WebSocket(`${proto}//${location.host}/ws`);
-      ws.onopen = () => {
-        wsDot.classList.add("ok");
-        appendLog("WebSocket connected");
-      };
-      ws.onclose = () => {
-        wsDot.classList.remove("ok");
-        appendLog("WebSocket disconnected, retrying...");
-        setTimeout(connectWs, 1500);
-      };
-      ws.onmessage = (evt) => {
-        const msg = JSON.parse(evt.data);
-        if (msg.type === "snapshot") {
-          state.leadAgent = msg.leadAgent;
-          state.permissionMode = msg.permissionMode;
-          permSelect.value = msg.permissionMode;
-          cwdPill.textContent = msg.baseCwd;
-          cwdPill.title = msg.baseCwd;
-          state.sessions.clear();
-          msg.sessions.forEach((s) => state.sessions.set(s.sessionKey, s));
-          state.tasks.clear();
-          msg.tasks.forEach((t) => state.tasks.set(t.taskId, t));
-          state.pendingPermissions.clear();
-          msg.pendingPermissions.forEach((p) => state.pendingPermissions.set(p.requestId, p));
-          renderLeadButtons();
-          renderSessions();
-          renderTasks();
-          renderPermissions();
-          if (messagesEl.children.length === 0 && msg.ledger.length > 0) {
-            for (const turn of msg.ledger) {
-              addUserBubble(turn.userText);
-              ensureAssistantBubble(turn.leadAgent);
-              if (state.activeTextEl) state.activeTextEl.textContent = turn.assistantSummary;
-              finishAssistantBubble();
-            }
-          }
-        } else if (msg.type === "lead_changed") {
-          state.leadAgent = msg.leadAgent;
-          renderLeadButtons();
-          addDivider(`主导已切换：${msg.previousLead} → ${msg.leadAgent}`);
-          appendLog(`Lead changed: ${msg.previousLead} -> ${msg.leadAgent}`);
-        } else if (msg.type === "permission_mode_changed") {
-          state.permissionMode = msg.permissionMode;
-          permSelect.value = msg.permissionMode;
-          appendLog(`Permission mode: ${msg.permissionMode}`);
-        } else if (msg.type === "session_updated") {
-          state.sessions.set(msg.session.sessionKey, msg.session);
-          renderSessions();
-        } else if (msg.type === "task_updated") {
-          state.tasks.set(msg.task.taskId, msg.task);
-          renderTasks();
-          appendLog(`Task ${msg.task.taskId} [${msg.task.targetAgent}] -> ${msg.task.status}`);
-        } else if (msg.type === "permission_requested") {
-          state.pendingPermissions.set(msg.permission.requestId, msg.permission);
-          renderPermissions();
-          appendLog(`Permission requested: ${msg.permission.sessionKey} (${msg.permission.toolTitle})`);
-        } else if (msg.type === "permission_resolved") {
-          state.pendingPermissions.delete(msg.requestId);
-          renderPermissions();
-        } else if (msg.type === "agent_chunk") {
-          if (msg.sessionKey.endsWith(":main") && msg.agent === state.leadAgent && state.sending) {
-            ensureAssistantBubble(msg.agent);
-            if (msg.channel === "message" && state.activeTextEl) {
-              state.activeTextEl.textContent += msg.text;
-            } else if (msg.channel === "thought" && state.activeThoughtEl) {
-              state.activeThoughtEl.parentElement.style.display = "block";
-              state.activeThoughtEl.textContent += msg.text;
-            }
-            messagesEl.scrollTop = messagesEl.scrollHeight;
-          }
-        } else if (msg.type === "tool_event") {
-          appendLog(`[${msg.sessionKey}] tool ${msg.title} (${msg.status || "start"})`);
-          if (msg.sessionKey.endsWith(":main") && state.activeToolsEl) {
-            const chip = document.createElement("span");
-            chip.className = "tool-chip";
-            chip.textContent = `${msg.title}${msg.status ? ` · ${msg.status}` : ""}`;
-            state.activeToolsEl.appendChild(chip);
-          }
-        }
-      };
-    }
-
-    async function loadAdapterHealth() {
-      try {
-        const res = await fetch("/api/health");
-        const data = await res.json();
-        if (Array.isArray(data.adapters)) {
-          for (const item of data.adapters) {
-            const btn = document.querySelector(`.lead-btn[data-agent="${item.agent}"]`);
-            const dot = document.querySelector(`[data-auth-dot="${item.agent}"]`);
-            if (dot) {
-              dot.classList.remove("ready", "down");
-              if (!item.available) dot.classList.add("down");
-              else if (item.authReady) dot.classList.add("ready");
-            }
-            if (btn) {
-              btn.title = item.authReady
-                ? `${item.agent}: 已就绪`
-                : (item.authHint || item.reason || `${item.agent}: 未就绪`);
-            }
-          }
-        }
-      } catch {
-        // ignore transient health fetch error
-      }
-    }
-
-    connectWs();
-    loadAdapterHealth();
-  </script>
+  <script type="module" src="/ui/app.js"></script>
 </body>
 </html>

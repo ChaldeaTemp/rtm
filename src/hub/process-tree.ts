@@ -177,10 +177,12 @@ export function resolvePeerMcpLaunch(params: {
   callerAgent: AgentId;
   callerSession: string;
   depth: number;
+  groupId?: string;
 }): { command: string; args: string[] } {
   const tsxCli = path.join(PROJECT_ROOT, "node_modules", "tsx", "dist", "cli.mjs");
   const mcpTs = path.join(PROJECT_ROOT, "src", "mcp", "peer-mcp-server.ts");
   const mcpJs = path.join(PROJECT_ROOT, "dist", "mcp", "peer-mcp-server.js");
+  const extraGroupArgs = params.groupId ? ["--group-id", params.groupId] : [];
 
   if (fs.existsSync(mcpTs) && fs.existsSync(tsxCli)) {
     return {
@@ -196,6 +198,7 @@ export function resolvePeerMcpLaunch(params: {
         params.callerSession,
         "--depth",
         String(params.depth),
+        ...extraGroupArgs,
       ],
     };
   }
@@ -212,6 +215,7 @@ export function resolvePeerMcpLaunch(params: {
       params.callerSession,
       "--depth",
       String(params.depth),
+      ...extraGroupArgs,
     ],
   };
 }

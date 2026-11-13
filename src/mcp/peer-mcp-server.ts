@@ -8,11 +8,13 @@ function parseArgs(argv: string[]): {
   callerAgent: string;
   callerSession: string;
   depth: number;
+  groupId?: string;
 } {
   let hubUrl = "http://127.0.0.1:4317";
   let callerAgent = "user";
   let callerSession = "main";
   let depth = 0;
+  let groupId: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -29,10 +31,13 @@ function parseArgs(argv: string[]): {
     } else if (flag === "--depth" && next) {
       depth = Number(next) || 0;
       i++;
+    } else if (flag === "--group-id" && next) {
+      groupId = next;
+      i++;
     }
   }
 
-  return { hubUrl, callerAgent, callerSession, depth };
+  return { hubUrl, callerAgent, callerSession, depth, groupId };
 }
 
 async function callHub<T>(
@@ -94,7 +99,7 @@ async function main(): Promise<void> {
         baseCwd: string;
         adapters: Array<{ agent: string; available: boolean; reason?: string }>;
         sessions: Array<{ sessionKey: string; status: string; effectiveCwd: string; branch?: string }>;
-      }>(cfg.hubUrl, "/api/health");
+      }>(cfg.hubUrl, `/api/health${cfg.groupId ? `?groupId=${encodeURIComponent(cfg.groupId)}` : ""}`);
       return {
         content: [{ type: "text", text: JSON.stringify(health, null, 2) }],
       };
@@ -129,6 +134,7 @@ async function main(): Promise<void> {
           callerAgent: cfg.callerAgent,
           callerSession: cfg.callerSession,
           depth: cfg.depth,
+          groupId: cfg.groupId,
         },
       });
       return {
@@ -165,6 +171,7 @@ async function main(): Promise<void> {
           callerAgent: cfg.callerAgent,
           callerSession: cfg.callerSession,
           depth: cfg.depth,
+          groupId: cfg.groupId,
         },
       });
       return {

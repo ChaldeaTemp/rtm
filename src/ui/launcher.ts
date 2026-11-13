@@ -30,7 +30,7 @@ export function openInteractiveWindow(
     if (preferAppWindow) {
       const exe = findAppBrowserExecutable();
       if (exe) {
-        const child = spawn(exe, [`--app=${url}`, "--window-size=1280,860"], {
+        const child = spawn(exe, [`--app=${url}`, "--window-size=1380,880"], {
           detached: true,
           stdio: "ignore",
           windowsHide: false,

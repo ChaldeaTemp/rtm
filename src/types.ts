@@ -17,8 +17,21 @@ export interface AdapterHealth {
   reason?: string;
 }
 
+export interface TaskGroup {
+  groupId: string;
+  title: string;
+  leadAgent: AgentId;
+  cwd: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface SessionRecord {
   sessionKey: string;
+  groupId: string;
+  role: "lead" | "sub";
+  label: string;
+  parentSessionKey?: string;
   agent: AgentId;
   name: string;
   baseCwd: string;
@@ -40,6 +53,7 @@ export interface SessionRecord {
 
 export interface TaskRecord {
   taskId: string;
+  groupId: string;
   callerAgent: AgentId | "user";
   callerSession: string;
   targetAgent: AgentId;
@@ -74,6 +88,7 @@ export interface PendingPermission {
 
 export interface LedgerTurn {
   turnId: number;
+  groupId?: string;
   timestamp: number;
   leadAgent: AgentId;
   userText: string;
@@ -81,21 +96,76 @@ export interface LedgerTurn {
   peerCallsSummary: string[];
 }
 
+export interface SessionToolCall {
+  toolCallId: string;
+  title: string;
+  kind?: string;
+  status?: string;
+  rawInput?: unknown;
+  timestamp: number;
+}
+
+export interface ChatMessageRecord {
+  messageId: string;
+  groupId: string;
+  streamKey: string;
+  sessionKey: string;
+  role: "user" | "caller" | "assistant" | "system";
+  senderLabel: string;
+  agent?: AgentId;
+  text: string;
+  thoughtText: string;
+  toolCalls: SessionToolCall[];
+  status: "streaming" | "done" | "error" | "cancelled";
+  timestamp: number;
+  completedAt?: number;
+}
+
 export type HubEvent =
   | {
       type: "snapshot";
+      defaultGroupId: string;
       leadAgent: AgentId;
       permissionMode: PermissionMode;
       baseCwd: string;
+      taskGroups: TaskGroup[];
       sessions: SessionRecord[];
       tasks: TaskRecord[];
       pendingPermissions: PendingPermission[];
       ledger: LedgerTurn[];
+      messages: ChatMessageRecord[];
     }
   | {
       type: "lead_changed";
       leadAgent: AgentId;
       previousLead: AgentId;
+      timestamp: number;
+    }
+  | {
+      type: "group_created";
+      group: TaskGroup;
+      timestamp: number;
+    }
+  | {
+      type: "group_updated";
+      group: TaskGroup;
+      timestamp: number;
+    }
+  | {
+      type: "group_deleted";
+      groupId: string;
+      timestamp: number;
+    }
+  | {
+      type: "group_lead_changed";
+      groupId: string;
+      leadAgent: AgentId;
+      previousLead: AgentId;
+      timestamp: number;
+    }
+  | {
+      type: "message_upserted";
+      message: ChatMessageRecord;
       timestamp: number;
     }
   | {
@@ -111,6 +181,9 @@ export type HubEvent =
   | {
       type: "agent_chunk";
       sessionKey: string;
+      groupId?: string;
+      streamKey?: string;
+      messageId?: string;
       agent: AgentId;
       channel: "message" | "thought";
       text: string;
@@ -119,6 +192,9 @@ export type HubEvent =
   | {
       type: "tool_event";
       sessionKey: string;
+      groupId?: string;
+      streamKey?: string;
+      messageId?: string;
       agent: AgentId;
       toolCallId: string;
       title: string;

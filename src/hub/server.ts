@@ -7,8 +7,10 @@ import { z } from "zod";
 import {
   ALL_AGENTS,
   type AgentId,
+  type ChatMessageRecord,
   type HubEvent,
   type PermissionMode,
+  type TaskGroup,
   type TaskRecord,
 } from "../types.js";
 import { AcpPool, buildSessionKey } from "./acp-pool.js";
@@ -24,18 +26,42 @@ const PermissionModeSchema = z.enum(["approve-all", "approve-reads", "manual"]);
 
 const LeadBodySchema = z.object({
   agent: AgentIdSchema,
+  groupId: z.string().optional(),
 });
 
 const ChatBodySchema = z.object({
+  groupId: z.string().optional(),
   prompt: z.string().min(1),
   leadAgent: AgentIdSchema.optional(),
   cwd: z.string().optional(),
   session: z.string().optional(),
 });
 
+const CreateGroupBodySchema = z.object({
+  title: z.string().optional(),
+  leadAgent: AgentIdSchema.optional(),
+  cwd: z.string().optional(),
+});
+
+const UpdateGroupBodySchema = z.object({
+  groupId: z.string().min(1),
+  title: z.string().optional(),
+  leadAgent: AgentIdSchema.optional(),
+});
+
+const DeleteGroupBodySchema = z.object({
+  groupId: z.string().min(1),
+});
+
+const SessionChatBodySchema = z.object({
+  sessionKey: z.string().min(1),
+  prompt: z.string().min(1),
+});
+
 const PeerCallBodySchema = z.object({
   targetAgent: AgentIdSchema,
   prompt: z.string().min(1),
+  groupId: z.string().optional(),
   session: z.string().optional(),
   cwd: z.string().optional(),
   isolateWorktree: z.boolean().optional().default(false),
@@ -105,13 +131,35 @@ function sendJson(res: ServerResponse, statusCode: number, payload: unknown): vo
   res.end(body);
 }
 
+function autoTitleFromPrompt(prompt: string): string {
+  const firstLine = prompt
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0) ?? "";
+  if (!firstLine) {
+    return "新任务";
+  }
+  return firstLine.length > 26 ? `${firstLine.slice(0, 26)}…` : firstLine;
+}
+
+function cloneMessage(msg: ChatMessageRecord): ChatMessageRecord {
+  return {
+    ...msg,
+    toolCalls: msg.toolCalls.map((t) => ({ ...t })),
+  };
+}
+
 export class AgentHubServer {
   readonly baseCwd: string;
   readonly pool = new AcpPool();
-  readonly ledger = new ThreadLedger();
-  private leadAgent: AgentId;
+  private groups = new Map<string, TaskGroup>();
+  private ledgers = new Map<string, ThreadLedger>();
+  private defaultGroupId = "grp-default";
+  private groupCounter = 1;
   private tasks = new Map<string, TaskRecord>();
   private taskWaiters = new Map<string, Array<() => void>>();
+  private messages = new Map<string, ChatMessageRecord>();
+  private activeAssistantBySession = new Map<string, ChatMessageRecord>();
   private server: http.Server | undefined;
   private wss: WebSocketServer | undefined;
   private wsClients = new Set<WebSocket>();
@@ -121,15 +169,80 @@ export class AgentHubServer {
 
   constructor(options: HubServerOptions) {
     this.baseCwd = path.resolve(options.baseCwd);
-    this.leadAgent = options.defaultLead ?? "claude";
     this.writeRuntimeFile = options.writeRuntimeFile ?? true;
     if (options.permissionMode) {
       this.pool.setPermissionMode(options.permissionMode);
     }
 
+    const now = Date.now();
+    const initialGroup: TaskGroup = {
+      groupId: this.defaultGroupId,
+      title: "任务 1",
+      leadAgent: options.defaultLead ?? "claude",
+      cwd: this.baseCwd,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.groups.set(initialGroup.groupId, initialGroup);
+    this.ledgers.set(initialGroup.groupId, new ThreadLedger());
+
     this.pool.on("hub_event", (event: HubEvent) => {
+      if (event.type === "agent_chunk") {
+        const active = this.activeAssistantBySession.get(event.sessionKey);
+        if (active) {
+          if (event.channel === "message") {
+            active.text += event.text;
+          } else if (event.channel === "thought") {
+            active.thoughtText += event.text;
+          }
+          event.messageId = active.messageId;
+          event.streamKey = active.streamKey;
+          event.groupId = active.groupId;
+        }
+      } else if (event.type === "tool_event") {
+        const active = this.activeAssistantBySession.get(event.sessionKey);
+        if (active) {
+          const existingTool = active.toolCalls.find((t) => t.toolCallId === event.toolCallId);
+          if (existingTool) {
+            existingTool.title = event.title || existingTool.title;
+            if (event.kind) existingTool.kind = event.kind;
+            if (event.status) existingTool.status = event.status;
+            if (event.rawInput !== undefined) existingTool.rawInput = event.rawInput;
+            existingTool.timestamp = event.timestamp;
+          } else {
+            active.toolCalls.push({
+              toolCallId: event.toolCallId,
+              title: event.title,
+              kind: event.kind,
+              status: event.status,
+              rawInput: event.rawInput,
+              timestamp: event.timestamp,
+            });
+          }
+          event.messageId = active.messageId;
+          event.streamKey = active.streamKey;
+          event.groupId = active.groupId;
+        }
+      }
       this.broadcast(event);
     });
+  }
+
+  private getOrCreateLedger(groupId: string): ThreadLedger {
+    let ledger = this.ledgers.get(groupId);
+    if (!ledger) {
+      ledger = new ThreadLedger();
+      this.ledgers.set(groupId, ledger);
+    }
+    return ledger;
+  }
+
+  get ledger(): ThreadLedger {
+    return this.getOrCreateLedger(this.defaultGroupId);
+  }
+
+  getGroupLedger(groupId: string): ThreadLedger {
+    return this.getOrCreateLedger(groupId);
   }
 
   getUrl(): string {
@@ -140,22 +253,182 @@ export class AgentHubServer {
     return this.port;
   }
 
-  getLeadAgent(): AgentId {
-    return this.leadAgent;
+  getDefaultGroupId(): string {
+    return this.defaultGroupId;
+  }
+
+  listGroups(): TaskGroup[] {
+    return [...this.groups.values()].map((g) => ({ ...g }));
+  }
+
+  getGroup(groupId: string): TaskGroup | undefined {
+    const group = this.groups.get(groupId);
+    return group ? { ...group } : undefined;
+  }
+
+  getLeadAgent(groupId?: string): AgentId {
+    const group = this.groups.get(groupId ?? this.defaultGroupId) ?? this.groups.get(this.defaultGroupId);
+    return group?.leadAgent ?? "claude";
   }
 
   setLeadAgent(agent: AgentId): void {
-    if (this.leadAgent === agent) {
-      return;
-    }
-    const previousLead = this.leadAgent;
-    this.leadAgent = agent;
+    this.setGroupLeadAgent(this.defaultGroupId, agent);
+  }
+
+  createGroup(input?: { title?: string; leadAgent?: AgentId; cwd?: string }): TaskGroup {
+    const now = Date.now();
+    this.groupCounter += 1;
+    const rawTitle = input?.title?.trim();
+    const group: TaskGroup = {
+      groupId: `grp-${randomUUID().slice(0, 6)}`,
+      title: rawTitle && rawTitle.length > 0 ? rawTitle : `任务 ${this.groupCounter}`,
+      leadAgent: input?.leadAgent ?? this.getLeadAgent(),
+      cwd: input?.cwd ? path.resolve(input.cwd) : this.baseCwd,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.groups.set(group.groupId, group);
+    this.ledgers.set(group.groupId, new ThreadLedger());
     this.broadcast({
-      type: "lead_changed",
+      type: "group_created",
+      group: { ...group },
+      timestamp: now,
+    });
+    return { ...group };
+  }
+
+  updateGroup(input: { groupId: string; title?: string; leadAgent?: AgentId }): TaskGroup {
+    let group = this.groups.get(input.groupId);
+    if (!group) {
+      throw new Error(`Unknown task group: ${input.groupId}`);
+    }
+    const cleanTitle = input.title?.trim();
+    if (cleanTitle) {
+      group.title = cleanTitle;
+      group.updatedAt = Date.now();
+      this.broadcast({
+        type: "group_updated",
+        group: { ...group },
+        timestamp: group.updatedAt,
+      });
+    }
+    if (input.leadAgent) {
+      this.setGroupLeadAgent(group.groupId, input.leadAgent);
+      group = this.groups.get(group.groupId)!;
+    }
+    return { ...group };
+  }
+
+  setGroupLeadAgent(groupId: string, agent: AgentId): TaskGroup {
+    const group = this.groups.get(groupId);
+    if (!group) {
+      throw new Error(`Unknown task group: ${groupId}`);
+    }
+    if (group.leadAgent === agent) {
+      return { ...group };
+    }
+    const previousLead = group.leadAgent;
+    const now = Date.now();
+    group.leadAgent = agent;
+    group.updatedAt = now;
+
+    this.upsertMessage({
+      messageId: `msg-${randomUUID().slice(0, 8)}`,
+      groupId,
+      streamKey: `lead:${groupId}`,
+      sessionKey: buildSessionKey(agent, `${groupId}__lead`),
+      role: "system",
+      senderLabel: "系统",
+      text: `主导会话已切换：${previousLead} → ${agent}`,
+      thoughtText: "",
+      toolCalls: [],
+      status: "done",
+      timestamp: now,
+      completedAt: now,
+    });
+
+    this.broadcast({
+      type: "group_lead_changed",
+      groupId,
       leadAgent: agent,
       previousLead,
+      timestamp: now,
+    });
+    this.broadcast({
+      type: "group_updated",
+      group: { ...group },
+      timestamp: now,
+    });
+    if (groupId === this.defaultGroupId) {
+      this.broadcast({
+        type: "lead_changed",
+        leadAgent: agent,
+        previousLead,
+        timestamp: now,
+      });
+    }
+    return { ...group };
+  }
+
+  async deleteGroup(groupId: string): Promise<void> {
+    if (!this.groups.has(groupId)) {
+      throw new Error(`Unknown task group: ${groupId}`);
+    }
+    const sessionsToClose = this.pool.listSessions().filter((s) => s.groupId === groupId);
+    await Promise.all(sessionsToClose.map((s) => this.pool.closeSession(s.sessionKey)));
+
+    this.groups.delete(groupId);
+    this.ledgers.delete(groupId);
+    for (const [msgId, msg] of this.messages.entries()) {
+      if (msg.groupId === groupId) {
+        this.messages.delete(msgId);
+      }
+    }
+    for (const [sessionKey, active] of this.activeAssistantBySession.entries()) {
+      if (active.groupId === groupId) {
+        this.activeAssistantBySession.delete(sessionKey);
+      }
+    }
+    for (const [taskId, task] of this.tasks.entries()) {
+      if (task.groupId === groupId) {
+        this.tasks.delete(taskId);
+      }
+    }
+
+    this.broadcast({
+      type: "group_deleted",
+      groupId,
       timestamp: Date.now(),
     });
+
+    if (this.groups.size === 0) {
+      const replacement = this.createGroup({ title: "任务 1" });
+      this.defaultGroupId = replacement.groupId;
+    } else if (groupId === this.defaultGroupId) {
+      const firstRemaining = this.groups.values().next().value as TaskGroup;
+      this.defaultGroupId = firstRemaining.groupId;
+    }
+  }
+
+  getMessages(filter?: { groupId?: string; streamKey?: string }): ChatMessageRecord[] {
+    const out: ChatMessageRecord[] = [];
+    for (const msg of this.messages.values()) {
+      if (filter?.groupId && msg.groupId !== filter.groupId) continue;
+      if (filter?.streamKey && msg.streamKey !== filter.streamKey) continue;
+      out.push(cloneMessage(msg));
+    }
+    return out;
+  }
+
+  private upsertMessage(msg: ChatMessageRecord): ChatMessageRecord {
+    this.messages.set(msg.messageId, msg);
+    const cloned = cloneMessage(msg);
+    this.broadcast({
+      type: "message_upserted",
+      message: cloned,
+      timestamp: Date.now(),
+    });
+    return cloned;
   }
 
   private broadcast(event: HubEvent): void {
@@ -168,15 +441,26 @@ export class AgentHubServer {
   }
 
   private createSnapshot(): HubEvent {
+    const ledger: ReturnType<ThreadLedger["getAllTurns"]> = [];
+    for (const [groupId, groupLedger] of this.ledgers.entries()) {
+      for (const turn of groupLedger.getAllTurns()) {
+        ledger.push({ ...turn, groupId });
+      }
+    }
+    ledger.sort((a, b) => a.timestamp - b.timestamp);
+
     return {
       type: "snapshot",
-      leadAgent: this.leadAgent,
+      defaultGroupId: this.defaultGroupId,
+      leadAgent: this.getLeadAgent(this.defaultGroupId),
       permissionMode: this.pool.getPermissionMode(),
       baseCwd: this.baseCwd,
+      taskGroups: this.listGroups(),
       sessions: this.pool.listSessions(),
       tasks: [...this.tasks.values()],
       pendingPermissions: this.pool.getPendingPermissions(),
-      ledger: this.ledger.getAllTurns(),
+      ledger,
+      messages: this.getMessages(),
     };
   }
 
@@ -205,75 +489,275 @@ export class AgentHubServer {
   }
 
   async runLeadChat(input: {
+    groupId?: string;
     prompt: string;
     leadAgent?: AgentId;
     cwd?: string;
     session?: string;
   }): Promise<{
+    groupId: string;
     leadAgent: AgentId;
     sessionKey: string;
     outputText: string;
     stopReason: string;
     peerToolsCalled: string[];
   }> {
+    const targetGroupId =
+      input.groupId && this.groups.has(input.groupId) ? input.groupId : this.defaultGroupId;
+    const group = this.groups.get(targetGroupId)!;
+
     if (input.leadAgent) {
-      this.setLeadAgent(input.leadAgent);
+      this.setGroupLeadAgent(group.groupId, input.leadAgent);
     }
-    const lead = this.leadAgent;
-    const effectivePrompt = this.ledger.buildLeadPrompt(lead, input.prompt);
-    const result = await this.pool.runTurn({
+
+    const lead = group.leadAgent;
+    const ledger = this.getOrCreateLedger(group.groupId);
+    if (/^(任务\s*\d+|新任务|默认任务)$/.test(group.title) && ledger.getAllTurns().length === 0) {
+      group.title = autoTitleFromPrompt(input.prompt);
+      group.updatedAt = Date.now();
+      this.broadcast({
+        type: "group_updated",
+        group: { ...group },
+        timestamp: group.updatedAt,
+      });
+    }
+
+    const sessionName = input.session ?? `${group.groupId}__lead`;
+    const sessionKey = buildSessionKey(lead, sessionName);
+    const streamKey = `lead:${group.groupId}`;
+    const effectivePrompt = ledger.buildLeadPrompt(lead, input.prompt);
+
+    const now = Date.now();
+    this.upsertMessage({
+      messageId: `msg-${randomUUID().slice(0, 8)}`,
+      groupId: group.groupId,
+      streamKey,
+      sessionKey,
+      role: "user",
+      senderLabel: "你",
+      text: input.prompt,
+      thoughtText: "",
+      toolCalls: [],
+      status: "done",
+      timestamp: now,
+      completedAt: now,
+    });
+
+    const assistantMsg: ChatMessageRecord = {
+      messageId: `msg-${randomUUID().slice(0, 8)}`,
+      groupId: group.groupId,
+      streamKey,
+      sessionKey,
+      role: "assistant",
+      senderLabel: lead,
       agent: lead,
-      sessionName: input.session ?? "main",
-      baseCwd: input.cwd ?? this.baseCwd,
-      prompt: effectivePrompt,
-      isolateWorktree: false,
-      callDepth: 0,
-      injectPeerMcp: true,
-    });
-
-    const turn = this.ledger.recordTurn({
-      leadAgent: lead,
-      userText: input.prompt,
-      assistantSummary: result.outputText,
-      peerCallsSummary: result.peerToolsCalled,
-    });
-    this.broadcast({ type: "ledger_turn", turn, timestamp: Date.now() });
-
-    return {
-      leadAgent: lead,
-      sessionKey: result.sessionKey,
-      outputText: result.outputText,
-      stopReason: result.stopReason,
-      peerToolsCalled: result.peerToolsCalled,
+      text: "",
+      thoughtText: "",
+      toolCalls: [],
+      status: "streaming",
+      timestamp: Date.now(),
     };
+    this.activeAssistantBySession.set(sessionKey, assistantMsg);
+    this.upsertMessage(assistantMsg);
+
+    try {
+      const result = await this.pool.runTurn({
+        agent: lead,
+        sessionName,
+        baseCwd: input.cwd ?? group.cwd,
+        prompt: effectivePrompt,
+        isolateWorktree: false,
+        callDepth: 0,
+        injectPeerMcp: true,
+        groupId: group.groupId,
+        role: "lead",
+        label: "主导会话",
+      });
+
+      assistantMsg.status = result.stopReason === "cancelled" ? "cancelled" : "done";
+      if (!assistantMsg.text && result.outputText) {
+        assistantMsg.text = result.outputText;
+      }
+      assistantMsg.completedAt = Date.now();
+      this.upsertMessage(assistantMsg);
+
+      const turn = ledger.recordTurn({
+        leadAgent: lead,
+        userText: input.prompt,
+        assistantSummary: result.outputText,
+        peerCallsSummary: result.peerToolsCalled,
+      });
+      turn.groupId = group.groupId;
+      this.broadcast({ type: "ledger_turn", turn: { ...turn }, timestamp: Date.now() });
+
+      return {
+        groupId: group.groupId,
+        leadAgent: lead,
+        sessionKey: result.sessionKey,
+        outputText: result.outputText,
+        stopReason: result.stopReason,
+        peerToolsCalled: result.peerToolsCalled,
+      };
+    } catch (err) {
+      assistantMsg.status = "error";
+      const errMsg = err instanceof Error ? err.message : String(err);
+      assistantMsg.text = assistantMsg.text
+        ? `${assistantMsg.text}\n\n[Error] ${errMsg}`
+        : `[Error] ${errMsg}`;
+      assistantMsg.completedAt = Date.now();
+      this.upsertMessage(assistantMsg);
+      throw err;
+    } finally {
+      if (this.activeAssistantBySession.get(sessionKey)?.messageId === assistantMsg.messageId) {
+        this.activeAssistantBySession.delete(sessionKey);
+      }
+    }
   }
 
-  private validatePeerCall(body: z.infer<typeof PeerCallBodySchema>): string {
+  async runSubSessionChat(input: {
+    sessionKey: string;
+    prompt: string;
+  }): Promise<{
+    sessionKey: string;
+    groupId: string;
+    outputText: string;
+    stopReason: string;
+  }> {
+    const session = this.pool.getSession(input.sessionKey);
+    if (!session) {
+      throw new Error(`Unknown session: ${input.sessionKey}`);
+    }
+
+    const streamKey = `sub:${session.sessionKey}`;
+    const now = Date.now();
+    this.upsertMessage({
+      messageId: `msg-${randomUUID().slice(0, 8)}`,
+      groupId: session.groupId,
+      streamKey,
+      sessionKey: session.sessionKey,
+      role: "user",
+      senderLabel: "你",
+      text: input.prompt,
+      thoughtText: "",
+      toolCalls: [],
+      status: "done",
+      timestamp: now,
+      completedAt: now,
+    });
+
+    const assistantMsg: ChatMessageRecord = {
+      messageId: `msg-${randomUUID().slice(0, 8)}`,
+      groupId: session.groupId,
+      streamKey,
+      sessionKey: session.sessionKey,
+      role: "assistant",
+      senderLabel: session.agent,
+      agent: session.agent,
+      text: "",
+      thoughtText: "",
+      toolCalls: [],
+      status: "streaming",
+      timestamp: Date.now(),
+    };
+    this.activeAssistantBySession.set(session.sessionKey, assistantMsg);
+    this.upsertMessage(assistantMsg);
+
+    try {
+      const result = await this.pool.runTurn({
+        agent: session.agent,
+        sessionName: session.name,
+        baseCwd: session.baseCwd,
+        prompt: input.prompt,
+        isolateWorktree: session.isWorktree,
+        callDepth: 1,
+        injectPeerMcp: true,
+        groupId: session.groupId,
+        role: session.role,
+        label: session.label,
+        parentSessionKey: session.parentSessionKey,
+      });
+
+      assistantMsg.status = result.stopReason === "cancelled" ? "cancelled" : "done";
+      if (!assistantMsg.text && result.outputText) {
+        assistantMsg.text = result.outputText;
+      }
+      assistantMsg.completedAt = Date.now();
+      this.upsertMessage(assistantMsg);
+
+      return {
+        sessionKey: result.sessionKey,
+        groupId: session.groupId,
+        outputText: result.outputText,
+        stopReason: result.stopReason,
+      };
+    } catch (err) {
+      assistantMsg.status = "error";
+      const errMsg = err instanceof Error ? err.message : String(err);
+      assistantMsg.text = assistantMsg.text
+        ? `${assistantMsg.text}\n\n[Error] ${errMsg}`
+        : `[Error] ${errMsg}`;
+      assistantMsg.completedAt = Date.now();
+      this.upsertMessage(assistantMsg);
+      throw err;
+    } finally {
+      if (this.activeAssistantBySession.get(session.sessionKey)?.messageId === assistantMsg.messageId) {
+        this.activeAssistantBySession.delete(session.sessionKey);
+      }
+    }
+  }
+
+  private resolvePeerTarget(body: z.infer<typeof PeerCallBodySchema>): {
+    groupId: string;
+    rawLabel: string;
+    targetSessionName: string;
+    targetSessionKey: string;
+    parentSessionKey?: string;
+  } {
     if (body.depth >= MAX_PEER_DEPTH) {
       throw new Error(
         `Peer delegation depth limit (${MAX_PEER_DEPTH}) reached. Summarize your current findings instead of nesting further calls.`,
       );
     }
-    const targetSessionName = body.session ?? `peer-${body.targetAgent}`;
+
+    const callerSessionRecord = this.pool.getSession(body.callerSession);
+    const explicitOrCallerGroupId = body.groupId || callerSessionRecord?.groupId;
+    const groupId =
+      explicitOrCallerGroupId && this.groups.has(explicitOrCallerGroupId)
+        ? explicitOrCallerGroupId
+        : this.defaultGroupId;
+    const rawLabel = (body.session ?? `peer-${body.targetAgent}`).replace(/^.*__sub__/, "");
+
+    const targetSessionName = explicitOrCallerGroupId
+      ? `${groupId}__sub__${rawLabel}`
+      : body.session ?? `${groupId}__sub__${rawLabel}`;
     const targetSessionKey = buildSessionKey(body.targetAgent, targetSessionName);
+
     if (body.callerAgent === body.targetAgent && body.callerSession === targetSessionKey) {
       throw new Error(`Agent "${body.callerAgent}" cannot call itself on the same session (${targetSessionKey}).`);
     }
-    return targetSessionName;
+
+    return {
+      groupId,
+      rawLabel,
+      targetSessionName,
+      targetSessionKey,
+      parentSessionKey: callerSessionRecord?.sessionKey,
+    };
   }
 
   dispatchPeerTask(rawBody: unknown): TaskRecord {
     const body = PeerCallBodySchema.parse(rawBody);
-    const targetSessionName = this.validatePeerCall(body);
-    const targetSessionKey = buildSessionKey(body.targetAgent, targetSessionName);
+    const target = this.resolvePeerTarget(body);
+    const group = this.groups.get(target.groupId)!;
     const taskId = `task-${randomUUID().slice(0, 8)}`;
     const now = Date.now();
     const task: TaskRecord = {
       taskId,
+      groupId: target.groupId,
       callerAgent: body.callerAgent,
       callerSession: body.callerSession,
       targetAgent: body.targetAgent,
-      targetSessionKey,
+      targetSessionKey: target.targetSessionKey,
       prompt: body.prompt,
       status: "running",
       isolateWorktree: body.isolateWorktree,
@@ -283,15 +767,53 @@ export class AgentHubServer {
     };
     this.updateTask(task);
 
+    const streamKey = `sub:${target.targetSessionKey}`;
+    this.upsertMessage({
+      messageId: `msg-${randomUUID().slice(0, 8)}`,
+      groupId: target.groupId,
+      streamKey,
+      sessionKey: target.targetSessionKey,
+      role: "caller",
+      senderLabel: body.callerAgent === "user" ? "你" : `${body.callerAgent} 委派`,
+      agent: body.callerAgent === "user" ? undefined : body.callerAgent,
+      text: body.prompt,
+      thoughtText: "",
+      toolCalls: [],
+      status: "done",
+      timestamp: now,
+      completedAt: now,
+    });
+
+    const assistantMsg: ChatMessageRecord = {
+      messageId: `msg-${randomUUID().slice(0, 8)}`,
+      groupId: target.groupId,
+      streamKey,
+      sessionKey: target.targetSessionKey,
+      role: "assistant",
+      senderLabel: body.targetAgent,
+      agent: body.targetAgent,
+      text: "",
+      thoughtText: "",
+      toolCalls: [],
+      status: "streaming",
+      timestamp: Date.now(),
+    };
+    this.activeAssistantBySession.set(target.targetSessionKey, assistantMsg);
+    this.upsertMessage(assistantMsg);
+
     void this.pool
       .runTurn({
         agent: body.targetAgent,
-        sessionName: targetSessionName,
-        baseCwd: body.cwd ?? this.baseCwd,
+        sessionName: target.targetSessionName,
+        baseCwd: body.cwd ?? group.cwd,
         prompt: body.prompt,
         isolateWorktree: body.isolateWorktree,
         callDepth: body.depth + 1,
         injectPeerMcp: body.depth + 1 < MAX_PEER_DEPTH,
+        groupId: target.groupId,
+        role: "sub",
+        label: target.rawLabel,
+        parentSessionKey: target.parentSessionKey,
       })
       .then((res) => {
         task.status = res.stopReason === "cancelled" ? "cancelled" : "completed";
@@ -301,12 +823,32 @@ export class AgentHubServer {
         task.workspaceSummary = summarizeWorkspaceChanges(res.effectiveCwd);
         task.completedAt = Date.now();
         this.updateTask(task);
+
+        assistantMsg.status = res.stopReason === "cancelled" ? "cancelled" : "done";
+        if (!assistantMsg.text && res.outputText) {
+          assistantMsg.text = res.outputText;
+        }
+        assistantMsg.completedAt = Date.now();
+        this.upsertMessage(assistantMsg);
       })
       .catch((err) => {
+        const errMsg = err instanceof Error ? err.message : String(err);
         task.status = "failed";
-        task.error = err instanceof Error ? err.message : String(err);
+        task.error = errMsg;
         task.completedAt = Date.now();
         this.updateTask(task);
+
+        assistantMsg.status = "error";
+        assistantMsg.text = assistantMsg.text
+          ? `${assistantMsg.text}\n\n[Error] ${errMsg}`
+          : `[Error] ${errMsg}`;
+        assistantMsg.completedAt = Date.now();
+        this.upsertMessage(assistantMsg);
+      })
+      .finally(() => {
+        if (this.activeAssistantBySession.get(target.targetSessionKey)?.messageId === assistantMsg.messageId) {
+          this.activeAssistantBySession.delete(target.targetSessionKey);
+        }
       });
 
     return { ...task };
@@ -353,12 +895,12 @@ export class AgentHubServer {
     return done;
   }
 
-  private getUiHtmlPath(): string {
-    const srcHtml = path.join(PROJECT_ROOT, "src", "ui", "index.html");
-    if (fs.existsSync(srcHtml)) {
-      return srcHtml;
+  private getUiAssetPath(fileName: string): string {
+    const srcPath = path.join(PROJECT_ROOT, "src", "ui", fileName);
+    if (fs.existsSync(srcPath)) {
+      return srcPath;
     }
-    return path.join(PROJECT_ROOT, "dist", "ui", "index.html");
+    return path.join(PROJECT_ROOT, "dist", "ui", fileName);
   }
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -368,19 +910,38 @@ export class AgentHubServer {
 
     try {
       if (method === "GET" && pathname === "/") {
-        const htmlPath = this.getUiHtmlPath();
-        const html = fs.readFileSync(htmlPath, "utf8");
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        const html = fs.readFileSync(this.getUiAssetPath("index.html"), "utf8");
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
         res.end(html);
         return;
       }
 
+      if (method === "GET" && pathname === "/ui/styles.css") {
+        const css = fs.readFileSync(this.getUiAssetPath("styles.css"), "utf8");
+        res.writeHead(200, { "Content-Type": "text/css; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(css);
+        return;
+      }
+
+      if (method === "GET" && pathname === "/ui/app.js") {
+        const js = fs.readFileSync(this.getUiAssetPath("app.js"), "utf8");
+        res.writeHead(200, {
+          "Content-Type": "application/javascript; charset=utf-8",
+          "Cache-Control": "no-store",
+        });
+        res.end(js);
+        return;
+      }
+
       if (method === "GET" && pathname === "/api/health") {
+        const groupId = reqUrl.searchParams.get("groupId") || undefined;
         sendJson(res, 200, {
           ok: true,
           url: this.url,
           baseCwd: this.baseCwd,
-          leadAgent: this.leadAgent,
+          defaultGroupId: this.defaultGroupId,
+          leadAgent: this.getLeadAgent(groupId),
+          taskGroups: this.listGroups(),
           permissionMode: this.pool.getPermissionMode(),
           adapters: checkAdaptersHealth(),
           sessions: this.pool.listSessions(),
@@ -389,16 +950,53 @@ export class AgentHubServer {
         return;
       }
 
+      if (method === "GET" && pathname === "/api/groups") {
+        sendJson(res, 200, {
+          ok: true,
+          defaultGroupId: this.defaultGroupId,
+          groups: this.listGroups(),
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/groups") {
+        const body = CreateGroupBodySchema.parse(await readJsonBody(req));
+        const group = this.createGroup(body);
+        sendJson(res, 200, { ok: true, group });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/groups/update") {
+        const body = UpdateGroupBodySchema.parse(await readJsonBody(req));
+        const group = this.updateGroup(body);
+        sendJson(res, 200, { ok: true, group });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/groups/delete") {
+        const body = DeleteGroupBodySchema.parse(await readJsonBody(req));
+        await this.deleteGroup(body.groupId);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
       if (method === "POST" && pathname === "/api/lead") {
         const body = LeadBodySchema.parse(await readJsonBody(req));
-        this.setLeadAgent(body.agent);
-        sendJson(res, 200, { ok: true, leadAgent: this.leadAgent });
+        const group = this.setGroupLeadAgent(body.groupId ?? this.defaultGroupId, body.agent);
+        sendJson(res, 200, { ok: true, groupId: group.groupId, leadAgent: group.leadAgent });
         return;
       }
 
       if (method === "POST" && pathname === "/api/chat") {
         const body = ChatBodySchema.parse(await readJsonBody(req));
         const result = await this.runLeadChat(body);
+        sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/sessions/chat") {
+        const body = SessionChatBodySchema.parse(await readJsonBody(req));
+        const result = await this.runSubSessionChat(body);
         sendJson(res, 200, { ok: true, ...result });
         return;
       }
@@ -526,7 +1124,7 @@ export class AgentHubServer {
           break;
         } catch (err) {
           const code = (err as NodeJS.ErrnoException).code;
-          if (code !== "EADDRINUSE") {
+          if (code !== "EADDRUSE") {
             throw err;
           }
         }

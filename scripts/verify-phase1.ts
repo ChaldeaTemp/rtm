@@ -36,9 +36,8 @@ async function main(): Promise<void> {
     assert.equal(item.available, true, `Expected adapter ${item.agent} entrypoint to be available`);
   }
   const readyAgents = health.filter((h) => h.available && h.authReady).map((h) => h.agent);
-  assert.ok(readyAgents.length >= 1, "Expected at least one auth-ready agent for live verification");
+  assert.ok(readyAgents.length >= 2, "Expected claude and codex to be auth-ready");
   const primaryAgent = readyAgents[0]!;
-  console.log(`Primary ready agent for live checks: ${primaryAgent}`);
 
   const hub = new AgentHubServer({
     baseCwd: PROJECT_ROOT,
@@ -67,45 +66,69 @@ async function main(): Promise<void> {
     assert.equal(probeResults.claude?.ok, true, "Expected claude (reclaude) live probe to succeed");
     assert.equal(probeResults.codex?.ok, true, "Expected codex live probe to succeed");
 
-    console.log("\n=== 3. Cross-Session MCP (peer_ask) & Lead Handoff ===");
-    const leadAgent: AgentId = readyAgents.includes("claude") ? "claude" : primaryAgent;
-    const peerAgent: AgentId = readyAgents.includes("codex") && leadAgent !== "codex" ? "codex" : primaryAgent;
-    hub.setLeadAgent(leadAgent);
-    const leadResult = await hub.runLeadChat({
-      leadAgent,
-      prompt:
-        `You MUST call the peer_ask MCP tool right now with agent="${peerAgent}", session="worker-calc", and prompt="Calculate 37 * 43 and reply with only 1591. Do not call any tools.". After peer_ask returns, report the exact answer 1591 back to me.`,
-    });
-    console.log("[lead result]", JSON.stringify(leadResult, null, 2));
+    console.log("\n=== 3. Parallel Task Groups, Sub-Sessions & Isolated Lead Handoff ===");
+    const groupA = hub.createGroup({ title: "Task Alpha", leadAgent: "claude" });
+    const groupB = hub.createGroup({ title: "Task Beta", leadAgent: "codex" });
+
+    const [resA, resB] = await Promise.all([
+      hub.runLeadChat({
+        groupId: groupA.groupId,
+        prompt:
+          'You MUST call the peer_ask MCP tool right now with agent="codex", session="worker-calc", and prompt="Calculate 37 * 43 and reply with only 1591. Do not call any tools.". After peer_ask returns, report the exact answer 1591 back to me.',
+      }),
+      hub.runLeadChat({
+        groupId: groupB.groupId,
+        prompt: "Reply with BETA-OK only. Do not call any tools.",
+      }),
+    ]);
+
+    console.log("[Parallel Task Alpha result]", JSON.stringify(resA, null, 2));
+    console.log("[Parallel Task Beta result]", JSON.stringify(resB, null, 2));
+
     assert.ok(
-      leadResult.peerToolsCalled.some((t) => t.includes("peer_ask")),
-      `Expected peer_ask tool call in peerToolsCalled, got: ${JSON.stringify(leadResult.peerToolsCalled)}`,
+      resA.peerToolsCalled.some((t) => t.includes("peer_ask")),
+      `Expected peer_ask in resA.peerToolsCalled, got ${JSON.stringify(resA.peerToolsCalled)}`,
     );
+    assert.ok(resA.outputText.includes("1591"), `Expected 1591 in Task Alpha output: ${resA.outputText}`);
+    assert.ok(resB.outputText.includes("BETA-OK"), `Expected BETA-OK in Task Beta output: ${resB.outputText}`);
+
+    const subSessionKey = `codex:${groupA.groupId}__sub__worker-calc`;
+    const subSession = hub.pool.getSession(subSessionKey);
+    assert.ok(subSession, `Expected sub-session ${subSessionKey} to exist`);
+    assert.equal(subSession.groupId, groupA.groupId);
+    assert.equal(subSession.role, "sub");
+    assert.equal(subSession.label, "worker-calc");
+
+    const subMessages = hub.getMessages({ streamKey: `sub:${subSessionKey}` });
+    console.log(`[Sub-session messages count=${subMessages.length}]`);
+    assert.ok(subMessages.length >= 2, `Expected >= 2 transcript messages for ${subSessionKey}`);
     assert.ok(
-      leadResult.outputText.includes("1591"),
-      `Expected lead output to contain 1591, got: ${leadResult.outputText}`,
+      subMessages.some((m) => m.role === "assistant" && m.text.includes("1591")),
+      "Expected sub-session assistant transcript to contain 1591",
     );
 
-    const nextLead: AgentId = leadAgent !== peerAgent ? peerAgent : (leadAgent === "claude" ? "codex" : "claude");
-    hub.setLeadAgent(nextLead);
-    const handoffPrompt = hub.ledger.buildLeadPrompt(
-      nextLead,
-      "Based on the handoff context, what exact multiplication result (4 digits) did we just verify via peer_ask? Reply with the number only.",
-    );
-    console.log("[handoff prompt preview]\n" + handoffPrompt);
-    assert.ok(handoffPrompt.includes("<handoff_context>"), "Expected <handoff_context> block");
-    assert.ok(handoffPrompt.includes("1591"), "Expected handoff context to contain 1591");
-    assert.ok(handoffPrompt.includes("peer_ask"), "Expected handoff context to record peer_ask");
+    hub.setGroupLeadAgent(groupA.groupId, "codex");
+    const handoffPrompt = hub
+      .getGroupLedger(groupA.groupId)
+      .buildLeadPrompt(
+        "codex",
+        "Based on the handoff context, what exact 4-digit multiplication result did claude verify? Reply with the number only.",
+      );
+    console.log("[Task Alpha isolated handoff preview]\n" + handoffPrompt);
+    assert.ok(handoffPrompt.includes("<handoff_context>"), "Expected <handoff_context>");
+    assert.ok(handoffPrompt.includes("1591"), "Expected 1591 in Task Alpha handoff");
+    assert.ok(!handoffPrompt.includes("BETA-OK"), "Task Beta must NOT leak into Task Alpha handoff");
 
     const followUp = await hub.runLeadChat({
-      leadAgent: nextLead,
-      prompt: "Based on the handoff context, what exact multiplication result (4 digits) did we just verify via peer_ask? Reply with the number only.",
+      groupId: groupA.groupId,
+      prompt:
+        "Based on the handoff context, what exact 4-digit multiplication result did claude verify? Reply with the number only.",
     });
-    console.log("[followUp result]", JSON.stringify(followUp, null, 2));
-    assert.ok(
-      followUp.outputText.includes("1591") || followUp.outputText.includes("37"),
-      "Expected follow-up to preserve multi-turn handoff context",
-    );
+    console.log("[Task Alpha followUp result]", JSON.stringify(followUp, null, 2));
+    assert.ok(followUp.outputText.includes("1591"), "Expected followUp on Task Alpha to recall 1591");
+
+    await hub.deleteGroup(groupA.groupId);
+    await hub.deleteGroup(groupB.groupId);
 
     console.log("\n=== 4. On-Demand git worktree Isolation ===");
     const wtTask = await hub.askPeer({
@@ -148,13 +171,21 @@ async function main(): Promise<void> {
       "Main working tree git status should ignore .agent-hub-worktrees",
     );
 
-    await hub.pool.closeSession(`${primaryAgent}:wt-test`);
+    await hub.pool.closeSession(`${primaryAgent}:${wtTask.groupId}__sub__wt-test`).catch(() => false);
+    await hub.pool.closeSession(`${primaryAgent}:wt-test`).catch(() => false);
     await new Promise((r) => setTimeout(r, 300));
     removeSessionWorktree(PROJECT_ROOT, expectedWtPath);
     execFileSync("git", ["-C", PROJECT_ROOT, "branch", "-D", "agent-hub/wt-test"], {
       stdio: "ignore",
     });
     console.log("Worktree and temporary branch cleaned up successfully.");
+
+    console.log("\n=== 5. Alma UI Static Assets & Group APIs ===");
+    for (const assetPath of ["/", "/ui/styles.css", "/ui/app.js", "/api/groups"]) {
+      const r = await fetch(`${url}${assetPath}`);
+      assert.equal(r.status, 200, `Expected GET ${assetPath} to return 200, got ${r.status}`);
+    }
+    console.log("All UI assets & group API endpoints returned HTTP 200.");
 
     console.log("\n=== VERIFY PHASE 1 PASSED ===");
   } finally {

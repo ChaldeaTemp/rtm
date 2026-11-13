@@ -1,0 +1,1153 @@
+const STATE = {
+  defaultGroupId: "grp-default",
+  baseCwd: "",
+  permissionMode: "approve-all",
+  taskGroups: new Map(),
+  sessions: new Map(),
+  tasks: new Map(),
+  pendingPermissions: new Map(),
+  messagesByStream: new Map(),
+  activeGroupId: "grp-default",
+  activeStreamKey: "lead:grp-default",
+  sendingStreams: new Set(),
+  newTaskLead: "claude",
+  inspectorCollapsed: false,
+  logs: [],
+};
+
+const els = {
+  workbench: document.getElementById("workbench"),
+  wsDot: document.getElementById("wsDot"),
+  wsText: document.getElementById("wsText"),
+  cwdPill: document.getElementById("cwdPill"),
+  toggleNewTaskBtn: document.getElementById("toggleNewTaskBtn"),
+  newTaskPopover: document.getElementById("newTaskPopover"),
+  newTaskTitleInput: document.getElementById("newTaskTitleInput"),
+  cancelNewTaskBtn: document.getElementById("cancelNewTaskBtn"),
+  groupCountBadge: document.getElementById("groupCountBadge"),
+  groupList: document.getElementById("groupList"),
+  themeToggleBtn: document.getElementById("themeToggleBtn"),
+  stageTaskTitle: document.getElementById("stageTaskTitle"),
+  streamBadge: document.getElementById("streamBadge"),
+  leadSwitcher: document.getElementById("leadSwitcher"),
+  backToLeadBtn: document.getElementById("backToLeadBtn"),
+  permSelect: document.getElementById("permSelect"),
+  toggleInspectorBtn: document.getElementById("toggleInspectorBtn"),
+  sessionTabs: document.getElementById("sessionTabs"),
+  permBanner: document.getElementById("permBanner"),
+  messages: document.getElementById("messages"),
+  composerLabel: document.getElementById("composerLabel"),
+  promptInput: document.getElementById("promptInput"),
+  composerHint: document.getElementById("composerHint"),
+  stopSessionBtn: document.getElementById("stopSessionBtn"),
+  sendBtn: document.getElementById("sendBtn"),
+  inspSessionCount: document.getElementById("inspSessionCount"),
+  inspSessions: document.getElementById("inspSessions"),
+  inspTaskCount: document.getElementById("inspTaskCount"),
+  inspTasks: document.getElementById("inspTasks"),
+  logFeed: document.getElementById("logFeed"),
+};
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function formatTime(ts) {
+  if (!ts) return "";
+  return new Date(ts).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function renderInlineMarkdown(escapedText) {
+  let s = escapedText;
+  const codeSpans = [];
+  s = s.replace(/`([^`]+)`/g, (_m, code) => {
+    const idx = codeSpans.length;
+    codeSpans.push(`<code>${code}</code>`);
+    return `@@CSPAN${idx}@@`;
+  });
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+  s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+  s = s.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^\s)]+|file:\/\/\/[^\s)]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
+  );
+  s = s.replace(/@@CSPAN(\d+)@@/g, (_m, idx) => codeSpans[Number(idx)] || "");
+  return s;
+}
+
+function renderMarkdown(raw) {
+  const src = String(raw || "");
+  if (!src.trim()) return "";
+
+  const codeBlocks = [];
+  const withPlaceholders = src.replace(/```([a-zA-Z0-9_-]*)\r?\n([\s\S]*?)```/g, (_m, lang, code) => {
+    const idx = codeBlocks.length;
+    const cleanLang = escapeHtml(lang || "text");
+    const cleanCode = escapeHtml(code.replace(/\n$/, ""));
+    codeBlocks.push(
+      `<div class="md-code-wrap"><div class="md-code-head"><span>${cleanLang}</span><button type="button" class="copy-code-btn" data-copy-code="${idx}">复制</button></div><pre><code data-raw-code="${idx}">${cleanCode}</code></pre></div>`,
+    );
+    return `\n@@CBLOCK${idx}@@\n`;
+  });
+
+  const blocks = withPlaceholders.split(/\r?\n\r?\n+/);
+  const htmlParts = [];
+
+  for (const block of blocks) {
+    const trimmed = block.trim();
+    if (!trimmed) continue;
+
+    const cblockMatch = trimmed.match(/^@@CBLOCK(\d+)@@$/);
+    if (cblockMatch) {
+      htmlParts.push(codeBlocks[Number(cblockMatch[1])] || "");
+      continue;
+    }
+
+    const lines = trimmed.split(/\r?\n/);
+    if (lines.every((l) => /^\s*[-*]\s+/.test(l))) {
+      const items = lines
+        .map((l) => `<li>${renderInlineMarkdown(escapeHtml(l.replace(/^\s*[-*]\s+/, "")))}</li>`)
+        .join("");
+      htmlParts.push(`<ul>${items}</ul>`);
+      continue;
+    }
+
+    if (lines.every((l) => /^\s*\d+\.\s+/.test(l))) {
+      const items = lines
+        .map((l) => `<li>${renderInlineMarkdown(escapeHtml(l.replace(/^\s*\d+\.\s+/, "")))}</li>`)
+        .join("");
+      htmlParts.push(`<ol>${items}</ol>`);
+      continue;
+    }
+
+    const headingMatch = trimmed.match(/^(#{1,3})\s+(.+)$/);
+    if (headingMatch && lines.length === 1) {
+      const level = headingMatch[1].length;
+      htmlParts.push(`<h${level}>${renderInlineMarkdown(escapeHtml(headingMatch[2]))}</h${level}>`);
+      continue;
+    }
+
+    const inlineHtml = lines
+      .map((l) => {
+        const m = l.trim().match(/^@@CBLOCK(\d+)@@$/);
+        if (m) return codeBlocks[Number(m[1])] || "";
+        return renderInlineMarkdown(escapeHtml(l));
+      })
+      .join("<br />");
+
+    htmlParts.push(`<p>${inlineHtml}</p>`);
+  }
+
+  return htmlParts.join("");
+}
+
+function appendLog(line) {
+  STATE.logs.push(`[${formatTime(Date.now())}] ${line}`);
+  if (STATE.logs.length > 160) {
+    STATE.logs.shift();
+  }
+  const el = document.createElement("div");
+  el.className = "log-line";
+  el.textContent = STATE.logs[STATE.logs.length - 1];
+  els.logFeed.appendChild(el);
+  while (els.logFeed.children.length > 160) {
+    els.logFeed.removeChild(els.logFeed.firstChild);
+  }
+  els.logFeed.scrollTop = els.logFeed.scrollHeight;
+}
+
+function getActiveGroup() {
+  return (
+    STATE.taskGroups.get(STATE.activeGroupId) ||
+    STATE.taskGroups.get(STATE.defaultGroupId) ||
+    [...STATE.taskGroups.values()][0]
+  );
+}
+
+function getGroupSessions(groupId) {
+  return [...STATE.sessions.values()]
+    .filter((s) => s.groupId === groupId)
+    .sort((a, b) => {
+      if (a.role !== b.role) return a.role === "lead" ? -1 : 1;
+      return a.createdAt - b.createdAt;
+    });
+}
+
+function getGroupSubSessions(groupId) {
+  return getGroupSessions(groupId).filter((s) => s.role === "sub");
+}
+
+function getGroupTasks(groupId) {
+  return [...STATE.tasks.values()]
+    .filter((t) => t.groupId === groupId)
+    .sort((a, b) => b.createdAt - a.createdAt);
+}
+
+function isGroupBusy(groupId) {
+  for (const s of STATE.sessions.values()) {
+    if (s.groupId === groupId && (s.status === "busy" || s.status === "starting")) {
+      return true;
+    }
+  }
+  return STATE.sendingStreams.has(`lead:${groupId}`);
+}
+
+function isSubStream(streamKey) {
+  return typeof streamKey === "string" && streamKey.startsWith("sub:");
+}
+
+function activeSessionKeyForCurrentView() {
+  const group = getActiveGroup();
+  if (!group) return null;
+  if (isSubStream(STATE.activeStreamKey)) {
+    return STATE.activeStreamKey.slice(4);
+  }
+  const leadSession = [...STATE.sessions.values()].find(
+    (s) => s.groupId === group.groupId && s.role === "lead" && s.agent === group.leadAgent,
+  );
+  return leadSession?.sessionKey || `${group.leadAgent}:${group.groupId}__lead`;
+}
+
+function selectGroup(groupId, streamKey) {
+  const group = STATE.taskGroups.get(groupId);
+  if (!group) return;
+  STATE.activeGroupId = groupId;
+  STATE.activeStreamKey = streamKey || `lead:${groupId}`;
+  renderAll();
+  els.promptInput.focus();
+}
+
+function upsertMessageRecord(msg) {
+  const list = STATE.messagesByStream.get(msg.streamKey) || [];
+  const idx = list.findIndex((m) => m.messageId === msg.messageId);
+  if (idx >= 0) {
+    list[idx] = msg;
+  } else {
+    list.push(msg);
+  }
+  STATE.messagesByStream.set(msg.streamKey, list);
+}
+
+function findMessageById(streamKey, messageId) {
+  if (!streamKey || !messageId) return null;
+  const list = STATE.messagesByStream.get(streamKey);
+  if (!list) return null;
+  return list.find((m) => m.messageId === messageId) || null;
+}
+
+function applyTheme(dark) {
+  document.body.classList.toggle("dark", dark);
+  els.themeToggleBtn.textContent = dark ? "浅色" : "深色";
+  try {
+    localStorage.setItem("agent-hub-theme", dark ? "dark" : "light");
+  } catch {
+    // ignore storage failures
+  }
+}
+
+async function createTaskGroup(opts = {}) {
+  const res = await fetch("/api/groups", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(opts),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) {
+    appendLog(`创建任务失败: ${data.error || res.status}`);
+    return;
+  }
+  STATE.taskGroups.set(data.group.groupId, data.group);
+  selectGroup(data.group.groupId, `lead:${data.group.groupId}`);
+}
+
+async function renameTaskGroup(group) {
+  const next = window.prompt("重命名任务分组：", group.title);
+  if (!next || !next.trim() || next.trim() === group.title) return;
+  await fetch("/api/groups/update", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ groupId: group.groupId, title: next.trim() }),
+  });
+}
+
+async function deleteTaskGroup(group) {
+  if (!window.confirm(`确认删除任务「${group.title}」并关闭其下的所有会话？`)) return;
+  await fetch("/api/groups/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ groupId: group.groupId }),
+  });
+}
+
+async function switchGroupLead(groupId, agent) {
+  await fetch("/api/lead", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ groupId, agent }),
+  });
+}
+
+async function cancelSession(sessionKey) {
+  if (!sessionKey) return;
+  await fetch("/api/peer/cancel", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionKey }),
+  });
+}
+
+function renderSidebarGroups() {
+  const groups = [...STATE.taskGroups.values()].sort((a, b) => a.createdAt - b.createdAt);
+  els.groupCountBadge.textContent = String(groups.length);
+  els.groupList.innerHTML = "";
+
+  for (const group of groups) {
+    const isActiveGroup = group.groupId === STATE.activeGroupId;
+    const subs = getGroupSubSessions(group.groupId);
+    const groupTasks = getGroupTasks(group.groupId);
+    const busy = isGroupBusy(group.groupId);
+
+    const card = document.createElement("div");
+    card.className = `group-card${isActiveGroup ? " active" : ""}`;
+    card.onclick = () => selectGroup(group.groupId, `lead:${group.groupId}`);
+
+    const top = document.createElement("div");
+    top.className = "group-row-top";
+
+    const titleWrap = document.createElement("div");
+    titleWrap.className = "group-title-wrap";
+    const statusDot = document.createElement("span");
+    statusDot.className = `dot ${busy ? "busy" : "idle"}`;
+    const titleEl = document.createElement("span");
+    titleEl.className = "group-title";
+    titleEl.textContent = group.title;
+    titleWrap.appendChild(statusDot);
+    titleWrap.appendChild(titleEl);
+
+    const actions = document.createElement("div");
+    actions.className = "group-actions";
+    const renameBtn = document.createElement("button");
+    renameBtn.type = "button";
+    renameBtn.className = "mini-icon-btn";
+    renameBtn.title = "重命名任务";
+    renameBtn.textContent = "改";
+    renameBtn.onclick = (e) => {
+      e.stopPropagation();
+      void renameTaskGroup(group);
+    };
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "mini-icon-btn del";
+    delBtn.title = "删除任务";
+    delBtn.textContent = "删";
+    delBtn.onclick = (e) => {
+      e.stopPropagation();
+      void deleteTaskGroup(group);
+    };
+    actions.appendChild(renameBtn);
+    actions.appendChild(delBtn);
+
+    top.appendChild(titleWrap);
+    top.appendChild(actions);
+
+    const meta = document.createElement("div");
+    meta.className = "group-meta";
+    meta.innerHTML = `
+      <span class="agent-tag" data-agent="${escapeHtml(group.leadAgent)}">★ ${escapeHtml(group.leadAgent)}</span>
+      <span>${subs.length} 子会话 · ${groupTasks.length} 委派</span>
+    `;
+
+    card.appendChild(top);
+    card.appendChild(meta);
+
+    if (subs.length > 0 || isActiveGroup) {
+      const tree = document.createElement("div");
+      tree.className = "session-tree";
+
+      const leadStreamKey = `lead:${group.groupId}`;
+      const leadNode = document.createElement("div");
+      leadNode.className = `tree-node${STATE.activeStreamKey === leadStreamKey ? " active" : ""}`;
+      leadNode.innerHTML = `
+        <span class="tree-node-left">
+          <span class="dot ${busy ? "busy" : "idle"}"></span>
+          <span class="tree-node-label">★ 主导 · ${escapeHtml(group.leadAgent)}</span>
+        </span>
+      `;
+      leadNode.onclick = (e) => {
+        e.stopPropagation();
+        selectGroup(group.groupId, leadStreamKey);
+      };
+      tree.appendChild(leadNode);
+
+      for (const sub of subs) {
+        const subStreamKey = `sub:${sub.sessionKey}`;
+        const subNode = document.createElement("div");
+        subNode.className = `tree-node${STATE.activeStreamKey === subStreamKey ? " active" : ""}`;
+        subNode.title = sub.sessionKey;
+        subNode.innerHTML = `
+          <span class="tree-node-left">
+            <span class="dot ${escapeHtml(sub.status)}"></span>
+            <span class="tree-node-label">↳ ${escapeHtml(sub.agent)} · ${escapeHtml(sub.label || sub.name)}</span>
+          </span>
+          ${sub.isWorktree ? '<span class="wt-pill">wt</span>' : ""}
+        `;
+        subNode.onclick = (e) => {
+          e.stopPropagation();
+          selectGroup(group.groupId, subStreamKey);
+        };
+        tree.appendChild(subNode);
+      }
+
+      card.appendChild(tree);
+    }
+
+    els.groupList.appendChild(card);
+  }
+}
+
+function renderStageHeaderAndTabs() {
+  const group = getActiveGroup();
+  if (!group) return;
+
+  const subMode = isSubStream(STATE.activeStreamKey);
+  const subSessionKey = subMode ? STATE.activeStreamKey.slice(4) : null;
+  const subSession = subSessionKey ? STATE.sessions.get(subSessionKey) : null;
+
+  els.stageTaskTitle.textContent = group.title;
+  if (subMode && subSession) {
+    els.streamBadge.textContent = `子会话 · ${subSession.agent} (${subSession.label || subSession.name})`;
+    els.streamBadge.className = "stream-badge sub";
+    els.leadSwitcher.hidden = true;
+    els.backToLeadBtn.hidden = false;
+    els.composerLabel.textContent = `直连子会话 · ${subSession.agent}:${subSession.label || subSession.name}`;
+    els.composerHint.textContent = "可直接向该子会话追加追问，不会污染任务主对话上下文";
+    els.promptInput.placeholder = `向子会话 ${subSession.agent} (${subSession.label || subSession.name}) 发送跟进消息...`;
+  } else {
+    els.streamBadge.textContent = `主导会话 · ${group.leadAgent}`;
+    els.streamBadge.className = "stream-badge";
+    els.leadSwitcher.hidden = false;
+    els.backToLeadBtn.hidden = true;
+    els.composerLabel.textContent = `${group.title} · 主导 ${group.leadAgent}`;
+    els.composerHint.textContent = `当前任务独立由 ${group.leadAgent} 主导，可随时切换或与其他任务并行执行`;
+    els.promptInput.placeholder = `向任务「${group.title}」主导 Agent（${group.leadAgent}）发送指令，Enter 发送...`;
+  }
+
+  document.querySelectorAll("#leadSwitcher .lead-pill").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.agent === group.leadAgent);
+  });
+
+  // Sub-session tab bar
+  const subs = getGroupSubSessions(group.groupId);
+  if (subs.length === 0) {
+    els.sessionTabs.hidden = true;
+    els.sessionTabs.innerHTML = "";
+  } else {
+    els.sessionTabs.hidden = false;
+    els.sessionTabs.innerHTML = "";
+    const leadStreamKey = `lead:${group.groupId}`;
+    const leadTab = document.createElement("button");
+    leadTab.type = "button";
+    leadTab.className = `session-tab${STATE.activeStreamKey === leadStreamKey ? " active" : ""}`;
+    leadTab.innerHTML = `<span class="dot ${isGroupBusy(group.groupId) ? "busy" : "idle"}"></span>★ 主导 (${escapeHtml(group.leadAgent)})`;
+    leadTab.onclick = () => selectGroup(group.groupId, leadStreamKey);
+    els.sessionTabs.appendChild(leadTab);
+
+    for (const sub of subs) {
+      const key = `sub:${sub.sessionKey}`;
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = `session-tab${STATE.activeStreamKey === key ? " active" : ""}`;
+      tab.title = sub.sessionKey;
+      tab.innerHTML = `<span class="dot ${escapeHtml(sub.status)}"></span>↳ ${escapeHtml(sub.agent)} · ${escapeHtml(sub.label || sub.name)}${sub.isWorktree ? " [wt]" : ""}`;
+      tab.onclick = () => selectGroup(group.groupId, key);
+      els.sessionTabs.appendChild(tab);
+    }
+  }
+
+  const activeKey = activeSessionKeyForCurrentView();
+  const activeSess = activeKey ? STATE.sessions.get(activeKey) : null;
+  const isBusy =
+    STATE.sendingStreams.has(STATE.activeStreamKey) ||
+    activeSess?.status === "busy" ||
+    activeSess?.status === "starting";
+  els.sendBtn.disabled = STATE.sendingStreams.has(STATE.activeStreamKey);
+  els.sendBtn.textContent = STATE.sendingStreams.has(STATE.activeStreamKey) ? "执行中..." : "发送 ↵";
+  els.stopSessionBtn.hidden = !isBusy;
+}
+
+function renderPermissions() {
+  const items = [...STATE.pendingPermissions.values()];
+  if (items.length === 0) {
+    els.permBanner.hidden = true;
+    els.permBanner.innerHTML = "";
+    return;
+  }
+  els.permBanner.hidden = false;
+  els.permBanner.innerHTML = "";
+
+  for (const p of items) {
+    const sess = STATE.sessions.get(p.sessionKey);
+    const grp = sess ? STATE.taskGroups.get(sess.groupId) : null;
+    const row = document.createElement("div");
+    row.className = "perm-row";
+    row.innerHTML = `
+      <div>
+        <strong class="mono">[需要确认]</strong>
+        ${grp ? `<span class="mono">${escapeHtml(grp.title)}</span> · ` : ""}
+        <span class="agent-tag" data-agent="${escapeHtml(p.agent)}">${escapeHtml(p.sessionKey)}</span>
+        请求执行：<strong>${escapeHtml(p.toolTitle)}</strong>
+      </div>
+    `;
+    const actions = document.createElement("div");
+    actions.className = "perm-actions";
+    const allowOpt = p.options.find((o) => o.kind.startsWith("allow")) || p.options[0];
+    const rejectOpt = p.options.find((o) => o.kind.startsWith("reject"));
+
+    const allowBtn = document.createElement("button");
+    allowBtn.type = "button";
+    allowBtn.className = "alma-btn alma-btn-primary alma-btn-sm";
+    allowBtn.textContent = allowOpt ? allowOpt.name : "允许";
+    allowBtn.onclick = () => resolvePerm(p.requestId, allowOpt ? allowOpt.optionId : "cancel");
+    actions.appendChild(allowBtn);
+
+    const denyBtn = document.createElement("button");
+    denyBtn.type = "button";
+    denyBtn.className = "alma-btn alma-btn-danger alma-btn-sm";
+    denyBtn.textContent = rejectOpt ? rejectOpt.name : "拒绝";
+    denyBtn.onclick = () => resolvePerm(p.requestId, rejectOpt ? rejectOpt.optionId : "cancel");
+    actions.appendChild(denyBtn);
+
+    row.appendChild(actions);
+    els.permBanner.appendChild(row);
+  }
+}
+
+async function resolvePerm(requestId, optionId) {
+  await fetch("/api/permissions/resolve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ requestId, optionId }),
+  });
+}
+
+function renderEmptyStage(group) {
+  const box = document.createElement("div");
+  box.className = "alma-box empty-stage";
+  box.innerHTML = `
+    <span class="alma-box-label">workspace ready</span>
+    <span class="alma-box-corner-tl">+</span>
+    <span class="alma-box-corner-tr">+</span>
+    <span class="alma-box-corner-bl">+</span>
+    <span class="alma-box-corner-br">+</span>
+    <div class="empty-inner">
+      <h2>任务「${escapeHtml(group?.title || "任务 1")}」就绪 · 主导 ${escapeHtml(group?.leadAgent || "claude")}</h2>
+      <p>每个任务拥有独立的主导 Agent 与上下文账本；你可以随时新建多个并行任务，或查看主导委派出的全部子会话记录。</p>
+      <div class="starter-list">
+        <button type="button" class="starter-btn" data-starter="列出当前项目目录核心文件，并委派 codex 检查主要入口逻辑是否存在边界问题">
+          <span>列出项目核心文件，并委派 codex 协同审查边界问题</span>
+          <span class="arrow">→</span>
+        </button>
+        <button type="button" class="starter-btn" data-starter="分别调用 claude、codex、agy 检查各自状态并汇总一份简明报告">
+          <span>汇总本地多 Agent（claude / codex / agy）状态报告</span>
+          <span class="arrow">→</span>
+        </button>
+        <button type="button" class="starter-btn" data-starter="用 isolate_worktree=true 派发 codex 在独立工作树分支上起草一份 README 改进建议（先不改主目录）">
+          <span>在独立 git worktree 子会话中沙箱实验改动</span>
+          <span class="arrow">→</span>
+        </button>
+      </div>
+    </div>
+  `;
+  box.querySelectorAll("[data-starter]").forEach((btn) => {
+    btn.onclick = () => {
+      els.promptInput.value = btn.getAttribute("data-starter") || "";
+      els.promptInput.focus();
+    };
+  });
+  return box;
+}
+
+function matchTasksForAssistantMessage(msg, nextAssistantTimestamp) {
+  if (msg.role !== "assistant" || isSubStream(msg.streamKey)) return [];
+  const start = msg.timestamp - 500;
+  const end = msg.completedAt ? msg.completedAt + 1500 : nextAssistantTimestamp || Number.MAX_SAFE_INTEGER;
+  return getGroupTasks(msg.groupId).filter(
+    (t) => t.createdAt >= start && t.createdAt <= end,
+  );
+}
+
+function buildMessageElement(msg, linkedTasks) {
+  const entry = document.createElement("div");
+  entry.className = `msg-entry role-${msg.role}`;
+  entry.dataset.messageId = msg.messageId;
+
+  if (msg.role === "system") {
+    const div = document.createElement("div");
+    div.className = "system-divider";
+    div.textContent = msg.text;
+    entry.appendChild(div);
+    return entry;
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "msg-meta";
+  if (msg.agent) {
+    meta.innerHTML = `<span class="agent-tag" data-agent="${escapeHtml(msg.agent)}">${escapeHtml(msg.senderLabel)}</span><span>${formatTime(msg.timestamp)}</span>`;
+  } else {
+    meta.textContent = `${msg.senderLabel} · ${formatTime(msg.timestamp)}`;
+  }
+
+  const bubble = document.createElement("div");
+  bubble.className = "msg-bubble";
+
+  if (msg.role === "assistant") {
+    if (msg.thoughtText && msg.thoughtText.trim()) {
+      const details = document.createElement("details");
+      details.className = "thought-box";
+      details.innerHTML = `<summary>思考过程</summary><div class="thought-body">${escapeHtml(msg.thoughtText)}</div>`;
+      bubble.appendChild(details);
+    }
+
+    if (msg.toolCalls && msg.toolCalls.length > 0) {
+      const strip = document.createElement("div");
+      strip.className = "tool-strip";
+      for (const tool of msg.toolCalls) {
+        const chip = document.createElement("span");
+        const isPeer = tool.title.includes("peer_") || tool.title.includes("peer");
+        chip.className = `tool-chip${isPeer ? " peer-link" : ""}`;
+        chip.textContent = `${tool.title}${tool.status ? ` · ${tool.status}` : ""}`;
+        strip.appendChild(chip);
+      }
+      bubble.appendChild(strip);
+    }
+
+    const body = document.createElement("div");
+    body.className = "md-body";
+    if (msg.text && msg.text.trim()) {
+      body.innerHTML = renderMarkdown(msg.text);
+    } else if (msg.status === "streaming") {
+      body.innerHTML = '<span class="mono" style="color:var(--faint)">思考并生成中...</span>';
+    } else {
+      body.innerHTML = '<span class="mono" style="color:var(--faint)">(空回复)</span>';
+    }
+    bubble.appendChild(body);
+
+    if (linkedTasks.length > 0) {
+      const delWrap = document.createElement("div");
+      delWrap.className = "delegation-strip";
+      for (const task of linkedTasks) {
+        const subSess = STATE.sessions.get(task.targetSessionKey);
+        const label = subSess?.label || task.targetSessionKey.split("__sub__")[1] || task.targetSessionKey;
+        const card = document.createElement("div");
+        card.className = "delegation-card";
+        card.innerHTML = `
+          <div class="delegation-info">
+            <span class="dot ${escapeHtml(task.status)}"></span>
+            <span class="agent-tag" data-agent="${escapeHtml(task.targetAgent)}">${escapeHtml(task.targetAgent)}</span>
+            <span class="mono">子会话: ${escapeHtml(label)}</span>
+            <span class="mono" style="color:var(--faint)">[${escapeHtml(task.status)}]</span>
+          </div>
+        `;
+        const openBtn = document.createElement("button");
+        openBtn.type = "button";
+        openBtn.className = "alma-btn alma-btn-outline alma-btn-sm";
+        openBtn.textContent = "查看子会话 →";
+        openBtn.onclick = () => selectGroup(task.groupId, `sub:${task.targetSessionKey}`);
+        card.appendChild(openBtn);
+        delWrap.appendChild(card);
+      }
+      bubble.appendChild(delWrap);
+    }
+  } else {
+    const pre = document.createElement("div");
+    pre.style.whiteSpace = "pre-wrap";
+    pre.textContent = msg.text;
+    bubble.appendChild(pre);
+  }
+
+  entry.appendChild(meta);
+  entry.appendChild(bubble);
+  return entry;
+}
+
+function renderMessages() {
+  const group = getActiveGroup();
+  const list = STATE.messagesByStream.get(STATE.activeStreamKey) || [];
+  els.messages.innerHTML = "";
+
+  if (list.length === 0) {
+    if (!isSubStream(STATE.activeStreamKey)) {
+      els.messages.appendChild(renderEmptyStage(group));
+    } else {
+      const empty = document.createElement("div");
+      empty.className = "empty-stage alma-box";
+      empty.innerHTML = `
+        <span class="alma-box-label">sub-session</span>
+        <div class="empty-inner">
+          <h2>子会话尚无消息记录</h2>
+          <p>该子会话被委派或发送消息后，完整工具调用与对话轨迹会实时显示在此处。</p>
+        </div>
+      `;
+      els.messages.appendChild(empty);
+    }
+    return;
+  }
+
+  for (let i = 0; i < list.length; i++) {
+    const msg = list[i];
+    const nextAssistant = list.slice(i + 1).find((m) => m.role === "assistant");
+    const linkedTasks = matchTasksForAssistantMessage(msg, nextAssistant?.timestamp);
+    els.messages.appendChild(buildMessageElement(msg, linkedTasks));
+  }
+  els.messages.scrollTop = els.messages.scrollHeight;
+}
+
+function renderInspector() {
+  const group = getActiveGroup();
+  if (!group) return;
+
+  const sessions = getGroupSessions(group.groupId);
+  els.inspSessionCount.textContent = String(sessions.length);
+  els.inspSessions.innerHTML = "";
+
+  if (sessions.length === 0) {
+    const p = document.createElement("div");
+    p.className = "insp-sub";
+    p.textContent = "发送首条指令后将按需拉起主导 ACP 进程";
+    els.inspSessions.appendChild(p);
+  } else {
+    for (const s of sessions) {
+      const targetStream = s.role === "lead" ? `lead:${s.groupId}` : `sub:${s.sessionKey}`;
+      const card = document.createElement("div");
+      card.className = `insp-card${STATE.activeStreamKey === targetStream ? " active" : ""}`;
+      const usageText =
+        s.usage && typeof s.usage.usedTokens === "number"
+          ? `tokens=${s.usage.usedTokens}${s.usage.maxTokens ? `/${s.usage.maxTokens}` : ""}`
+          : "";
+      card.innerHTML = `
+        <div class="insp-row">
+          <span class="mono" style="font-weight:600;display:inline-flex;align-items:center;gap:6px">
+            <span class="dot ${escapeHtml(s.status)}"></span>
+            ${s.role === "lead" ? "★ 主导" : "↳ 子会话"} · ${escapeHtml(s.agent)}
+          </span>
+          <span class="mono" style="font-size:11px;color:var(--faint)">${escapeHtml(s.status)}</span>
+        </div>
+        <div class="insp-sub" title="${escapeHtml(s.sessionKey)}">${escapeHtml(s.label || s.name)}${s.pid ? ` · pid=${s.pid}` : ""}</div>
+        ${s.branch ? `<div class="insp-sub">branch: ${escapeHtml(s.branch)}</div>` : ""}
+        ${usageText ? `<div class="insp-sub">${escapeHtml(usageText)}</div>` : ""}
+      `;
+      const rowActions = document.createElement("div");
+      rowActions.className = "insp-row";
+      const viewBtn = document.createElement("button");
+      viewBtn.type = "button";
+      viewBtn.className = "alma-btn alma-btn-outline alma-btn-sm";
+      viewBtn.textContent = "查看对话";
+      viewBtn.onclick = () => selectGroup(group.groupId, targetStream);
+      rowActions.appendChild(viewBtn);
+
+      if (s.status === "busy" || s.status === "starting") {
+        const cancelBtn = document.createElement("button");
+        cancelBtn.type = "button";
+        cancelBtn.className = "alma-btn alma-btn-danger alma-btn-sm";
+        cancelBtn.textContent = "取消";
+        cancelBtn.onclick = () => void cancelSession(s.sessionKey);
+        rowActions.appendChild(cancelBtn);
+      }
+      card.appendChild(rowActions);
+      els.inspSessions.appendChild(card);
+    }
+  }
+
+  const tasks = getGroupTasks(group.groupId);
+  els.inspTaskCount.textContent = String(tasks.length);
+  els.inspTasks.innerHTML = "";
+
+  if (tasks.length === 0) {
+    const p = document.createElement("div");
+    p.className = "insp-sub";
+    p.textContent = "暂无 peer_ask / peer_dispatch 委派";
+    els.inspTasks.appendChild(p);
+  } else {
+    for (const t of tasks) {
+      const card = document.createElement("div");
+      card.className = "insp-card";
+      card.innerHTML = `
+        <div class="insp-row">
+          <span class="mono" style="display:inline-flex;align-items:center;gap:6px">
+            <span class="dot ${escapeHtml(t.status)}"></span>
+            ${escapeHtml(t.callerAgent)} → ${escapeHtml(t.targetAgent)}
+          </span>
+          <span class="mono" style="font-size:11px;color:var(--faint)">${escapeHtml(t.status)}</span>
+        </div>
+        <div class="insp-preview">${escapeHtml(t.prompt)}</div>
+        ${t.branch ? `<div class="insp-sub">worktree: ${escapeHtml(t.branch)}</div>` : ""}
+      `;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "alma-btn alma-btn-outline alma-btn-sm";
+      btn.textContent = "打开子会话 →";
+      btn.onclick = () => selectGroup(t.groupId, `sub:${t.targetSessionKey}`);
+      card.appendChild(btn);
+      els.inspTasks.appendChild(card);
+    }
+  }
+}
+
+function renderAll() {
+  if (!STATE.taskGroups.has(STATE.activeGroupId)) {
+    STATE.activeGroupId = STATE.defaultGroupId;
+    STATE.activeStreamKey = `lead:${STATE.defaultGroupId}`;
+  }
+  renderSidebarGroups();
+  renderStageHeaderAndTabs();
+  renderPermissions();
+  renderMessages();
+  renderInspector();
+}
+
+function updateStreamingMessageDom(msg) {
+  if (msg.streamKey !== STATE.activeStreamKey) {
+    return;
+  }
+  const existing = els.messages.querySelector(`[data-message-id="${CSS.escape(msg.messageId)}"]`);
+  if (!existing) {
+    renderMessages();
+    return;
+  }
+  const list = STATE.messagesByStream.get(msg.streamKey) || [];
+  const idx = list.findIndex((m) => m.messageId === msg.messageId);
+  const nextAssistant = idx >= 0 ? list.slice(idx + 1).find((m) => m.role === "assistant") : undefined;
+  const linkedTasks = matchTasksForAssistantMessage(msg, nextAssistant?.timestamp);
+  const fresh = buildMessageElement(msg, linkedTasks);
+  existing.replaceWith(fresh);
+  els.messages.scrollTop = els.messages.scrollHeight;
+}
+
+async function sendPrompt() {
+  const prompt = els.promptInput.value.trim();
+  const group = getActiveGroup();
+  if (!prompt || !group) return;
+
+  const targetStreamKey = STATE.activeStreamKey;
+  if (STATE.sendingStreams.has(targetStreamKey)) {
+    return;
+  }
+
+  const subMode = isSubStream(targetStreamKey);
+  const targetSessionKey = subMode ? targetStreamKey.slice(4) : null;
+
+  els.promptInput.value = "";
+  els.promptInput.style.height = "auto";
+  STATE.sendingStreams.add(targetStreamKey);
+  renderStageHeaderAndTabs();
+  renderSidebarGroups();
+
+  try {
+    const endpoint = subMode ? "/api/sessions/chat" : "/api/chat";
+    const payload = subMode
+      ? { sessionKey: targetSessionKey, prompt }
+      : { groupId: group.groupId, prompt };
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      appendLog(`发送失败 [${targetStreamKey}]: ${data.error || res.status}`);
+    }
+  } catch (err) {
+    appendLog(`网络错误 [${targetStreamKey}]: ${err.message}`);
+  } finally {
+    STATE.sendingStreams.delete(targetStreamKey);
+    renderStageHeaderAndTabs();
+    renderSidebarGroups();
+    els.promptInput.focus();
+  }
+}
+
+async function loadAdapterHealth() {
+  try {
+    const res = await fetch("/api/health");
+    const data = await res.json();
+    if (Array.isArray(data.adapters)) {
+      for (const item of data.adapters) {
+        const pill = document.querySelector(`.adapter-pill[data-adapter="${item.agent}"]`);
+        const dot = document.querySelector(`[data-auth-dot="${item.agent}"]`);
+        if (dot) {
+          dot.classList.remove("ready", "down");
+          if (!item.available) dot.classList.add("down");
+          else if (item.authReady) dot.classList.add("ready");
+        }
+        if (pill) {
+          pill.title = item.authReady
+            ? `${item.agent}: 已就绪`
+            : item.authHint || item.reason || `${item.agent}: 未就绪`;
+        }
+      }
+    }
+  } catch {
+    // ignore transient error
+  }
+}
+
+function connectWs() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onopen = () => {
+    els.wsDot.classList.add("ok");
+    els.wsText.textContent = "live";
+    appendLog("WebSocket 已连接");
+  };
+  ws.onclose = () => {
+    els.wsDot.classList.remove("ok");
+    els.wsText.textContent = "retrying";
+    appendLog("WebSocket 断开，正在重连...");
+    setTimeout(connectWs, 1500);
+  };
+  ws.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+    if (msg.type === "snapshot") {
+      STATE.defaultGroupId = msg.defaultGroupId || "grp-default";
+      STATE.baseCwd = msg.baseCwd || "";
+      STATE.permissionMode = msg.permissionMode || "approve-all";
+      els.permSelect.value = STATE.permissionMode;
+      els.cwdPill.textContent = STATE.baseCwd;
+      els.cwdPill.title = STATE.baseCwd;
+
+      STATE.taskGroups.clear();
+      (msg.taskGroups || []).forEach((g) => STATE.taskGroups.set(g.groupId, g));
+      if (!STATE.taskGroups.has(STATE.activeGroupId)) {
+        STATE.activeGroupId = STATE.defaultGroupId;
+        STATE.activeStreamKey = `lead:${STATE.defaultGroupId}`;
+      }
+
+      STATE.sessions.clear();
+      (msg.sessions || []).forEach((s) => STATE.sessions.set(s.sessionKey, s));
+
+      STATE.tasks.clear();
+      (msg.tasks || []).forEach((t) => STATE.tasks.set(t.taskId, t));
+
+      STATE.pendingPermissions.clear();
+      (msg.pendingPermissions || []).forEach((p) => STATE.pendingPermissions.set(p.requestId, p));
+
+      STATE.messagesByStream.clear();
+      (msg.messages || []).forEach((m) => upsertMessageRecord(m));
+
+      renderAll();
+    } else if (msg.type === "group_created" || msg.type === "group_updated") {
+      STATE.taskGroups.set(msg.group.groupId, msg.group);
+      renderSidebarGroups();
+      renderStageHeaderAndTabs();
+    } else if (msg.type === "group_deleted") {
+      STATE.taskGroups.delete(msg.groupId);
+      for (const key of STATE.messagesByStream.keys()) {
+        if (key === `lead:${msg.groupId}` || key.includes(`:${msg.groupId}__`)) {
+          STATE.messagesByStream.delete(key);
+        }
+      }
+      if (STATE.activeGroupId === msg.groupId) {
+        const first = [...STATE.taskGroups.values()][0];
+        if (first) {
+          STATE.activeGroupId = first.groupId;
+          STATE.activeStreamKey = `lead:${first.groupId}`;
+        }
+      }
+      renderAll();
+      appendLog(`已删除任务分组 ${msg.groupId}`);
+    } else if (msg.type === "group_lead_changed") {
+      const grp = STATE.taskGroups.get(msg.groupId);
+      if (grp) {
+        grp.leadAgent = msg.leadAgent;
+      }
+      renderAll();
+      appendLog(`任务 [${msg.groupId}] 主导切换: ${msg.previousLead} -> ${msg.leadAgent}`);
+    } else if (msg.type === "message_upserted") {
+      upsertMessageRecord(msg.message);
+      if (msg.message.streamKey === STATE.activeStreamKey) {
+        const exists = els.messages.querySelector(`[data-message-id="${CSS.escape(msg.message.messageId)}"]`);
+        if (exists) {
+          updateStreamingMessageDom(msg.message);
+        } else {
+          renderMessages();
+        }
+      }
+    } else if (msg.type === "agent_chunk") {
+      const rec = findMessageById(msg.streamKey, msg.messageId);
+      if (rec) {
+        if (msg.channel === "message") rec.text += msg.text;
+        else if (msg.channel === "thought") rec.thoughtText += msg.text;
+        updateStreamingMessageDom(rec);
+      }
+    } else if (msg.type === "tool_event") {
+      appendLog(`[${msg.sessionKey}] tool ${msg.title} (${msg.status || "start"})`);
+      const rec = findMessageById(msg.streamKey, msg.messageId);
+      if (rec) {
+        const existingTool = rec.toolCalls.find((t) => t.toolCallId === msg.toolCallId);
+        if (existingTool) {
+          existingTool.title = msg.title || existingTool.title;
+          if (msg.status) existingTool.status = msg.status;
+          if (msg.kind) existingTool.kind = msg.kind;
+        } else {
+          rec.toolCalls.push({
+            toolCallId: msg.toolCallId,
+            title: msg.title,
+            kind: msg.kind,
+            status: msg.status,
+            rawInput: msg.rawInput,
+            timestamp: msg.timestamp,
+          });
+        }
+        updateStreamingMessageDom(rec);
+      }
+    } else if (msg.type === "session_updated") {
+      STATE.sessions.set(msg.session.sessionKey, msg.session);
+      renderSidebarGroups();
+      renderStageHeaderAndTabs();
+      renderInspector();
+    } else if (msg.type === "task_updated") {
+      STATE.tasks.set(msg.task.taskId, msg.task);
+      renderSidebarGroups();
+      renderInspector();
+      if (msg.task.groupId === STATE.activeGroupId && !isSubStream(STATE.activeStreamKey)) {
+        renderMessages();
+      }
+      appendLog(`委派 ${msg.task.taskId} [${msg.task.targetAgent}] -> ${msg.task.status}`);
+    } else if (msg.type === "permission_requested") {
+      STATE.pendingPermissions.set(msg.permission.requestId, msg.permission);
+      renderPermissions();
+      appendLog(`权限请求: ${msg.permission.sessionKey} (${msg.permission.toolTitle})`);
+    } else if (msg.type === "permission_resolved") {
+      STATE.pendingPermissions.delete(msg.requestId);
+      renderPermissions();
+    } else if (msg.type === "permission_mode_changed") {
+      STATE.permissionMode = msg.permissionMode;
+      els.permSelect.value = msg.permissionMode;
+      appendLog(`权限策略已变更为: ${msg.permissionMode}`);
+    }
+  };
+}
+
+// Event bindings
+els.toggleNewTaskBtn.onclick = () => {
+  els.newTaskPopover.hidden = !els.newTaskPopover.hidden;
+  if (!els.newTaskPopover.hidden) {
+    els.newTaskTitleInput.focus();
+  }
+};
+
+els.cancelNewTaskBtn.onclick = () => {
+  els.newTaskPopover.hidden = true;
+};
+
+document.querySelectorAll("#newTaskAgents .popover-agent-opt").forEach((btn) => {
+  btn.onclick = () => {
+    STATE.newTaskLead = btn.dataset.agent;
+    document
+      .querySelectorAll("#newTaskAgents .popover-agent-opt")
+      .forEach((b) => b.classList.toggle("active", b === btn));
+  };
+});
+
+els.newTaskPopover.onsubmit = async (e) => {
+  e.preventDefault();
+  const title = els.newTaskTitleInput.value.trim();
+  els.newTaskTitleInput.value = "";
+  els.newTaskPopover.hidden = true;
+  await createTaskGroup({ title: title || undefined, leadAgent: STATE.newTaskLead });
+};
+
+document.querySelectorAll("[data-quick-lead]").forEach((btn) => {
+  btn.onclick = () => {
+    const leadAgent = btn.getAttribute("data-quick-lead");
+    void createTaskGroup({ leadAgent });
+  };
+});
+
+document.querySelectorAll("#leadSwitcher .lead-pill").forEach((btn) => {
+  btn.onclick = () => {
+    const group = getActiveGroup();
+    if (group && btn.dataset.agent) {
+      void switchGroupLead(group.groupId, btn.dataset.agent);
+    }
+  };
+});
+
+els.stageTaskTitle.onclick = () => {
+  const group = getActiveGroup();
+  if (group) void renameTaskGroup(group);
+};
+
+els.backToLeadBtn.onclick = () => {
+  const group = getActiveGroup();
+  if (group) selectGroup(group.groupId, `lead:${group.groupId}`);
+};
+
+els.stopSessionBtn.onclick = () => {
+  const key = activeSessionKeyForCurrentView();
+  if (key) void cancelSession(key);
+};
+
+els.permSelect.onchange = async () => {
+  await fetch("/api/permissions/mode", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: els.permSelect.value }),
+  });
+};
+
+els.toggleInspectorBtn.onclick = () => {
+  STATE.inspectorCollapsed = !STATE.inspectorCollapsed;
+  els.workbench.classList.toggle("inspector-collapsed", STATE.inspectorCollapsed);
+};
+
+els.themeToggleBtn.onclick = () => {
+  applyTheme(!document.body.classList.contains("dark"));
+};
+
+els.sendBtn.onclick = () => void sendPrompt();
+
+els.promptInput.addEventListener("input", () => {
+  els.promptInput.style.height = "auto";
+  els.promptInput.style.height = `${Math.min(els.promptInput.scrollHeight, 200)}px`;
+});
+
+els.promptInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    void sendPrompt();
+  }
+});
+
+els.messages.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-copy-code]");
+  if (!btn) return;
+  const wrap = btn.closest(".md-code-wrap");
+  const codeEl = wrap?.querySelector("pre code");
+  if (!codeEl) return;
+  void navigator.clipboard?.writeText(codeEl.textContent || "");
+  const orig = btn.textContent;
+  btn.textContent = "已复制";
+  setTimeout(() => {
+    btn.textContent = orig;
+  }, 1200);
+});
+
+// Init theme & connections
+try {
+  applyTheme(localStorage.getItem("agent-hub-theme") === "dark");
+} catch {
+  applyTheme(false);
+}
+connectWs();
+void loadAdapterHealth();
