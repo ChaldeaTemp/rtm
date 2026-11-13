@@ -211,6 +211,8 @@ export interface TaskGroup {
   agentModels?: Record<string, string>;
   agentEfforts?: Record<string, string>;
   cwd: string;
+  archived?: boolean;
+  archivedAt?: number;
   createdAt: number;
   updatedAt: number;
 }

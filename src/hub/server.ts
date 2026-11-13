@@ -63,6 +63,7 @@ const UpdateGroupBodySchema = z.object({
   groupId: z.string().min(1),
   title: z.string().optional(),
   leadAgent: AgentIdSchema.optional(),
+  archived: z.boolean().optional(),
 });
 
 const GroupModelBodySchema = z.object({
@@ -591,14 +592,36 @@ export class AgentHubServer {
     return { ...group };
   }
 
-  updateGroup(input: { groupId: string; title?: string; leadAgent?: AgentId }): TaskGroup {
+  updateGroup(input: {
+    groupId: string;
+    title?: string;
+    leadAgent?: AgentId;
+    archived?: boolean;
+  }): TaskGroup {
     let group = this.groups.get(input.groupId);
     if (!group) {
       throw new Error(`Unknown task group: ${input.groupId}`);
     }
+    let changed = false;
     const cleanTitle = input.title?.trim();
-    if (cleanTitle) {
+    if (cleanTitle && cleanTitle !== group.title) {
       group.title = cleanTitle;
+      changed = true;
+    }
+    if (typeof input.archived === "boolean" && Boolean(group.archived) !== input.archived) {
+      group.archived = input.archived;
+      group.archivedAt = input.archived ? Date.now() : undefined;
+      changed = true;
+      if (input.archived && this.defaultGroupId === group.groupId) {
+        for (const candidate of this.groups.values()) {
+          if (!candidate.archived && candidate.groupId !== group.groupId) {
+            this.defaultGroupId = candidate.groupId;
+            break;
+          }
+        }
+      }
+    }
+    if (changed) {
       group.updatedAt = Date.now();
       this.broadcast({
         type: "group_updated",
@@ -777,6 +800,162 @@ export class AgentHubServer {
       out.push(cloneMessage(msg));
     }
     return out;
+  }
+
+  exportGroupMarkdown(groupId: string): { filename: string; markdown: string } {
+    const group = this.groups.get(groupId);
+    if (!group) {
+      throw new Error(`Unknown task group: ${groupId}`);
+    }
+
+    const fmtTime = (ts: number) =>
+      new Date(ts).toISOString().replace("T", " ").slice(0, 19) + " UTC";
+
+    const formatMessagesMarkdown = (msgs: ChatMessageRecord[]): string => {
+      const sorted = [...msgs].sort((a, b) => a.timestamp - b.timestamp);
+      if (sorted.length === 0) {
+        return "*暂无对话记录*\n";
+      }
+      const chunks: string[] = [];
+      for (const m of sorted) {
+        if (m.role === "system") {
+          chunks.push(`> *[系统]* ${m.text}`);
+          continue;
+        }
+        const agentBadge = m.agent ? ` (\`${m.agent}\`)` : "";
+        const modelBadge = m.usage?.modelId ? ` · \`${m.usage.modelId}\`` : "";
+        chunks.push(`#### ${m.senderLabel}${agentBadge} · ${fmtTime(m.timestamp)}${modelBadge}`);
+        if (m.usage && (m.usage.totalTokens > 0 || m.usage.inputTokens > 0)) {
+          chunks.push(
+            `- **Tokens**: 输入 ${m.usage.inputTokens} / 输出 ${m.usage.outputTokens} / 总计 ${m.usage.totalTokens}`,
+          );
+        }
+        if (m.thoughtText?.trim()) {
+          chunks.push(
+            `<details>\n<summary>思考过程</summary>\n\n${m.thoughtText.trim()}\n\n</details>`,
+          );
+        }
+        if (m.toolCalls?.length > 0) {
+          const toolLines = m.toolCalls.map(
+            (t) => `- 工具调用: \`${t.title}\`${t.status ? ` (${t.status})` : ""}`,
+          );
+          chunks.push(toolLines.join("\n"));
+        }
+        const bodyText = m.text?.trim()
+          ? m.text.trim()
+          : m.status === "cancelled"
+            ? "*(已停止)*"
+            : "*(空内容)*";
+        chunks.push(bodyText);
+        if (m.artifactIds && m.artifactIds.length > 0) {
+          const artLines = m.artifactIds.map((id) => {
+            const art = this.artifacts.get(id);
+            return art
+              ? `- 交互组件: **${art.title}** (\`${art.kind}\`, id=\`${art.artifactId}\`)`
+              : `- 交互组件: \`${id}\``;
+          });
+          chunks.push(artLines.join("\n"));
+        }
+      }
+      return chunks.join("\n\n") + "\n";
+    };
+
+    const lines: string[] = [];
+    lines.push(`# ${group.title}`);
+    lines.push("");
+    lines.push(`- **任务 ID**: \`${group.groupId}\``);
+    lines.push(`- **主导 Agent**: \`${group.leadAgent}\``);
+    lines.push(`- **工作目录**: \`${group.cwd}\``);
+    lines.push(`- **状态**: ${group.archived ? "已归档" : "进行中"}`);
+    lines.push(`- **创建时间**: ${fmtTime(group.createdAt)}`);
+    lines.push(`- **导出时间**: ${fmtTime(Date.now())}`);
+    lines.push("");
+
+    lines.push("## 一、主导会话记录");
+    lines.push("");
+    const leadMessages = this.getMessages({ groupId, streamKey: `lead:${groupId}` });
+    lines.push(formatMessagesMarkdown(leadMessages));
+
+    const groupTasks = [...this.tasks.values()]
+      .filter((t) => t.groupId === groupId)
+      .sort((a, b) => a.createdAt - b.createdAt);
+
+    lines.push("## 二、委派任务记录");
+    lines.push("");
+    if (groupTasks.length === 0) {
+      lines.push("*暂无 peer_ask / peer_dispatch 委派记录*");
+      lines.push("");
+    } else {
+      for (const task of groupTasks) {
+        lines.push(`### ${task.callerAgent} → ${task.targetAgent} (\`${task.taskId}\`)`);
+        lines.push("");
+        lines.push(`- **状态**: \`${task.status}\``);
+        lines.push(`- **目标会话**: \`${task.targetSessionKey}\``);
+        lines.push(`- **时间**: ${fmtTime(task.createdAt)}`);
+        if (task.branch) {
+          lines.push(`- **Worktree 分支**: \`${task.branch}\``);
+        }
+        lines.push("");
+        lines.push("**委派指令：**");
+        lines.push("");
+        lines.push(task.prompt);
+        lines.push("");
+        if (task.outputText?.trim()) {
+          lines.push("**委派输出：**");
+          lines.push("");
+          lines.push(task.outputText.trim());
+          lines.push("");
+        }
+        if (task.error?.trim()) {
+          lines.push(`**错误信息**: \`${task.error.trim()}\``);
+          lines.push("");
+        }
+      }
+    }
+
+    const subSessionMap = new Map<string, { sessionKey: string; label: string }>();
+    for (const s of this.pool.listSessions()) {
+      if (s.groupId === groupId && s.role === "sub") {
+        subSessionMap.set(`sub:${s.sessionKey}`, {
+          sessionKey: s.sessionKey,
+          label: `${s.agent} · ${s.label || s.name}`,
+        });
+      }
+    }
+    for (const msg of this.messages.values()) {
+      if (msg.groupId === groupId && msg.streamKey.startsWith("sub:")) {
+        if (!subSessionMap.has(msg.streamKey)) {
+          subSessionMap.set(msg.streamKey, {
+            sessionKey: msg.sessionKey,
+            label: msg.sessionKey,
+          });
+        }
+      }
+    }
+
+    lines.push("## 三、子会话完整记录");
+    lines.push("");
+    if (subSessionMap.size === 0) {
+      lines.push("*暂无子会话对话记录*");
+      lines.push("");
+    } else {
+      for (const [streamKey, info] of subSessionMap.entries()) {
+        lines.push(`### 子会话：${info.label} (\`${info.sessionKey}\`)`);
+        lines.push("");
+        lines.push(formatMessagesMarkdown(this.getMessages({ groupId, streamKey })));
+      }
+    }
+
+    const slug =
+      group.title
+        .replace(/[\\/:*?"<>|\s]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 48) || group.groupId;
+    const filename = `${slug}-${new Date().toISOString().slice(0, 10)}.md`;
+    return {
+      filename,
+      markdown: lines.join("\n"),
+    };
   }
 
   private upsertMessage(msg: ChatMessageRecord): ChatMessageRecord {
@@ -1298,8 +1477,21 @@ export class AgentHubServer {
         peerToolsCalled: result.peerToolsCalled,
       };
     } catch (err) {
-      assistantMsg.status = "error";
       const errMsg = err instanceof Error ? err.message : String(err);
+      if (errMsg.includes("SESSION_CANCELLED_BY_USER")) {
+        assistantMsg.status = "cancelled";
+        assistantMsg.completedAt = Date.now();
+        this.upsertMessage(assistantMsg);
+        return {
+          groupId: group.groupId,
+          leadAgent: lead,
+          sessionKey,
+          outputText: assistantMsg.text,
+          stopReason: "cancelled",
+          peerToolsCalled: [],
+        };
+      }
+      assistantMsg.status = "error";
       assistantMsg.text = assistantMsg.text
         ? `${assistantMsg.text}\n\n[Error] ${errMsg}`
         : `[Error] ${errMsg}`;
@@ -1407,8 +1599,19 @@ export class AgentHubServer {
         stopReason: result.stopReason,
       };
     } catch (err) {
-      assistantMsg.status = "error";
       const errMsg = err instanceof Error ? err.message : String(err);
+      if (errMsg.includes("SESSION_CANCELLED_BY_USER")) {
+        assistantMsg.status = "cancelled";
+        assistantMsg.completedAt = Date.now();
+        this.upsertMessage(assistantMsg);
+        return {
+          sessionKey: session.sessionKey,
+          groupId: session.groupId,
+          outputText: assistantMsg.text,
+          stopReason: "cancelled",
+        };
+      }
+      assistantMsg.status = "error";
       assistantMsg.text = assistantMsg.text
         ? `${assistantMsg.text}\n\n[Error] ${errMsg}`
         : `[Error] ${errMsg}`;
@@ -1565,6 +1768,16 @@ export class AgentHubServer {
       })
       .catch((err) => {
         const errMsg = err instanceof Error ? err.message : String(err);
+        if (errMsg.includes("SESSION_CANCELLED_BY_USER")) {
+          task.status = "cancelled";
+          task.completedAt = Date.now();
+          this.updateTask(task);
+
+          assistantMsg.status = "cancelled";
+          assistantMsg.completedAt = Date.now();
+          this.upsertMessage(assistantMsg);
+          return;
+        }
         task.status = "failed";
         task.error = errMsg;
         task.completedAt = Date.now();
@@ -1797,6 +2010,22 @@ export class AgentHubServer {
           defaultGroupId: this.defaultGroupId,
           groups: this.listGroups(),
         });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/groups/export") {
+        const gid = reqUrl.searchParams.get("groupId")?.trim() || this.defaultGroupId;
+        const exported = this.exportGroupMarkdown(gid);
+        if (reqUrl.searchParams.get("format") === "json") {
+          sendJson(res, 200, { ok: true, groupId: gid, ...exported });
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": "text/markdown; charset=utf-8",
+          "Content-Disposition": `attachment; filename="agent-hub-export.md"; filename*=UTF-8''${encodeURIComponent(exported.filename)}`,
+          "Cache-Control": "no-store",
+        });
+        res.end(exported.markdown, "utf8");
         return;
       }
 

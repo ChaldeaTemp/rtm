@@ -320,7 +320,15 @@ async function toggleAgentEnabled(id, enabled) {
 }
 
 async function deleteCustomAgent(id) {
-  if (!window.confirm(`确认移除自定义 Agent「${id}」？`)) return;
+  const ok = await (app.showConfirmModal
+    ? app.showConfirmModal({
+        title: "移除自定义 Agent",
+        message: `确认移除自定义 Agent「${id}」？`,
+        confirmText: "确认移除",
+        danger: true,
+      })
+    : Promise.resolve(false));
+  if (!ok) return;
   try {
     const res = await fetch("/api/agents/delete", {
       method: "POST",
@@ -537,7 +545,7 @@ function renderAgentsView() {
       }
 
       return `
-        <div class="agent-cfg-card ${item.enabled === false ? "disabled" : ""}">
+        <div class="agent-cfg-card ${item.enabled === false ? "disabled" : ""}" data-agent="${esc(item.agent)}"${app.getAgentColorStyle ? app.getAgentColorStyle(item.agent) : ""}>
           <div class="agent-cfg-head">
             <div class="agent-cfg-title">
               ${tagHtml}
@@ -570,7 +578,7 @@ function renderAgentsView() {
         <div class="panel-sec-title"><span class="num">04</span>/ ACP Agent 横向扩展接入</div>
         <div class="panel-sec-sub">统一通过 stdio ACP 协议纳管本地 CLI（claude / codex / agy / opencode / kimi 及自定义 Agent），复用权限审批、资源桥接与 Token 统计</div>
       </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0">
         <button id="refreshAgentsBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button">刷新状态</button>
         <button id="addCustomAgentBtn" class="alma-btn alma-btn-primary alma-btn-sm" type="button">${INTERACTIVE_STATE.showForm ? "收起表单" : "+ 接入自定义 Agent"}</button>
       </div>

@@ -24,6 +24,11 @@ const STATE = {
   resourceBudgets: [],
   resourcesList: [],
   logs: [],
+  groupSearchQuery: "",
+  showArchivedGroups: false,
+  draftsByStream: new Map(),
+  qsItems: [],
+  qsActiveIndex: 0,
 };
 
 const BUILTIN_FALLBACK_AGENTS = [
@@ -35,6 +40,7 @@ const BUILTIN_FALLBACK_AGENTS = [
 ];
 
 const els = {
+  appFavicon: document.getElementById("appFavicon"),
   workbench: document.getElementById("workbench"),
   wsDot: document.getElementById("wsDot"),
   wsText: document.getElementById("wsText"),
@@ -50,6 +56,8 @@ const els = {
   newTaskAgents: document.getElementById("newTaskAgents"),
   cancelNewTaskBtn: document.getElementById("cancelNewTaskBtn"),
   groupCountBadge: document.getElementById("groupCountBadge"),
+  groupSearchInput: document.getElementById("groupSearchInput"),
+  toggleArchivedBtn: document.getElementById("toggleArchivedBtn"),
   groupList: document.getElementById("groupList"),
   adapterPills: document.getElementById("adapterPills"),
   themeToggleBtn: document.getElementById("themeToggleBtn"),
@@ -68,6 +76,7 @@ const els = {
   leadSwitcher: document.getElementById("leadSwitcher"),
   backToLeadBtn: document.getElementById("backToLeadBtn"),
   permSelect: document.getElementById("permSelect"),
+  exportGroupBtn: document.getElementById("exportGroupBtn"),
   toggleInspectorBtn: document.getElementById("toggleInspectorBtn"),
   sessionTabs: document.getElementById("sessionTabs"),
   permBanner: document.getElementById("permBanner"),
@@ -86,6 +95,17 @@ const els = {
   inspTaskCount: document.getElementById("inspTaskCount"),
   inspTasks: document.getElementById("inspTasks"),
   logFeed: document.getElementById("logFeed"),
+  jumpLatestBtn: document.getElementById("jumpLatestBtn"),
+  appModalBackdrop: document.getElementById("appModalBackdrop"),
+  appModalCornerTag: document.getElementById("appModalCornerTag"),
+  appModalTitle: document.getElementById("appModalTitle"),
+  appModalMessage: document.getElementById("appModalMessage"),
+  appModalInput: document.getElementById("appModalInput"),
+  appModalCancelBtn: document.getElementById("appModalCancelBtn"),
+  appModalConfirmBtn: document.getElementById("appModalConfirmBtn"),
+  quickSwitcherBackdrop: document.getElementById("quickSwitcherBackdrop"),
+  quickSwitcherInput: document.getElementById("quickSwitcherInput"),
+  quickSwitcherList: document.getElementById("quickSwitcherList"),
 };
 
 function escapeHtml(value) {
@@ -162,7 +182,8 @@ function getEnabledAgents() {
   return enabled.length > 0 ? enabled : BUILTIN_FALLBACK_AGENTS;
 }
 
-function getAgentColorStyle(agentId) {
+// 内置 Agent 的颜色走 CSS 变量；自定义 Agent 返回配置里的颜色（按当前主题选深/浅色）
+function agentColorValue(agentId) {
   const found = (STATE.agents || []).find((a) => a.agent === agentId);
   if (!found || !found.color) return "";
   const isBuiltinStyled =
@@ -173,8 +194,17 @@ function getAgentColorStyle(agentId) {
     agentId === "kimi";
   if (isBuiltinStyled) return "";
   const isDark = document.body.classList.contains("dark");
-  const color = isDark && found.darkColor ? found.darkColor : found.color;
-  return ` style="--agent-color:${escapeHtml(color)}"`;
+  return isDark && found.darkColor ? found.darkColor : found.color;
+}
+
+function getAgentColorStyle(agentId) {
+  const color = agentColorValue(agentId);
+  return color ? ` style="--agent-color:${escapeHtml(color)}"` : "";
+}
+
+function applyAgentColorVar(el, agentId) {
+  const color = agentColorValue(agentId);
+  if (color) el.style.setProperty("--agent-color", color);
 }
 
 function agentTagHtml(agentId, text) {
@@ -199,8 +229,9 @@ function renderAgentControls() {
       btn.type = "button";
       btn.className = "quick-btn";
       btn.dataset.quickLead = item.agent;
+      applyAgentColorVar(btn, item.agent);
       btn.textContent = `+ ${item.agent}`;
-      btn.title = item.label || item.agent;
+      btn.title = `以 ${item.label || item.agent} 为主导，新建一个并行任务`;
       btn.onclick = () => {
         void createTaskGroup({ leadAgent: item.agent });
       };
@@ -215,6 +246,7 @@ function renderAgentControls() {
       btn.type = "button";
       btn.className = `popover-agent-opt${item.agent === STATE.newTaskLead ? " active" : ""}`;
       btn.dataset.agent = item.agent;
+      applyAgentColorVar(btn, item.agent);
       btn.textContent = item.agent;
       btn.onclick = () => {
         STATE.newTaskLead = item.agent;
@@ -234,6 +266,7 @@ function renderAgentControls() {
       btn.type = "button";
       btn.className = `lead-pill${item.agent === activeLead ? " active" : ""}`;
       btn.dataset.agent = item.agent;
+      applyAgentColorVar(btn, item.agent);
       btn.textContent = item.agent;
       btn.title = item.available ? `${item.label || item.agent} (就绪)` : `${item.label || item.agent}: ${item.reason || "未就绪"}`;
       btn.onclick = () => {
@@ -250,6 +283,7 @@ function renderAgentControls() {
       const pill = document.createElement("span");
       pill.className = "adapter-pill";
       pill.dataset.adapter = item.agent;
+      applyAgentColorVar(pill, item.agent);
       pill.title = item.authReady
         ? `${item.agent}: 已就绪`
         : item.authHint || item.reason || `${item.agent}: 未就绪`;
@@ -407,18 +441,24 @@ function renderMarkdown(raw) {
 }
 
 function appendLog(line) {
-  STATE.logs.push(`[${formatTime(Date.now())}] ${line}`);
+  const time = formatTime(Date.now());
+  STATE.logs.push(`[${time}] ${line}`);
   if (STATE.logs.length > 160) {
     STATE.logs.shift();
   }
   const el = document.createElement("div");
   el.className = "log-line";
-  el.textContent = STATE.logs[STATE.logs.length - 1];
+  const timeEl = document.createElement("span");
+  timeEl.className = "log-time";
+  timeEl.textContent = time;
+  el.appendChild(timeEl);
+  el.appendChild(document.createTextNode(line));
+  const stick = els.logFeed.scrollHeight - els.logFeed.scrollTop - els.logFeed.clientHeight < 40;
   els.logFeed.appendChild(el);
   while (els.logFeed.children.length > 160) {
     els.logFeed.removeChild(els.logFeed.firstChild);
   }
-  els.logFeed.scrollTop = els.logFeed.scrollHeight;
+  if (stick) els.logFeed.scrollTop = els.logFeed.scrollHeight;
 }
 
 function getActiveGroup() {
@@ -448,13 +488,46 @@ function getGroupTasks(groupId) {
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
-function isGroupBusy(groupId) {
-  for (const s of STATE.sessions.values()) {
-    if (s.groupId === groupId && (s.status === "busy" || s.status === "starting")) {
+function isSessionRunning(sessionKey) {
+  if (!sessionKey) return false;
+  const sess = STATE.sessions.get(sessionKey);
+  if (sess && (sess.status === "busy" || sess.status === "starting" || sess.status === "running")) {
+    return true;
+  }
+  if (STATE.sendingStreams.has(`sub:${sessionKey}`)) {
+    return true;
+  }
+  if (sess?.role === "lead" && STATE.sendingStreams.has(`lead:${sess.groupId}`)) {
+    return true;
+  }
+  for (const t of STATE.tasks.values()) {
+    if (t.targetSessionKey === sessionKey && (t.status === "running" || t.status === "queued")) {
       return true;
     }
   }
-  return STATE.sendingStreams.has(`lead:${groupId}`);
+  const streamKey = sess?.role === "lead" ? `lead:${sess.groupId}` : `sub:${sessionKey}`;
+  const msgs = STATE.messagesByStream.get(streamKey);
+  if (msgs && msgs.length > 0 && msgs[msgs.length - 1]?.status === "streaming") {
+    return true;
+  }
+  return false;
+}
+
+function isGroupBusy(groupId) {
+  if (STATE.sendingStreams.has(`lead:${groupId}`)) {
+    return true;
+  }
+  for (const s of STATE.sessions.values()) {
+    if (s.groupId === groupId && isSessionRunning(s.sessionKey)) {
+      return true;
+    }
+  }
+  for (const t of STATE.tasks.values()) {
+    if (t.groupId === groupId && (t.status === "running" || t.status === "queued")) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isSubStream(streamKey) {
@@ -476,8 +549,24 @@ function activeSessionKeyForCurrentView() {
 function selectGroup(groupId, streamKey) {
   const group = STATE.taskGroups.get(groupId);
   if (!group) return;
+  const nextStreamKey = streamKey || `lead:${groupId}`;
+  if (STATE.activeStreamKey && els.promptInput) {
+    if (els.promptInput.value) {
+      STATE.draftsByStream.set(STATE.activeStreamKey, els.promptInput.value);
+    } else {
+      STATE.draftsByStream.delete(STATE.activeStreamKey);
+    }
+  }
   STATE.activeGroupId = groupId;
-  STATE.activeStreamKey = streamKey || `lead:${groupId}`;
+  STATE.activeStreamKey = nextStreamKey;
+  if (els.promptInput) {
+    const restored = STATE.draftsByStream.get(nextStreamKey) || "";
+    els.promptInput.value = restored;
+    els.promptInput.style.height = "auto";
+    if (restored) {
+      els.promptInput.style.height = `${Math.min(els.promptInput.scrollHeight, 200)}px`;
+    }
+  }
   if (STATE.stageView !== "chat") {
     setStageView("chat");
   }
@@ -528,8 +617,97 @@ async function createTaskGroup(opts = {}) {
   selectGroup(data.group.groupId, `lead:${data.group.groupId}`);
 }
 
+let activeModalCleanup = null;
+
+function openAppModal(opts) {
+  if (!els.appModalBackdrop) return Promise.resolve(opts.mode === "confirm" ? false : null);
+  if (activeModalCleanup) {
+    activeModalCleanup(opts.mode === "confirm" ? false : null);
+  }
+
+  return new Promise((resolve) => {
+    const isPrompt = opts.mode === "prompt";
+    els.appModalCornerTag.textContent = isPrompt ? "input" : "confirm";
+    els.appModalTitle.textContent = opts.title || "确认操作";
+    if (opts.message) {
+      els.appModalMessage.hidden = false;
+      els.appModalMessage.textContent = opts.message;
+    } else {
+      els.appModalMessage.hidden = true;
+      els.appModalMessage.textContent = "";
+    }
+
+    if (isPrompt) {
+      els.appModalInput.hidden = false;
+      els.appModalInput.value = opts.defaultValue ?? "";
+      els.appModalInput.placeholder = opts.placeholder || "";
+    } else {
+      els.appModalInput.hidden = true;
+      els.appModalInput.value = "";
+    }
+
+    els.appModalConfirmBtn.textContent = opts.confirmText || "确定";
+    els.appModalConfirmBtn.className = `alma-btn ${opts.danger ? "alma-btn-danger" : "alma-btn-primary"}`;
+    els.appModalBackdrop.hidden = false;
+
+    const finish = (result) => {
+      activeModalCleanup = null;
+      els.appModalBackdrop.hidden = true;
+      els.appModalConfirmBtn.onclick = null;
+      els.appModalCancelBtn.onclick = null;
+      els.appModalBackdrop.onclick = null;
+      els.appModalInput.onkeydown = null;
+      resolve(result);
+    };
+
+    activeModalCleanup = finish;
+
+    els.appModalConfirmBtn.onclick = () => {
+      finish(isPrompt ? els.appModalInput.value : true);
+    };
+    els.appModalCancelBtn.onclick = () => {
+      finish(isPrompt ? null : false);
+    };
+    els.appModalBackdrop.onclick = (e) => {
+      if (e.target === els.appModalBackdrop) {
+        finish(isPrompt ? null : false);
+      }
+    };
+    els.appModalInput.onkeydown = (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === "Enter") {
+        e.preventDefault();
+        finish(els.appModalInput.value);
+      }
+    };
+
+    requestAnimationFrame(() => {
+      if (isPrompt) {
+        els.appModalInput.focus();
+        els.appModalInput.select();
+      } else {
+        els.appModalConfirmBtn.focus();
+      }
+    });
+  });
+}
+
+function showPromptModal(opts) {
+  return openAppModal({ ...opts, mode: "prompt" });
+}
+
+function showConfirmModal(opts) {
+  return openAppModal({ ...opts, mode: "confirm" });
+}
+
 async function renameTaskGroup(group) {
-  const next = window.prompt("重命名任务分组：", group.title);
+  const next = await showPromptModal({
+    title: "重命名任务分组",
+    message: "输入新的任务名称：",
+    defaultValue: group.title,
+    placeholder: "任务名称",
+    confirmText: "保存",
+  });
   if (!next || !next.trim() || next.trim() === group.title) return;
   await fetch("/api/groups/update", {
     method: "POST",
@@ -538,8 +716,33 @@ async function renameTaskGroup(group) {
   });
 }
 
+async function toggleArchiveTaskGroup(group) {
+  if (!group) return;
+  const nextArchived = !group.archived;
+  await fetch("/api/groups/update", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ groupId: group.groupId, archived: nextArchived }),
+  });
+  appendLog(nextArchived ? `已归档任务「${group.title}」` : `已恢复任务「${group.title}」`);
+  if (nextArchived && STATE.activeGroupId === group.groupId && !STATE.showArchivedGroups) {
+    const nextActive = [...STATE.taskGroups.values()].find(
+      (g) => g.groupId !== group.groupId && !g.archived,
+    );
+    if (nextActive) {
+      selectGroup(nextActive.groupId, `lead:${nextActive.groupId}`);
+    }
+  }
+}
+
 async function deleteTaskGroup(group) {
-  if (!window.confirm(`确认删除任务「${group.title}」并关闭其下的所有会话？`)) return;
+  const ok = await showConfirmModal({
+    title: "删除任务分组",
+    message: `确认删除任务「${group.title}」并关闭其下的所有会话？此操作不可撤销。`,
+    confirmText: "确认删除",
+    danger: true,
+  });
+  if (!ok) return;
   await fetch("/api/groups/delete", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -565,9 +768,48 @@ async function cancelSession(sessionKey) {
 }
 
 function renderSidebarGroups() {
-  const groups = [...STATE.taskGroups.values()].sort((a, b) => a.createdAt - b.createdAt);
-  els.groupCountBadge.textContent = String(groups.length);
+  const allGroups = [...STATE.taskGroups.values()].sort((a, b) => a.createdAt - b.createdAt);
+  const archivedCount = allGroups.filter((g) => Boolean(g.archived)).length;
+  const activeCount = allGroups.length - archivedCount;
+  els.groupCountBadge.textContent = String(activeCount);
+
+  if (els.toggleArchivedBtn) {
+    els.toggleArchivedBtn.hidden = archivedCount === 0 && !STATE.showArchivedGroups;
+    els.toggleArchivedBtn.textContent = STATE.showArchivedGroups
+      ? `活跃 ${activeCount}`
+      : `归档 ${archivedCount}`;
+    els.toggleArchivedBtn.classList.toggle("active", STATE.showArchivedGroups);
+  }
+
+  const query = STATE.groupSearchQuery.trim().toLowerCase();
+  const groups = allGroups.filter((g) => {
+    if (query) {
+      const subs = getGroupSubSessions(g.groupId);
+      const haystack = [
+        g.title,
+        g.leadAgent,
+        g.cwd || "",
+        ...subs.map((s) => `${s.agent} ${s.label || s.name}`),
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(query);
+    }
+    return Boolean(g.archived) === STATE.showArchivedGroups;
+  });
+
   els.groupList.innerHTML = "";
+  if (groups.length === 0) {
+    const emptyNote = document.createElement("div");
+    emptyNote.className = "empty-note";
+    emptyNote.textContent = query
+      ? `没有匹配「${STATE.groupSearchQuery.trim()}」的任务`
+      : STATE.showArchivedGroups
+        ? "暂无已归档任务"
+        : "暂无活跃任务";
+    els.groupList.appendChild(emptyNote);
+    return;
+  }
 
   for (const group of groups) {
     const isActiveGroup = group.groupId === STATE.activeGroupId;
@@ -576,7 +818,7 @@ function renderSidebarGroups() {
     const busy = isGroupBusy(group.groupId);
 
     const card = document.createElement("div");
-    card.className = `group-card${isActiveGroup ? " active" : ""}`;
+    card.className = `group-card${isActiveGroup ? " active" : ""}${group.archived ? " is-archived" : ""}`;
     card.onclick = () => selectGroup(group.groupId, `lead:${group.groupId}`);
 
     const top = document.createElement("div");
@@ -594,11 +836,20 @@ function renderSidebarGroups() {
 
     const actions = document.createElement("div");
     actions.className = "group-actions";
+    const archiveBtn = document.createElement("button");
+    archiveBtn.type = "button";
+    archiveBtn.className = "mini-icon-btn";
+    archiveBtn.title = group.archived ? "取消归档" : "归档任务";
+    archiveBtn.textContent = group.archived ? "↺" : "▣";
+    archiveBtn.onclick = (e) => {
+      e.stopPropagation();
+      void toggleArchiveTaskGroup(group);
+    };
     const renameBtn = document.createElement("button");
     renameBtn.type = "button";
     renameBtn.className = "mini-icon-btn";
     renameBtn.title = "重命名任务";
-    renameBtn.textContent = "改";
+    renameBtn.textContent = "✎";
     renameBtn.onclick = (e) => {
       e.stopPropagation();
       void renameTaskGroup(group);
@@ -607,11 +858,12 @@ function renderSidebarGroups() {
     delBtn.type = "button";
     delBtn.className = "mini-icon-btn del";
     delBtn.title = "删除任务";
-    delBtn.textContent = "删";
+    delBtn.textContent = "✕";
     delBtn.onclick = (e) => {
       e.stopPropagation();
       void deleteTaskGroup(group);
     };
+    actions.appendChild(archiveBtn);
     actions.appendChild(renameBtn);
     actions.appendChild(delBtn);
 
@@ -625,6 +877,7 @@ function renderSidebarGroups() {
     meta.className = "group-meta";
     meta.innerHTML = `
       ${agentTagHtml(group.leadAgent, `★ ${group.leadAgent}`)}
+      ${group.archived ? '<span class="archived-pill">已归档</span>' : ""}
       ${activeModel ? `<span class="model-badge-pill" title="当前/预设模型">${escapeHtml(activeModel)}</span>` : ""}
       <span>${subs.length} 子会话 · ${groupTasks.length} 委派</span>
     `;
@@ -653,12 +906,13 @@ function renderSidebarGroups() {
 
       for (const sub of subs) {
         const subStreamKey = `sub:${sub.sessionKey}`;
+        const subRunning = isSessionRunning(sub.sessionKey);
         const subNode = document.createElement("div");
         subNode.className = `tree-node${STATE.activeStreamKey === subStreamKey ? " active" : ""}`;
         subNode.title = sub.sessionKey;
         subNode.innerHTML = `
           <span class="tree-node-left">
-            <span class="dot ${escapeHtml(sub.status)}"></span>
+            <span class="dot ${subRunning ? "busy" : escapeHtml(sub.status)}"></span>
             <span class="tree-node-label">↳ ${escapeHtml(sub.agent)} · ${escapeHtml(sub.label || sub.name)}</span>
           </span>
           ${sub.isWorktree ? '<span class="wt-pill">wt</span>' : ""}
@@ -902,29 +1156,141 @@ function renderStageHeaderAndTabs() {
 
     for (const sub of subs) {
       const key = `sub:${sub.sessionKey}`;
+      const subRunning = isSessionRunning(sub.sessionKey);
       const tab = document.createElement("button");
       tab.type = "button";
       tab.className = `session-tab${STATE.activeStreamKey === key ? " active" : ""}`;
       tab.title = sub.sessionKey;
-      tab.innerHTML = `<span class="dot ${escapeHtml(sub.status)}"></span>↳ ${escapeHtml(sub.agent)} · ${escapeHtml(sub.label || sub.name)}${sub.isWorktree ? " [wt]" : ""}`;
+      tab.innerHTML = `<span class="dot ${subRunning ? "busy" : escapeHtml(sub.status)}"></span>↳ ${escapeHtml(sub.agent)} · ${escapeHtml(sub.label || sub.name)}${sub.isWorktree ? " [wt]" : ""}`;
       tab.onclick = () => selectGroup(group.groupId, key);
       els.sessionTabs.appendChild(tab);
     }
   }
 
   const activeKey = activeSessionKeyForCurrentView();
-  const activeSess = activeKey ? STATE.sessions.get(activeKey) : null;
   const isBusy =
     STATE.sendingStreams.has(STATE.activeStreamKey) ||
-    activeSess?.status === "busy" ||
-    activeSess?.status === "starting";
+    Boolean(activeKey && isSessionRunning(activeKey));
   els.sendBtn.disabled = STATE.sendingStreams.has(STATE.activeStreamKey);
   els.sendBtn.textContent = STATE.sendingStreams.has(STATE.activeStreamKey) ? "执行中..." : "发送 ↵";
   els.stopSessionBtn.hidden = !isBusy;
   renderModelSelectorBar();
 }
 
+const BASE_DOC_TITLE = "Agent Hub — 多 Agent 任务协同台";
+const DEFAULT_FAVICON_HREF = "/ui/icon.svg";
+const ALERT_FAVICON_HREF =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
+      '<rect width="64" height="64" rx="14" fill="#151514"/>' +
+      '<path d="M21 48 L32 16 L43 48 M25.5 36.5 H38.5" stroke="#f3f2ec" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>' +
+      '<circle cx="49" cy="15" r="9" fill="#dc2626"/>' +
+      "</svg>",
+  );
+
+let titleBlinkTimer = null;
+let titleBlinkPhase = false;
+
+function playSoftAlertChime() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const now = ctx.currentTime;
+    const playTone = (freq, startOffset, duration) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, now + startOffset);
+      gain.gain.setValueAtTime(0.0001, now + startOffset);
+      gain.gain.exponentialRampToValueAtTime(0.04, now + startOffset + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + startOffset + duration);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + startOffset);
+      osc.stop(now + startOffset + duration + 0.02);
+    };
+    playTone(660, 0, 0.14);
+    playTone(880, 0.14, 0.22);
+    setTimeout(() => void ctx.close().catch(() => {}), 600);
+  } catch {
+    // ignore WebAudio restrictions
+  }
+}
+
+function syncAttentionIndicators(notifyPayload = null) {
+  const permCount = STATE.pendingPermissions.size;
+  const qCount = STATE.pendingQuestions.size;
+  const total = permCount + qCount;
+
+  if (els.appFavicon) {
+    els.appFavicon.href = total > 0 ? ALERT_FAVICON_HREF : DEFAULT_FAVICON_HREF;
+  }
+
+  if (total === 0) {
+    if (titleBlinkTimer) {
+      clearInterval(titleBlinkTimer);
+      titleBlinkTimer = null;
+    }
+    titleBlinkPhase = false;
+    document.title = BASE_DOC_TITLE;
+    return;
+  }
+
+  const parts = [];
+  if (permCount > 0) parts.push(`${permCount} 权限`);
+  if (qCount > 0) parts.push(`${qCount} 问题`);
+  const summary = `⚠️ [${parts.join(" · ")}待确认]`;
+  const isBackground = document.hidden || !document.hasFocus();
+
+  if (isBackground) {
+    if (!titleBlinkTimer) {
+      titleBlinkPhase = false;
+      document.title = `${summary} ${BASE_DOC_TITLE}`;
+      titleBlinkTimer = setInterval(() => {
+        titleBlinkPhase = !titleBlinkPhase;
+        document.title = titleBlinkPhase
+          ? "⚠️ Agent 正在等待你确认！"
+          : `${summary} ${BASE_DOC_TITLE}`;
+      }, 1000);
+    }
+    if (notifyPayload) {
+      playSoftAlertChime();
+      if ("Notification" in window && Notification.permission === "granted") {
+        try {
+          const n = new Notification("Agent Hub 需要你的确认", {
+            body: notifyPayload.body,
+            tag: "agent-hub-pending",
+            renotify: true,
+          });
+          n.onclick = () => {
+            try {
+              window.focus();
+            } catch {
+              // ignore
+            }
+            if (notifyPayload.groupId) {
+              selectGroup(notifyPayload.groupId, notifyPayload.streamKey);
+            }
+            n.close();
+          };
+        } catch {
+          // ignore desktop Notification failures
+        }
+      }
+    }
+  } else {
+    if (titleBlinkTimer) {
+      clearInterval(titleBlinkTimer);
+      titleBlinkTimer = null;
+    }
+    document.title = `${summary} ${BASE_DOC_TITLE}`;
+  }
+}
+
 function renderPermissions() {
+  syncAttentionIndicators();
   const items = [...STATE.pendingPermissions.values()];
   if (items.length === 0) {
     els.permBanner.hidden = true;
@@ -1005,6 +1371,11 @@ function renderEmptyStage(group) {
           <span class="arrow">→</span>
         </button>
       </div>
+      <div class="empty-hint">
+        <span><kbd>Enter</kbd> 发送</span>
+        <span><kbd>Shift</kbd>+<kbd>Enter</kbd> 换行</span>
+        <span>点击任务标题可重命名</span>
+      </div>
     </div>
   `;
   box.querySelectorAll("[data-starter]").forEach((btn) => {
@@ -1059,6 +1430,49 @@ function buildArtifactCardElement(artifact) {
   return card;
 }
 
+async function copyTextToClipboard(text) {
+  if (!text) return false;
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return true;
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand("copy");
+  ta.remove();
+  return ok;
+}
+
+function findPrecedingPromptForMessage(streamKey, messageId) {
+  const list = STATE.messagesByStream.get(streamKey) || [];
+  const idx = list.findIndex((m) => m.messageId === messageId);
+  const start = idx >= 0 ? idx - 1 : list.length - 1;
+  for (let i = start; i >= 0; i--) {
+    const candidate = list[i];
+    if ((candidate.role === "user" || candidate.role === "caller") && candidate.text && candidate.text.trim()) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+async function regenerateAssistantMessage(streamKey, messageId) {
+  if (!streamKey || STATE.sendingStreams.has(streamKey)) {
+    appendLog("当前会话正在执行中，请先停止或等待本轮结束");
+    return;
+  }
+  const sourcePrompt = findPrecedingPromptForMessage(streamKey, messageId);
+  if (!sourcePrompt) {
+    appendLog("未找到该回复对应的用户指令，无法重新生成");
+    return;
+  }
+  await sendStreamPrompt(sourcePrompt.text.trim(), streamKey);
+}
+
 function buildMessageElement(msg, linkedTasks) {
   const entry = document.createElement("div");
   entry.className = `msg-entry role-${msg.role}`;
@@ -1091,7 +1505,34 @@ function buildMessageElement(msg, linkedTasks) {
     }
     meta.innerHTML = `${agentTagHtml(msg.agent, msg.senderLabel)}<span>${formatTime(msg.timestamp)}</span>${usageHtml}`;
   } else {
-    meta.textContent = `${msg.senderLabel} · ${formatTime(msg.timestamp)}`;
+    meta.innerHTML = `<span>${escapeHtml(`${msg.senderLabel} · ${formatTime(msg.timestamp)}`)}</span>`;
+  }
+
+  const canCopy = Boolean(msg.text && msg.text.trim() && msg.status !== "streaming");
+  const canRegen =
+    msg.role === "assistant" &&
+    msg.status !== "streaming" &&
+    Boolean(findPrecedingPromptForMessage(msg.streamKey, msg.messageId));
+  if (canCopy || canRegen) {
+    const actionWrap = document.createElement("span");
+    actionWrap.className = "msg-actions";
+    if (canCopy) {
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "msg-action-btn";
+      copyBtn.dataset.copyMsg = msg.messageId;
+      copyBtn.textContent = "复制整条";
+      actionWrap.appendChild(copyBtn);
+    }
+    if (canRegen) {
+      const regenBtn = document.createElement("button");
+      regenBtn.type = "button";
+      regenBtn.className = "msg-action-btn";
+      regenBtn.dataset.regenMsg = msg.messageId;
+      regenBtn.textContent = "重新生成";
+      actionWrap.appendChild(regenBtn);
+    }
+    meta.appendChild(actionWrap);
   }
 
   const bubble = document.createElement("div");
@@ -1155,12 +1596,23 @@ function buildMessageElement(msg, linkedTasks) {
             <span class="mono" style="color:var(--faint)">[${escapeHtml(task.status)}]</span>
           </div>
         `;
+        const delActions = document.createElement("div");
+        delActions.className = "delegation-actions";
+        if (task.status === "running" || task.status === "queued") {
+          const stopTaskBtn = document.createElement("button");
+          stopTaskBtn.type = "button";
+          stopTaskBtn.className = "alma-btn alma-btn-danger alma-btn-sm";
+          stopTaskBtn.textContent = "停止";
+          stopTaskBtn.onclick = () => void cancelSession(task.targetSessionKey);
+          delActions.appendChild(stopTaskBtn);
+        }
         const openBtn = document.createElement("button");
         openBtn.type = "button";
         openBtn.className = "alma-btn alma-btn-outline alma-btn-sm";
         openBtn.textContent = "查看子会话 →";
         openBtn.onclick = () => selectGroup(task.groupId, `sub:${task.targetSessionKey}`);
-        card.appendChild(openBtn);
+        delActions.appendChild(openBtn);
+        card.appendChild(delActions);
         delWrap.appendChild(card);
       }
       bubble.appendChild(delWrap);
@@ -1177,9 +1629,33 @@ function buildMessageElement(msg, linkedTasks) {
   return entry;
 }
 
+// 用户往上翻看历史时，不再被流式输出强行拉回底部
+const STICK_THRESHOLD_PX = 80;
+let lastRenderedStreamKey = null;
+
+function isMessagesNearBottom() {
+  const el = els.messages;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < STICK_THRESHOLD_PX;
+}
+
+function scrollMessagesToBottom() {
+  els.messages.scrollTop = els.messages.scrollHeight;
+  updateJumpLatestBtn();
+}
+
+function updateJumpLatestBtn() {
+  if (!els.jumpLatestBtn) return;
+  const hasContent = els.messages.querySelector(".msg-entry") !== null;
+  els.jumpLatestBtn.hidden = !hasContent || isMessagesNearBottom();
+}
+
 function renderMessages() {
   const group = getActiveGroup();
   const list = STATE.messagesByStream.get(STATE.activeStreamKey) || [];
+  const streamChanged = lastRenderedStreamKey !== STATE.activeStreamKey;
+  const stick = streamChanged || isMessagesNearBottom();
+  const prevScrollTop = els.messages.scrollTop;
+  lastRenderedStreamKey = STATE.activeStreamKey;
   els.messages.innerHTML = "";
 
   if (list.length === 0) {
@@ -1197,6 +1673,7 @@ function renderMessages() {
       `;
       els.messages.appendChild(empty);
     }
+    updateJumpLatestBtn();
     return;
   }
 
@@ -1206,7 +1683,12 @@ function renderMessages() {
     const linkedTasks = matchTasksForAssistantMessage(msg, nextAssistant?.timestamp);
     els.messages.appendChild(buildMessageElement(msg, linkedTasks));
   }
-  els.messages.scrollTop = els.messages.scrollHeight;
+  if (stick) {
+    scrollMessagesToBottom();
+  } else {
+    els.messages.scrollTop = prevScrollTop;
+    updateJumpLatestBtn();
+  }
 }
 
 function renderInspector() {
@@ -1225,6 +1707,7 @@ function renderInspector() {
   } else {
     for (const s of sessions) {
       const targetStream = s.role === "lead" ? `lead:${s.groupId}` : `sub:${s.sessionKey}`;
+      const running = isSessionRunning(s.sessionKey);
       const card = document.createElement("div");
       card.className = `insp-card${STATE.activeStreamKey === targetStream ? " active" : ""}`;
       const usageText =
@@ -1234,10 +1717,10 @@ function renderInspector() {
       card.innerHTML = `
         <div class="insp-row">
           <span class="mono" style="font-weight:600;display:inline-flex;align-items:center;gap:6px">
-            <span class="dot ${escapeHtml(s.status)}"></span>
+            <span class="dot ${running ? "busy" : escapeHtml(s.status)}"></span>
             ${s.role === "lead" ? "★ 主导" : "↳ 子会话"} · ${escapeHtml(s.agent)}
           </span>
-          <span class="mono" style="font-size:11px;color:var(--faint)">${escapeHtml(s.status)}</span>
+          <span class="mono" style="font-size:11px;color:var(--faint)">${escapeHtml(running && s.status === "idle" ? "running" : s.status)}</span>
         </div>
         <div class="insp-sub" title="${escapeHtml(s.sessionKey)}">${escapeHtml(s.label || s.name)}${s.pid ? ` · pid=${s.pid}` : ""}</div>
         ${s.currentModelId ? `<div class="insp-sub">model: ${escapeHtml(s.currentModelId)}${s.currentEffort ? ` · effort=${escapeHtml(s.currentEffort)}` : ""}</div>` : ""}
@@ -1253,11 +1736,11 @@ function renderInspector() {
       viewBtn.onclick = () => selectGroup(group.groupId, targetStream);
       rowActions.appendChild(viewBtn);
 
-      if (s.status === "busy" || s.status === "starting") {
+      if (running) {
         const cancelBtn = document.createElement("button");
         cancelBtn.type = "button";
         cancelBtn.className = "alma-btn alma-btn-danger alma-btn-sm";
-        cancelBtn.textContent = "取消";
+        cancelBtn.textContent = "停止";
         cancelBtn.onclick = () => void cancelSession(s.sessionKey);
         rowActions.appendChild(cancelBtn);
       }
@@ -1290,12 +1773,24 @@ function renderInspector() {
         <div class="insp-preview">${escapeHtml(t.prompt)}</div>
         ${t.branch ? `<div class="insp-sub">worktree: ${escapeHtml(t.branch)}</div>` : ""}
       `;
+      const taskActions = document.createElement("div");
+      taskActions.className = "insp-row";
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "alma-btn alma-btn-outline alma-btn-sm";
       btn.textContent = "打开子会话 →";
       btn.onclick = () => selectGroup(t.groupId, `sub:${t.targetSessionKey}`);
-      card.appendChild(btn);
+      taskActions.appendChild(btn);
+
+      if (t.status === "running" || t.status === "queued") {
+        const stopBtn = document.createElement("button");
+        stopBtn.type = "button";
+        stopBtn.className = "alma-btn alma-btn-danger alma-btn-sm";
+        stopBtn.textContent = "停止";
+        stopBtn.onclick = () => void cancelSession(t.targetSessionKey);
+        taskActions.appendChild(stopBtn);
+      }
+      card.appendChild(taskActions);
       els.inspTasks.appendChild(card);
     }
   }
@@ -1391,26 +1886,33 @@ function updateStreamingMessageDom(msg) {
   const nextAssistant = idx >= 0 ? list.slice(idx + 1).find((m) => m.role === "assistant") : undefined;
   const linkedTasks = matchTasksForAssistantMessage(msg, nextAssistant?.timestamp);
   const fresh = buildMessageElement(msg, linkedTasks);
+  const stick = isMessagesNearBottom();
   existing.replaceWith(fresh);
-  els.messages.scrollTop = els.messages.scrollHeight;
+  if (stick) {
+    scrollMessagesToBottom();
+  } else {
+    updateJumpLatestBtn();
+  }
 }
 
-async function sendPrompt() {
-  const prompt = els.promptInput.value.trim();
-  const group = getActiveGroup();
-  if (!prompt || !group) return;
-
-  const targetStreamKey = STATE.activeStreamKey;
+async function sendStreamPrompt(prompt, targetStreamKey) {
+  if (!prompt || !targetStreamKey) return;
   if (STATE.sendingStreams.has(targetStreamKey)) {
     return;
   }
 
   const subMode = isSubStream(targetStreamKey);
   const targetSessionKey = subMode ? targetStreamKey.slice(4) : null;
+  const targetGroupId = subMode
+    ? STATE.sessions.get(targetSessionKey)?.groupId || STATE.activeGroupId
+    : targetStreamKey.slice(5);
+  if (!STATE.taskGroups.has(targetGroupId)) return;
 
-  els.promptInput.value = "";
-  els.promptInput.style.height = "auto";
   STATE.sendingStreams.add(targetStreamKey);
+  if (targetStreamKey === STATE.activeStreamKey) {
+    lastRenderedStreamKey = null;
+    scrollMessagesToBottom();
+  }
   renderStageHeaderAndTabs();
   renderSidebarGroups();
 
@@ -1418,7 +1920,7 @@ async function sendPrompt() {
     const endpoint = subMode ? "/api/sessions/chat" : "/api/chat";
     const payload = subMode
       ? { sessionKey: targetSessionKey, prompt }
-      : { groupId: group.groupId, prompt };
+      : { groupId: targetGroupId, prompt };
     const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1434,8 +1936,26 @@ async function sendPrompt() {
     STATE.sendingStreams.delete(targetStreamKey);
     renderStageHeaderAndTabs();
     renderSidebarGroups();
-    els.promptInput.focus();
+    if (targetStreamKey === STATE.activeStreamKey) {
+      els.promptInput.focus();
+    }
   }
+}
+
+async function sendPrompt() {
+  const prompt = els.promptInput.value.trim();
+  const group = getActiveGroup();
+  if (!prompt || !group) return;
+
+  const targetStreamKey = STATE.activeStreamKey;
+  if (STATE.sendingStreams.has(targetStreamKey)) {
+    return;
+  }
+
+  els.promptInput.value = "";
+  els.promptInput.style.height = "auto";
+  STATE.draftsByStream.delete(targetStreamKey);
+  await sendStreamPrompt(prompt, targetStreamKey);
 }
 
 async function loadAdapterHealth() {
@@ -1560,11 +2080,16 @@ function connectWs() {
       if (msg.question) {
         STATE.pendingQuestions.set(msg.question.questionId, msg.question);
         window.HUB_INTERACTIVE?.renderQuestions?.();
+        syncAttentionIndicators({
+          body: `${msg.question.agent || "Agent"} 发起提问：${msg.question.title}`,
+          groupId: STATE.sessions.get(msg.question.sessionKey)?.groupId,
+        });
         appendLog(`待确认问题: ${msg.question.title}`);
       }
     } else if (msg.type === "question_resolved") {
       STATE.pendingQuestions.delete(msg.questionId);
       window.HUB_INTERACTIVE?.renderQuestions?.();
+      syncAttentionIndicators();
       appendLog(msg.cancelled ? `已取消问题 ${msg.questionId}` : `已提交问题回答 ${msg.questionId}`);
     } else if (msg.type === "telemetry_updated") {
       STATE.telemetry = msg.telemetry;
@@ -1658,6 +2183,7 @@ function connectWs() {
     } else if (msg.type === "task_updated") {
       STATE.tasks.set(msg.task.taskId, msg.task);
       renderSidebarGroups();
+      renderStageHeaderAndTabs();
       renderInspector();
       if (msg.task.groupId === STATE.activeGroupId && !isSubStream(STATE.activeStreamKey)) {
         renderMessages();
@@ -1666,6 +2192,16 @@ function connectWs() {
     } else if (msg.type === "permission_requested") {
       STATE.pendingPermissions.set(msg.permission.requestId, msg.permission);
       renderPermissions();
+      const permSess = STATE.sessions.get(msg.permission.sessionKey);
+      syncAttentionIndicators({
+        body: `${msg.permission.agent} 请求确认：${msg.permission.toolTitle}`,
+        groupId: permSess?.groupId,
+        streamKey: permSess
+          ? permSess.role === "lead"
+            ? `lead:${permSess.groupId}`
+            : `sub:${permSess.sessionKey}`
+          : undefined,
+      });
       appendLog(`权限请求: ${msg.permission.sessionKey} (${msg.permission.toolTitle})`);
     } else if (msg.type === "permission_resolved") {
       STATE.pendingPermissions.delete(msg.requestId);
@@ -1824,13 +2360,27 @@ if (els.refreshModelsBtn) {
   };
 }
 
+function setInspectorCollapsed(collapsed) {
+  STATE.inspectorCollapsed = collapsed;
+  els.workbench.classList.toggle("inspector-collapsed", collapsed);
+  els.toggleInspectorBtn.classList.toggle("is-on", !collapsed);
+  els.toggleInspectorBtn.setAttribute("aria-pressed", String(!collapsed));
+  els.toggleInspectorBtn.title = collapsed ? "展开右侧会话 / 委派 / 日志面板" : "收起右侧面板";
+  try {
+    localStorage.setItem("agent-hub-inspector", collapsed ? "collapsed" : "open");
+  } catch {
+    // ignore storage failures
+  }
+}
+
 els.toggleInspectorBtn.onclick = () => {
-  STATE.inspectorCollapsed = !STATE.inspectorCollapsed;
-  els.workbench.classList.toggle("inspector-collapsed", STATE.inspectorCollapsed);
+  setInspectorCollapsed(!STATE.inspectorCollapsed);
 };
 
 els.themeToggleBtn.onclick = () => {
   applyTheme(!document.body.classList.contains("dark"));
+  // 自定义 Agent 的徽章色区分深浅主题，切换后重绘一次
+  if (STATE.taskGroups.size > 0) renderAll();
 };
 
 els.sendBtn.onclick = () => void sendPrompt();
@@ -1841,13 +2391,339 @@ els.promptInput.addEventListener("input", () => {
 });
 
 els.promptInput.addEventListener("keydown", (e) => {
+  // 中文输入法选词时按 Enter 只是上屏，不能当成发送
+  if (e.isComposing || e.keyCode === 229) return;
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     void sendPrompt();
   }
 });
 
+els.messages.addEventListener("scroll", () => updateJumpLatestBtn(), { passive: true });
+
+if (els.jumpLatestBtn) {
+  els.jumpLatestBtn.onclick = () => scrollMessagesToBottom();
+}
+
+async function exportGroupMarkdown(group = getActiveGroup()) {
+  if (!group) return;
+  try {
+    const res = await fetch(
+      `/api/groups/export?groupId=${encodeURIComponent(group.groupId)}&format=json`,
+    );
+    const data = await res.json();
+    if (!res.ok || data.ok === false || !data.markdown) {
+      appendLog(`导出失败: ${data.error || res.status}`);
+      return;
+    }
+    const blob = new Blob([data.markdown], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = data.filename || `${group.groupId}.md`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    appendLog(`已导出 Markdown: ${a.download}`);
+  } catch (err) {
+    appendLog(`导出失败: ${err.message}`);
+  }
+}
+
+function openNewTaskPopover() {
+  if (STATE.stageView !== "chat") {
+    setStageView("chat");
+  }
+  els.newTaskPopover.hidden = false;
+  if (els.newTaskCwdInput && !els.newTaskCwdInput.value.trim()) {
+    els.newTaskCwdInput.placeholder = getActiveGroup()?.cwd || STATE.baseCwd || "默认工作区目录（可留空）";
+  }
+  els.newTaskTitleInput.focus();
+}
+
+function buildQuickSwitcherItems(queryRaw) {
+  const q = String(queryRaw || "").trim().toLowerCase();
+  const groups = [...STATE.taskGroups.values()].sort((a, b) => {
+    if (Boolean(a.archived) !== Boolean(b.archived)) return a.archived ? 1 : -1;
+    return b.updatedAt - a.updatedAt;
+  });
+
+  const items = [];
+  for (const g of groups) {
+    const busy = isGroupBusy(g.groupId);
+    items.push({
+      id: `grp:${g.groupId}`,
+      title: g.title,
+      meta: `${g.leadAgent}${g.archived ? " · 已归档" : ""}${busy ? " · 运行中" : ""}`,
+      dotClass: busy ? "busy" : "idle",
+      searchText: `${g.title} ${g.leadAgent} ${g.cwd || ""}`.toLowerCase(),
+      run: () => selectGroup(g.groupId, `lead:${g.groupId}`),
+    });
+    for (const sub of getGroupSubSessions(g.groupId)) {
+      const running = isSessionRunning(sub.sessionKey);
+      items.push({
+        id: `sub:${sub.sessionKey}`,
+        title: `${g.title} / ↳ ${sub.agent} · ${sub.label || sub.name}`,
+        meta: running ? "子会话 · 运行中" : `子会话 · ${sub.status}`,
+        dotClass: running ? "busy" : sub.status,
+        searchText: `${g.title} ${sub.agent} ${sub.label || sub.name}`.toLowerCase(),
+        run: () => selectGroup(g.groupId, `sub:${sub.sessionKey}`),
+      });
+    }
+  }
+
+  const activeGroup = getActiveGroup();
+  items.push(
+    {
+      id: "cmd:new-task",
+      title: "+ 新建并行任务",
+      meta: "快捷键 Ctrl+N",
+      dotClass: "idle",
+      searchText: "新建 并行 任务 new task",
+      run: () => openNewTaskPopover(),
+    },
+    {
+      id: "cmd:export-md",
+      title: "导出当前任务为 Markdown",
+      meta: activeGroup ? activeGroup.title : "",
+      dotClass: "idle",
+      searchText: "导出 markdown md export",
+      run: () => void exportGroupMarkdown(),
+    },
+    {
+      id: "cmd:toggle-archived",
+      title: STATE.showArchivedGroups ? "切回活跃任务列表" : "查看已归档任务",
+      meta: "侧边栏筛选",
+      dotClass: "idle",
+      searchText: "归档 archive 任务列表",
+      run: () => {
+        STATE.showArchivedGroups = !STATE.showArchivedGroups;
+        renderSidebarGroups();
+      },
+    },
+    {
+      id: "cmd:toggle-theme",
+      title: document.body.classList.contains("dark") ? "切换为浅色主题" : "切换为深色主题",
+      meta: "外观",
+      dotClass: "idle",
+      searchText: "主题 深色 浅色 theme dark light",
+      run: () => {
+        applyTheme(!document.body.classList.contains("dark"));
+        if (STATE.taskGroups.size > 0) renderAll();
+      },
+    },
+  );
+
+  if (!q) return items;
+  return items.filter((item) => item.searchText.includes(q));
+}
+
+function renderQuickSwitcherList() {
+  if (!els.quickSwitcherList) return;
+  const items = buildQuickSwitcherItems(els.quickSwitcherInput?.value || "");
+  STATE.qsItems = items;
+  if (STATE.qsActiveIndex >= items.length) {
+    STATE.qsActiveIndex = 0;
+  }
+  els.quickSwitcherList.innerHTML = "";
+  if (items.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty-note";
+    empty.textContent = "未找到匹配的任务或命令";
+    els.quickSwitcherList.appendChild(empty);
+    return;
+  }
+  items.forEach((item, idx) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `qs-item${idx === STATE.qsActiveIndex ? " active" : ""}`;
+    btn.innerHTML = `
+      <span class="qs-item-main">
+        <span class="dot ${escapeHtml(item.dotClass)}"></span>
+        <span>${escapeHtml(item.title)}</span>
+      </span>
+      <span class="qs-item-sub">${escapeHtml(item.meta)}</span>
+    `;
+    btn.onmouseenter = () => {
+      STATE.qsActiveIndex = idx;
+      els.quickSwitcherList.querySelectorAll(".qs-item").forEach((el, i) => {
+        el.classList.toggle("active", i === idx);
+      });
+    };
+    btn.onclick = () => {
+      closeQuickSwitcher();
+      item.run();
+    };
+    els.quickSwitcherList.appendChild(btn);
+  });
+}
+
+function openQuickSwitcher() {
+  if (!els.quickSwitcherBackdrop) return;
+  els.quickSwitcherBackdrop.hidden = false;
+  if (els.quickSwitcherInput) els.quickSwitcherInput.value = "";
+  STATE.qsActiveIndex = 0;
+  renderQuickSwitcherList();
+  requestAnimationFrame(() => els.quickSwitcherInput?.focus());
+}
+
+function closeQuickSwitcher() {
+  if (!els.quickSwitcherBackdrop) return;
+  els.quickSwitcherBackdrop.hidden = true;
+}
+
+if (els.groupSearchInput) {
+  els.groupSearchInput.addEventListener("input", () => {
+    STATE.groupSearchQuery = els.groupSearchInput.value;
+    renderSidebarGroups();
+  });
+}
+
+if (els.toggleArchivedBtn) {
+  els.toggleArchivedBtn.onclick = () => {
+    STATE.showArchivedGroups = !STATE.showArchivedGroups;
+    renderSidebarGroups();
+  };
+}
+
+if (els.exportGroupBtn) {
+  els.exportGroupBtn.onclick = () => void exportGroupMarkdown();
+}
+
+if (els.quickSwitcherBackdrop) {
+  els.quickSwitcherBackdrop.onclick = (e) => {
+    if (e.target === els.quickSwitcherBackdrop) closeQuickSwitcher();
+  };
+}
+
+if (els.quickSwitcherInput) {
+  els.quickSwitcherInput.addEventListener("input", () => {
+    STATE.qsActiveIndex = 0;
+    renderQuickSwitcherList();
+  });
+  els.quickSwitcherInput.addEventListener("keydown", (e) => {
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (STATE.qsItems.length > 0) {
+        STATE.qsActiveIndex = (STATE.qsActiveIndex + 1) % STATE.qsItems.length;
+        renderQuickSwitcherList();
+      }
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (STATE.qsItems.length > 0) {
+        STATE.qsActiveIndex = (STATE.qsActiveIndex - 1 + STATE.qsItems.length) % STATE.qsItems.length;
+        renderQuickSwitcherList();
+      }
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const target = STATE.qsItems[STATE.qsActiveIndex];
+      if (target) {
+        closeQuickSwitcher();
+        target.run();
+      }
+    }
+  });
+}
+
+window.addEventListener("focus", () => syncAttentionIndicators());
+window.addEventListener("blur", () => syncAttentionIndicators());
+document.addEventListener("visibilitychange", () => syncAttentionIndicators());
+
+document.addEventListener("keydown", (e) => {
+  if (e.isComposing || e.keyCode === 229) return;
+  const key = e.key.toLowerCase();
+
+  if ((e.ctrlKey || e.metaKey) && key === "k") {
+    e.preventDefault();
+    if (els.quickSwitcherBackdrop && !els.quickSwitcherBackdrop.hidden) {
+      closeQuickSwitcher();
+    } else {
+      openQuickSwitcher();
+    }
+    return;
+  }
+
+  if (((e.ctrlKey || e.metaKey) || e.altKey) && !e.shiftKey && key === "n") {
+    e.preventDefault();
+    if (els.quickSwitcherBackdrop && !els.quickSwitcherBackdrop.hidden) closeQuickSwitcher();
+    openNewTaskPopover();
+    return;
+  }
+
+  if (e.key === "Escape") {
+    if (els.appModalBackdrop && !els.appModalBackdrop.hidden) {
+      e.preventDefault();
+      els.appModalCancelBtn?.click();
+      return;
+    }
+    if (els.quickSwitcherBackdrop && !els.quickSwitcherBackdrop.hidden) {
+      e.preventDefault();
+      closeQuickSwitcher();
+      return;
+    }
+    if (!els.newTaskPopover.hidden) {
+      e.preventDefault();
+      els.newTaskPopover.hidden = true;
+      return;
+    }
+    if (document.activeElement === els.groupSearchInput && els.groupSearchInput.value) {
+      e.preventDefault();
+      els.groupSearchInput.value = "";
+      STATE.groupSearchQuery = "";
+      renderSidebarGroups();
+      return;
+    }
+    if (STATE.stageView === "chat") {
+      const activeKey = activeSessionKeyForCurrentView();
+      if (
+        STATE.sendingStreams.has(STATE.activeStreamKey) ||
+        (activeKey && isSessionRunning(activeKey))
+      ) {
+        e.preventDefault();
+        void cancelSession(activeKey);
+        appendLog("已按 Esc 停止当前会话");
+      }
+    }
+  }
+});
+
+els.permSelect.addEventListener("change", () => {
+  if (
+    els.permSelect.value !== "approve-all" &&
+    "Notification" in window &&
+    Notification.permission === "default"
+  ) {
+    void Notification.requestPermission().catch(() => {});
+  }
+});
+
 els.messages.addEventListener("click", (e) => {
+  const copyMsgBtn = e.target.closest("[data-copy-msg]");
+  if (copyMsgBtn) {
+    const msgId = copyMsgBtn.dataset.copyMsg;
+    const msg = findMessageById(STATE.activeStreamKey, msgId);
+    if (msg?.text) {
+      void copyTextToClipboard(msg.text).then((ok) => {
+        if (!ok) return;
+        const orig = copyMsgBtn.textContent;
+        copyMsgBtn.textContent = "已复制";
+        setTimeout(() => {
+          copyMsgBtn.textContent = orig;
+        }, 1200);
+      });
+    }
+    return;
+  }
+
+  const regenBtn = e.target.closest("[data-regen-msg]");
+  if (regenBtn) {
+    const msgId = regenBtn.dataset.regenMsg;
+    void regenerateAssistantMessage(STATE.activeStreamKey, msgId);
+    return;
+  }
+
   const toggleBtn = e.target.closest("[data-toggle-inline-preview]");
   if (toggleBtn) {
     const wrap = toggleBtn.closest(".md-code-wrap");
@@ -1901,8 +2777,11 @@ window.HUB_APP = {
   refreshHeaderMetrics,
   getEnabledAgents,
   agentTagHtml,
+  getAgentColorStyle,
   renderAgentControls,
   ensureAgentModelsLoaded,
+  showPromptModal,
+  showConfirmModal,
   onStateChange: null,
   onResourcesUpdated: null,
 };
@@ -1912,6 +2791,11 @@ try {
   applyTheme(localStorage.getItem("agent-hub-theme") === "dark");
 } catch {
   applyTheme(false);
+}
+try {
+  setInspectorCollapsed(localStorage.getItem("agent-hub-inspector") === "collapsed");
+} catch {
+  setInspectorCollapsed(false);
 }
 renderAgentControls();
 setStageView("chat");

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Agent Hub — 多 Agent 任务协同台</title>
-  <link rel="icon" type="image/svg+xml" href="/ui/icon.svg" />
+  <link id="appFavicon" rel="icon" type="image/svg+xml" href="/ui/icon.svg" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -18,6 +18,12 @@
   <link rel="stylesheet" href="/ui/panels.css" />
 </head>
 <body>
+  <!-- 在首帧绘制前套用主题，避免深色模式启动时先闪一下浅色 -->
+  <script>
+    try {
+      if (localStorage.getItem("agent-hub-theme") === "dark") document.body.classList.add("dark");
+    } catch (e) {}
+  </script>
   <div id="workbench" class="workbench">
     <!-- Left Sidebar: Task Groups & Session Tree -->
     <aside class="sidebar">
@@ -28,7 +34,7 @@
             <span>agent-hub</span>
           </div>
           <div class="ws-status">
-            <span id="portBadge" class="mono" style="font-size:11px;color:var(--faint)"></span>
+            <span id="portBadge" class="mono"></span>
             <span id="wsDot" class="dot"></span>
             <span id="wsText">connecting</span>
           </div>
@@ -84,6 +90,19 @@
         <span id="groupCountBadge" class="mono">0</span>
       </div>
 
+      <div id="groupFilterBar" class="group-filter-bar">
+        <input
+          id="groupSearchInput"
+          class="text-input group-search-input"
+          type="search"
+          placeholder="搜索任务 / Agent..."
+          autocomplete="off"
+        />
+        <button id="toggleArchivedBtn" class="mini-filter-btn" type="button" title="查看或隐藏已归档任务" hidden>
+          归档 0
+        </button>
+      </div>
+
       <div id="groupList" class="group-list"></div>
 
       <div class="sidebar-footer">
@@ -92,13 +111,16 @@
           <span class="adapter-pill" data-adapter="codex"><span class="dot" data-auth-dot="codex"></span>codex</span>
           <span class="adapter-pill" data-adapter="agy"><span class="dot" data-auth-dot="agy"></span>agy</span>
         </div>
-        <div style="display:flex;gap:6px;align-items:center">
-          <button id="themeToggleBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="切换浅色 / 深色主题">
-            深色
-          </button>
-          <button id="quitHubBtn" class="alma-btn alma-btn-danger alma-btn-sm" type="button" title="停止后台服务并关闭应用" hidden>
-            退出
-          </button>
+        <div class="footer-actions">
+          <span class="kbd-hint" title="Ctrl+K 快速切换任务 · Ctrl+N 新建任务 · Esc 停止当前运行">Ctrl+K 切换 · Esc 停止</span>
+          <div class="footer-actions-right">
+            <button id="themeToggleBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="切换浅色 / 深色主题">
+              深色
+            </button>
+            <button id="quitHubBtn" class="alma-btn alma-btn-danger alma-btn-sm" type="button" title="停止后台服务并关闭应用" hidden>
+              退出
+            </button>
+          </div>
         </div>
       </div>
     </aside>
@@ -156,6 +178,10 @@
             <option value="manual">权限：全部人工确认</option>
           </select>
 
+          <button id="exportGroupBtn" class="alma-btn alma-btn-outline" type="button" title="将当前任务对话与委派记录导出为 Markdown">
+            导出 MD
+          </button>
+
           <button id="toggleInspectorBtn" class="alma-btn alma-btn-outline" type="button">
             面板
           </button>
@@ -191,7 +217,6 @@
               <select id="modelSelect" class="perm-select model-select" title="选择当前会话 / 主导 Agent 模型"></select>
               <select id="effortSelect" class="perm-select effort-select" title="选择思考 / 推理强度" hidden></select>
               <button id="refreshModelsBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="实时握手探测并刷新该 Agent 可用模型">↻ 模型</button>
-              <span id="composerHint" class="composer-hint">主导会话可调用 peer_ask / peer_dispatch 委派子会话</span>
             </div>
             <div class="composer-actions">
               <button id="stopSessionBtn" class="alma-btn alma-btn-danger" type="button" hidden>停止</button>
@@ -199,6 +224,8 @@
             </div>
           </div>
         </div>
+        <div id="composerHint" class="composer-hint">主导会话可调用 peer_ask / peer_dispatch 委派子会话</div>
+        <button id="jumpLatestBtn" class="jump-latest-btn" type="button" hidden>↓ 回到最新消息</button>
       </footer>
     </main>
 
@@ -227,6 +254,48 @@
         <div id="logFeed" class="log-feed"></div>
       </div>
     </aside>
+  </div>
+
+  <!-- In-App Dialog Modal (replaces native prompt / confirm) -->
+  <div id="appModalBackdrop" class="alma-modal-backdrop" hidden>
+    <div class="alma-box alma-modal-card" role="dialog" aria-modal="true" aria-labelledby="appModalTitle">
+      <span id="appModalCornerTag" class="alma-box-label">dialog</span>
+      <span class="alma-box-corner-tl">+</span>
+      <span class="alma-box-corner-tr">+</span>
+      <span class="alma-box-corner-bl">+</span>
+      <span class="alma-box-corner-br">+</span>
+      <h3 id="appModalTitle" class="alma-modal-title">确认操作</h3>
+      <p id="appModalMessage" class="alma-modal-msg" hidden></p>
+      <input id="appModalInput" class="text-input alma-modal-input" type="text" autocomplete="off" hidden />
+      <div class="alma-modal-actions">
+        <button id="appModalCancelBtn" type="button" class="alma-btn">取消</button>
+        <button id="appModalConfirmBtn" type="button" class="alma-btn alma-btn-primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick Task & Command Switcher (Ctrl+K) -->
+  <div id="quickSwitcherBackdrop" class="alma-modal-backdrop" hidden>
+    <div class="alma-box quick-switcher-card" role="dialog" aria-modal="true" aria-label="快速切换任务与命令">
+      <span class="alma-box-label">ctrl+k</span>
+      <span class="alma-box-corner-tl">+</span>
+      <span class="alma-box-corner-tr">+</span>
+      <span class="alma-box-corner-bl">+</span>
+      <span class="alma-box-corner-br">+</span>
+      <input
+        id="quickSwitcherInput"
+        class="text-input qs-input"
+        type="text"
+        placeholder="输入任务名、子会话或操作（如：新建、导出、归档）..."
+        autocomplete="off"
+      />
+      <div id="quickSwitcherList" class="qs-list"></div>
+      <div class="qs-foot mono">
+        <span>↑↓ 选择</span>
+        <span>Enter 确认</span>
+        <span>Esc 关闭</span>
+      </div>
+    </div>
   </div>
 
   <script type="module" src="/ui/app.js"></script>

@@ -223,6 +223,8 @@ export function buildSessionKey(agent: AgentId, sessionName: string): string {
 export class AcpPool extends EventEmitter {
   private sessions = new Map<string, ManagedSession>();
   private startingSessions = new Map<string, Promise<ManagedSession>>();
+  private startingChildren = new Map<string, { child: ChildProcess; record: SessionRecord }>();
+  private cancelledStarting = new Set<string>();
   private pendingPermissions = new Map<string, PendingPermissionWaiter>();
   private permissionMode: PermissionMode = "approve-all";
   private hubUrl = "";
@@ -530,6 +532,8 @@ export class AcpPool extends EventEmitter {
       windowsHide: true,
     });
     record.pid = child.pid;
+    this.startingChildren.set(sessionKey, { child, record });
+    this.cancelledStarting.delete(sessionKey);
 
     const stderrTail: string[] = [];
     child.stderr?.setEncoding("utf8");
@@ -602,6 +606,9 @@ export class AcpPool extends EventEmitter {
       }
 
       const activeSession = await builder.start();
+      if (this.cancelledStarting.has(sessionKey)) {
+        throw new Error("SESSION_CANCELLED_BY_USER");
+      }
       record.acpSessionId = activeSession.sessionId;
       record.status = "idle";
       record.updatedAt = Date.now();
@@ -638,9 +645,31 @@ export class AcpPool extends EventEmitter {
         }
       }
 
+      if (this.cancelledStarting.has(sessionKey)) {
+        throw new Error("SESSION_CANCELLED_BY_USER");
+      }
+      this.startingChildren.delete(sessionKey);
       this.emitEvent({ type: "session_updated", session: { ...record }, timestamp: Date.now() });
       return managed;
     } catch (err) {
+      this.startingChildren.delete(sessionKey);
+      const wasCancelled =
+        this.cancelledStarting.delete(sessionKey) ||
+        (err instanceof Error && err.message.includes("SESSION_CANCELLED_BY_USER"));
+      if (wasCancelled) {
+        this.sessions.delete(sessionKey);
+        record.status = "closed";
+        record.lastError = undefined;
+        record.updatedAt = Date.now();
+        this.emitEvent({ type: "session_updated", session: { ...record }, timestamp: Date.now() });
+        try {
+          conn.close();
+        } catch {
+          // ignore
+        }
+        killProcessTree(child.pid);
+        throw new Error("SESSION_CANCELLED_BY_USER");
+      }
       record.status = "error";
       const tail = stderrTail.slice(-8).join("\n");
       record.lastError = `${err instanceof Error ? err.message : String(err)}${tail ? `\nstderr:\n${tail}` : ""}`;
@@ -994,17 +1023,24 @@ export class AcpPool extends EventEmitter {
   }
 
   /**
-   * Sends a cooperative ACP session/cancel notification to a busy session.
+   * Sends a cooperative ACP session/cancel notification to a busy session,
+   * or terminates an initializing child process if it is still starting.
    */
   async cancelSession(sessionKey: string): Promise<boolean> {
     const managed = this.sessions.get(sessionKey);
-    if (!managed || !managed.record.acpSessionId) {
-      return false;
+    if (managed && managed.record.acpSessionId) {
+      await managed.conn.agent.notify(acp.methods.agent.session.cancel, {
+        sessionId: managed.record.acpSessionId,
+      });
+      return true;
     }
-    await managed.conn.agent.notify(acp.methods.agent.session.cancel, {
-      sessionId: managed.record.acpSessionId,
-    });
-    return true;
+    const starting = this.startingChildren.get(sessionKey);
+    if (starting) {
+      this.cancelledStarting.add(sessionKey);
+      killProcessTree(starting.child.pid);
+      return true;
+    }
+    return false;
   }
 
   /**
