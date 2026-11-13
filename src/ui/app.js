@@ -3,6 +3,8 @@ const STATE = {
   baseCwd: "",
   permissionMode: "approve-all",
   agents: [],
+  modelCatalogs: new Map(),
+  probingModelAgents: new Set(),
   taskGroups: new Map(),
   sessions: new Map(),
   tasks: new Map(),
@@ -66,6 +68,9 @@ const els = {
   messages: document.getElementById("messages"),
   composerLabel: document.getElementById("composerLabel"),
   promptInput: document.getElementById("promptInput"),
+  modelSelect: document.getElementById("modelSelect"),
+  effortSelect: document.getElementById("effortSelect"),
+  refreshModelsBtn: document.getElementById("refreshModelsBtn"),
   composerHint: document.getElementById("composerHint"),
   stopSessionBtn: document.getElementById("stopSessionBtn"),
   sendBtn: document.getElementById("sendBtn"),
@@ -606,10 +611,14 @@ function renderSidebarGroups() {
     top.appendChild(titleWrap);
     top.appendChild(actions);
 
+    const leadSessKey = `${group.leadAgent}:${group.groupId}__lead`;
+    const leadSess = STATE.sessions.get(leadSessKey);
+    const activeModel = leadSess?.currentModelId || group.leadModel || "";
     const meta = document.createElement("div");
     meta.className = "group-meta";
     meta.innerHTML = `
       ${agentTagHtml(group.leadAgent, `★ ${group.leadAgent}`)}
+      ${activeModel ? `<span class="model-badge-pill" title="当前/预设模型">${escapeHtml(activeModel)}</span>` : ""}
       <span>${subs.length} 子会话 · ${groupTasks.length} 委派</span>
     `;
 
@@ -658,6 +667,182 @@ function renderSidebarGroups() {
     }
 
     els.groupList.appendChild(card);
+  }
+}
+
+function getAgentCatalog(agentId) {
+  if (!agentId) return null;
+  const cached = STATE.modelCatalogs.get(agentId);
+  if (cached) return cached;
+  const fromAgent = (STATE.agents || []).find((a) => a.agent === agentId)?.modelCatalog;
+  if (fromAgent) {
+    STATE.modelCatalogs.set(agentId, fromAgent);
+    return fromAgent;
+  }
+  return null;
+}
+
+async function ensureAgentModelsLoaded(agentId, force = false) {
+  if (!agentId || STATE.probingModelAgents.has(agentId)) return;
+  const existing = getAgentCatalog(agentId);
+  if (!force && existing && Array.isArray(existing.models) && existing.models.length > 0) {
+    return;
+  }
+  const meta = (STATE.agents || []).find((a) => a.agent === agentId);
+  if (!force && meta && meta.available === false) {
+    return;
+  }
+
+  STATE.probingModelAgents.add(agentId);
+  renderModelSelectorBar();
+  try {
+    const res = await fetch(
+      `/api/models?agent=${encodeURIComponent(agentId)}${force ? "&refresh=1" : ""}`,
+    );
+    const data = await res.json();
+    if (res.ok && data.catalog) {
+      STATE.modelCatalogs.set(agentId, data.catalog);
+      if (force) {
+        appendLog(
+          `已刷新模型 [${agentId}]: ${data.catalog.models?.length || 0} 个模型` +
+            (data.catalog.effort ? ` · 支持思考强度 (${data.catalog.effort.configId})` : ""),
+        );
+      }
+    } else if (force) {
+      appendLog(`探测模型失败 [${agentId}]: ${data.error || res.status}`);
+    }
+  } catch (err) {
+    if (force) appendLog(`探测模型异常 [${agentId}]: ${err.message}`);
+  } finally {
+    STATE.probingModelAgents.delete(agentId);
+    renderModelSelectorBar();
+    window.HUB_INTERACTIVE?.onAgentsUpdated?.();
+  }
+}
+
+function renderModelSelectorBar() {
+  if (!els.modelSelect || !els.effortSelect) return;
+
+  const subMode = isSubStream(STATE.activeStreamKey);
+  const subSession = subMode ? STATE.sessions.get(STATE.activeStreamKey.slice(4)) : null;
+  const group = getActiveGroup();
+
+  let targetAgent = "";
+  let catalog = null;
+  let selectedModel = "";
+  let selectedEffort = "";
+  let isSubTarget = false;
+
+  if (subMode) {
+    if (!subSession) {
+      els.modelSelect.innerHTML = '<option value="">子会话未就绪</option>';
+      els.modelSelect.disabled = true;
+      els.effortSelect.hidden = true;
+      if (els.refreshModelsBtn) els.refreshModelsBtn.disabled = true;
+      return;
+    }
+    isSubTarget = true;
+    targetAgent = subSession.agent;
+    catalog = subSession.modelCatalog || getAgentCatalog(targetAgent);
+    selectedModel = subSession.currentModelId || catalog?.currentModelId || "";
+    selectedEffort = subSession.currentEffort || catalog?.effort?.currentValue || "";
+  } else {
+    if (!group) return;
+    targetAgent = group.leadAgent;
+    const leadSession = STATE.sessions.get(`${targetAgent}:${group.groupId}__lead`);
+    const agentMeta = (STATE.agents || []).find((a) => a.agent === targetAgent);
+    catalog = leadSession?.modelCatalog || getAgentCatalog(targetAgent);
+    selectedModel =
+      group.agentModels?.[targetAgent] ||
+      (group.leadAgent === targetAgent ? group.leadModel : "") ||
+      "";
+    const defaultHintVal = agentMeta?.defaultModel || catalog?.currentModelId || "";
+    if (!selectedModel && leadSession?.currentModelId && leadSession.currentModelId !== defaultHintVal) {
+      selectedModel = leadSession.currentModelId;
+    }
+    selectedEffort =
+      group.agentEfforts?.[targetAgent] ||
+      (group.leadAgent === targetAgent ? group.leadEffort : "") ||
+      "";
+  }
+
+  const isProbing = STATE.probingModelAgents.has(targetAgent);
+  if (!catalog && !isProbing) {
+    void ensureAgentModelsLoaded(targetAgent, false);
+  }
+
+  els.modelSelect.disabled = false;
+  els.modelSelect.innerHTML = "";
+
+  const agentMeta = (STATE.agents || []).find((a) => a.agent === targetAgent);
+  const models = Array.isArray(catalog?.models) ? catalog.models : [];
+
+  if (!isSubTarget) {
+    const defOpt = document.createElement("option");
+    defOpt.value = "";
+    const autoHint = agentMeta?.defaultModel || catalog?.currentModelId || "跟随 CLI";
+    defOpt.textContent =
+      isProbing && models.length === 0 ? "加载模型列表中..." : `默认 (${autoHint})`;
+    els.modelSelect.appendChild(defOpt);
+  } else if (models.length === 0) {
+    const singleOpt = document.createElement("option");
+    singleOpt.value = selectedModel || "";
+    singleOpt.textContent = selectedModel || (isProbing ? "加载模型列表中..." : "默认模型");
+    els.modelSelect.appendChild(singleOpt);
+  }
+
+  const seenIds = new Set();
+  for (const m of models) {
+    if (!m?.id || seenIds.has(m.id)) continue;
+    seenIds.add(m.id);
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = m.name && m.name !== m.id ? `${m.name} (${m.id})` : m.id;
+    els.modelSelect.appendChild(opt);
+  }
+
+  if (selectedModel && !seenIds.has(selectedModel)) {
+    const customOpt = document.createElement("option");
+    customOpt.value = selectedModel;
+    customOpt.textContent = selectedModel;
+    els.modelSelect.appendChild(customOpt);
+  }
+  els.modelSelect.value = selectedModel;
+
+  const effortCfg = catalog?.effort;
+  if (effortCfg && Array.isArray(effortCfg.options) && effortCfg.options.length > 0) {
+    els.effortSelect.hidden = false;
+    els.effortSelect.innerHTML = "";
+    if (!isSubTarget) {
+      const defEff = document.createElement("option");
+      defEff.value = "";
+      defEff.textContent = `思考: 默认 (${agentMeta?.defaultEffort || effortCfg.currentValue || "auto"})`;
+      els.effortSelect.appendChild(defEff);
+    }
+    const seenEff = new Set();
+    for (const o of effortCfg.options) {
+      if (!o?.id || seenEff.has(o.id)) continue;
+      seenEff.add(o.id);
+      const opt = document.createElement("option");
+      opt.value = o.id;
+      opt.textContent = `思考: ${o.name || o.id}`;
+      els.effortSelect.appendChild(opt);
+    }
+    if (selectedEffort && !seenEff.has(selectedEffort)) {
+      const extraEff = document.createElement("option");
+      extraEff.value = selectedEffort;
+      extraEff.textContent = `思考: ${selectedEffort}`;
+      els.effortSelect.appendChild(extraEff);
+    }
+    els.effortSelect.value = selectedEffort;
+  } else {
+    els.effortSelect.hidden = true;
+    els.effortSelect.innerHTML = "";
+  }
+
+  if (els.refreshModelsBtn) {
+    els.refreshModelsBtn.disabled = isProbing;
+    els.refreshModelsBtn.textContent = isProbing ? "探测中..." : "↻ 模型";
   }
 }
 
@@ -729,6 +914,7 @@ function renderStageHeaderAndTabs() {
   els.sendBtn.disabled = STATE.sendingStreams.has(STATE.activeStreamKey);
   els.sendBtn.textContent = STATE.sendingStreams.has(STATE.activeStreamKey) ? "执行中..." : "发送 ↵";
   els.stopSessionBtn.hidden = !isBusy;
+  renderModelSelectorBar();
 }
 
 function renderPermissions() {
@@ -893,7 +1079,8 @@ function buildMessageElement(msg, linkedTasks) {
         msg.injectedTokens && msg.injectedTokens > 0
           ? ` · 首轮注入 +${formatTokens(msg.injectedTokens)}`
           : "";
-      usageHtml = `<span class="msg-usage-pill" title="输入 ${msg.usage.inputTokens} / 缓存 ${msg.usage.cachedReadTokens} / 输出 ${msg.usage.outputTokens} / 思考 ${msg.usage.thoughtTokens}">${estMark}↑${formatTokens(msg.usage.inputTokens)} ↓${formatTokens(msg.usage.outputTokens)}${cachePart}${injPart}</span>`;
+      const modelPart = msg.usage.modelId ? `${escapeHtml(msg.usage.modelId)} · ` : "";
+      usageHtml = `<span class="msg-usage-pill" title="输入 ${msg.usage.inputTokens} / 缓存 ${msg.usage.cachedReadTokens} / 输出 ${msg.usage.outputTokens} / 思考 ${msg.usage.thoughtTokens}">${modelPart}${estMark}↑${formatTokens(msg.usage.inputTokens)} ↓${formatTokens(msg.usage.outputTokens)}${cachePart}${injPart}</span>`;
     }
     meta.innerHTML = `${agentTagHtml(msg.agent, msg.senderLabel)}<span>${formatTime(msg.timestamp)}</span>${usageHtml}`;
   } else {
@@ -1046,6 +1233,7 @@ function renderInspector() {
           <span class="mono" style="font-size:11px;color:var(--faint)">${escapeHtml(s.status)}</span>
         </div>
         <div class="insp-sub" title="${escapeHtml(s.sessionKey)}">${escapeHtml(s.label || s.name)}${s.pid ? ` · pid=${s.pid}` : ""}</div>
+        ${s.currentModelId ? `<div class="insp-sub">model: ${escapeHtml(s.currentModelId)}${s.currentEffort ? ` · effort=${escapeHtml(s.currentEffort)}` : ""}</div>` : ""}
         ${s.branch ? `<div class="insp-sub">branch: ${escapeHtml(s.branch)}</div>` : ""}
         ${usageText ? `<div class="insp-sub">${escapeHtml(usageText)}</div>` : ""}
       `;
@@ -1260,10 +1448,28 @@ function connectWs() {
       if (Array.isArray(msg.agents) && msg.agents.length > 0) {
         STATE.agents = msg.agents;
       }
+      STATE.modelCatalogs.clear();
+      if (msg.modelCatalogs && typeof msg.modelCatalogs === "object") {
+        for (const [k, v] of Object.entries(msg.modelCatalogs)) {
+          if (v) STATE.modelCatalogs.set(k, v);
+        }
+      }
+      for (const a of STATE.agents || []) {
+        if (a?.modelCatalog && !STATE.modelCatalogs.has(a.agent)) {
+          STATE.modelCatalogs.set(a.agent, a.modelCatalog);
+        }
+      }
       STATE.telemetry = msg.telemetry || null;
       STATE.resourceBudgets = msg.resourceBudgets || [];
 
       renderAll();
+    } else if (msg.type === "models_updated") {
+      if (msg.agent && msg.catalog) {
+        STATE.modelCatalogs.set(msg.agent, msg.catalog);
+        renderSidebarGroups();
+        renderStageHeaderAndTabs();
+        window.HUB_INTERACTIVE?.onAgentsUpdated?.();
+      }
     } else if (msg.type === "agents_updated") {
       STATE.agents = msg.agents || [];
       renderAgentControls();
@@ -1435,6 +1641,76 @@ els.permSelect.onchange = async () => {
   });
 };
 
+async function applyComposerModelOrEffortChange(patch) {
+  const subMode = isSubStream(STATE.activeStreamKey);
+  if (subMode) {
+    const sessionKey = STATE.activeStreamKey.slice(4);
+    const res = await fetch("/api/sessions/model", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionKey, ...patch }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      appendLog(`切换子会话模型失败: ${data.error || res.status}`);
+      renderModelSelectorBar();
+      return;
+    }
+    if (data.session) {
+      STATE.sessions.set(data.session.sessionKey, data.session);
+      renderSidebarGroups();
+      renderStageHeaderAndTabs();
+      renderInspector();
+    }
+    appendLog(`子会话 [${sessionKey}] 模型配置已更新`);
+    return;
+  }
+
+  const group = getActiveGroup();
+  if (!group) return;
+  const res = await fetch("/api/groups/model", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ groupId: group.groupId, agent: group.leadAgent, ...patch }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) {
+    appendLog(`切换任务模型失败: ${data.error || res.status}`);
+    renderModelSelectorBar();
+    return;
+  }
+  if (data.group) {
+    STATE.taskGroups.set(data.group.groupId, data.group);
+  }
+  if (data.session) {
+    STATE.sessions.set(data.session.sessionKey, data.session);
+  }
+  renderSidebarGroups();
+  renderStageHeaderAndTabs();
+  renderInspector();
+  const label = data.session?.currentModelId || data.group?.leadModel || "默认";
+  appendLog(`任务 [${group.title}] (${group.leadAgent}) 模型设为: ${label}`);
+}
+
+if (els.modelSelect) {
+  els.modelSelect.onchange = () => void applyComposerModelOrEffortChange({ model: els.modelSelect.value });
+}
+
+if (els.effortSelect) {
+  els.effortSelect.onchange = () => void applyComposerModelOrEffortChange({ effort: els.effortSelect.value });
+}
+
+if (els.refreshModelsBtn) {
+  els.refreshModelsBtn.onclick = () => {
+    const subMode = isSubStream(STATE.activeStreamKey);
+    const subSession = subMode ? STATE.sessions.get(STATE.activeStreamKey.slice(4)) : null;
+    const targetAgent = subSession?.agent || getActiveGroup()?.leadAgent;
+    if (targetAgent) {
+      void ensureAgentModelsLoaded(targetAgent, true);
+    }
+  };
+}
+
 els.toggleInspectorBtn.onclick = () => {
   STATE.inspectorCollapsed = !STATE.inspectorCollapsed;
   els.workbench.classList.toggle("inspector-collapsed", STATE.inspectorCollapsed);
@@ -1513,6 +1789,7 @@ window.HUB_APP = {
   getEnabledAgents,
   agentTagHtml,
   renderAgentControls,
+  ensureAgentModelsLoaded,
   onStateChange: null,
   onResourcesUpdated: null,
 };

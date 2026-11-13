@@ -166,7 +166,12 @@
             placeholder="输入任务指令，Enter 发送，Shift+Enter 换行；当前任务与其它并行任务互不阻塞。"
           ></textarea>
           <div class="composer-foot">
-            <span id="composerHint" class="composer-hint">主导会话可调用 peer_ask / peer_dispatch 委派子会话</span>
+            <div class="composer-model-bar">
+              <select id="modelSelect" class="perm-select model-select" title="选择当前会话 / 主导 Agent 模型"></select>
+              <select id="effortSelect" class="perm-select effort-select" title="选择思考 / 推理强度" hidden></select>
+              <button id="refreshModelsBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="实时握手探测并刷新该 Agent 可用模型">↻ 模型</button>
+              <span id="composerHint" class="composer-hint">主导会话可调用 peer_ask / peer_dispatch 委派子会话</span>
+            </div>
             <div class="composer-actions">
               <button id="stopSessionBtn" class="alma-btn alma-btn-danger" type="button" hidden>停止</button>
               <button id="sendBtn" class="alma-btn alma-btn-primary" type="button">发送 ↵</button>

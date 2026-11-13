@@ -445,6 +445,7 @@ function renderTelemetryPanel() {
                     <span class="agent-tag" data-agent="${esc(sess.agent)}">${esc(sess.agent)}</span>
                     <strong>${esc(grp?.title || sess.groupId)}</strong>
                     <span class="origin-tag">${sess.role === "lead" ? "主导" : `子会话: ${esc(sess.label)}`}</span>
+                    ${sess.currentModelId ? `<span class="origin-tag">${esc(sess.currentModelId)}${sess.currentEffort ? ` · ${esc(sess.currentEffort)}` : ""}</span>` : ""}
                     <span class="mono" style="font-size:11px;color:var(--faint)">${esc(sess.sessionKey)}</span>
                   </div>
                   <div class="mono" style="font-size:11.5px;color:var(--muted)">
@@ -487,7 +488,7 @@ function renderTelemetryPanel() {
                 <td>#${t.turnSeq}</td>
                 <td>${app.formatTime(t.timestamp)}</td>
                 <td>${esc(t.groupTitle || t.groupId)}</td>
-                <td><span class="agent-tag" data-agent="${esc(t.agent)}">${esc(t.agent)}</span></td>
+                <td>${app.agentTagHtml ? app.agentTagHtml(t.agent) : `<span class="agent-tag" data-agent="${esc(t.agent)}">${esc(t.agent)}</span>`}${u.modelId ? ` <span class="mono" style="font-size:10.5px;color:var(--muted)">${esc(u.modelId)}</span>` : ""}</td>
                 <td>${t.role === "lead" ? "主导" : "子会话"}</td>
                 <td class="num-col">${inj > 0 ? `+${fmtTok(inj)}` : "0"}</td>
                 <td class="num-col">${fmtTok(u.inputTokens)}</td>

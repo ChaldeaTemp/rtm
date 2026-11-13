@@ -120,9 +120,14 @@ async function main(): Promise<void> {
           .boolean()
           .optional()
           .describe("Set true to isolate edits into a dedicated git worktree branch."),
+        model: z.string().optional().describe("Optional model ID override for the target peer agent."),
+        effort: z
+          .string()
+          .optional()
+          .describe("Optional thinking/reasoning effort level (e.g. low, medium, high, xhigh, max)."),
       },
     },
-    async ({ agent, prompt, session, cwd, isolate_worktree }) => {
+    async ({ agent, prompt, session, cwd, isolate_worktree, model, effort }) => {
       const res = await callHub<{ task: TaskRecord }>(cfg.hubUrl, "/api/peer/ask", {
         method: "POST",
         body: {
@@ -131,6 +136,8 @@ async function main(): Promise<void> {
           session,
           cwd,
           isolateWorktree: Boolean(isolate_worktree),
+          model,
+          effort,
           callerAgent: cfg.callerAgent,
           callerSession: cfg.callerSession,
           depth: cfg.depth,
@@ -157,9 +164,14 @@ async function main(): Promise<void> {
           .boolean()
           .optional()
           .describe("Set true to isolate edits into a dedicated git worktree branch."),
+        model: z.string().optional().describe("Optional model ID override for the target peer agent."),
+        effort: z
+          .string()
+          .optional()
+          .describe("Optional thinking/reasoning effort level (e.g. low, medium, high, xhigh, max)."),
       },
     },
-    async ({ agent, prompt, session, cwd, isolate_worktree }) => {
+    async ({ agent, prompt, session, cwd, isolate_worktree, model, effort }) => {
       const res = await callHub<{ task: TaskRecord }>(cfg.hubUrl, "/api/peer/dispatch", {
         method: "POST",
         body: {
@@ -168,6 +180,8 @@ async function main(): Promise<void> {
           session,
           cwd,
           isolateWorktree: Boolean(isolate_worktree),
+          model,
+          effort,
           callerAgent: cfg.callerAgent,
           callerSession: cfg.callerSession,
           depth: cfg.depth,

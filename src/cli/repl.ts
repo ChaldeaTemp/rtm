@@ -96,12 +96,17 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
 
   const printPrompt = (): void => {
     const grp = ensureValidGroup();
-    rl.setPrompt(`[${grp.title} (${grp.groupId}) | lead:${grp.leadAgent} | ${hub.pool.getPermissionMode()}] > `);
+    const leadSess = hub.pool.getSession(`${grp.leadAgent}:${grp.groupId}__lead`);
+    const activeModel = leadSess?.currentModelId || grp.leadModel;
+    const modelSuffix = activeModel ? `(${activeModel})` : "";
+    rl.setPrompt(
+      `[${grp.title} (${grp.groupId}) | lead:${grp.leadAgent}${modelSuffix} | ${hub.pool.getPermissionMode()}] > `,
+    );
     rl.prompt();
   };
 
   console.log(`Agent Hub started at ${hub.getUrl()} (cwd: ${hub.baseCwd})`);
-  console.log(`Type a prompt, or /help for commands (/tasks, /new, /use, /lead, /subs, /ui, /quit).`);
+  console.log(`Type a prompt, or /help for commands (/tasks, /new, /use, /lead, /models, /model, /subs, /ui, /quit).`);
   printPrompt();
 
   for await (const rawLine of rl) {
@@ -128,6 +133,8 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
             `  /new [${enabledIds}] [title]  Create a new parallel task group and switch to it`,
             "  /use <groupId>               Switch active task group",
             `  /lead <${enabledIds}>        Switch the lead agent of the current task group`,
+            "  /models [agent] [--refresh]  Discover available models & effort levels for an agent",
+            "  /model [id|auto] [effort]    Inspect or switch model/effort for the current task group",
             "  /subs                        List all sub-sessions in the current task group",
             "  /agents                      List built-in and custom ACP agents & availability",
             "  /ui | /pop                   Open interactive desktop app window",
@@ -177,6 +184,42 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
         } else {
           hub.setGroupLeadAgent(g.groupId, arg);
           console.log(`Lead for task ${g.groupId} switched to ${arg}`);
+        }
+      } else if (cmd === "/models") {
+        const g = ensureValidGroup();
+        const refresh = rest.includes("--refresh");
+        const candidateAgent = rest.find((r) => r !== "--refresh");
+        const targetAgent =
+          candidateAgent && hub.registry.isKnownAgent(candidateAgent) ? candidateAgent : g.leadAgent;
+        console.log(`Probing/loading models for ${targetAgent}...`);
+        const catalog = await hub.registry.discoverModels(targetAgent, hub.baseCwd, refresh);
+        console.log(`Models for ${targetAgent} (current/default=${catalog.currentModelId ?? "auto"}):`);
+        for (const m of catalog.models) {
+          console.log(`  - ${m.id}${m.name && m.name !== m.id ? ` (${m.name})` : ""}`);
+        }
+        if (catalog.effort) {
+          console.log(
+            `Effort (${catalog.effort.configId}, current=${catalog.effort.currentValue}): ${catalog.effort.options.map((o) => o.id).join(", ")}`,
+          );
+        }
+      } else if (cmd === "/model") {
+        const g = ensureValidGroup();
+        const leadSess = hub.pool.getSession(`${g.leadAgent}:${g.groupId}__lead`);
+        if (!arg) {
+          console.log(
+            `Task ${g.groupId} lead=${g.leadAgent}: configured=(model=${g.leadModel ?? "auto"}, effort=${g.leadEffort ?? "auto"}), liveSession=(model=${leadSess?.currentModelId ?? "-"}, effort=${leadSess?.currentEffort ?? "-"})`,
+          );
+        } else {
+          const modelVal = arg === "auto" || arg === "reset" ? "" : arg;
+          const effortVal = rest[1]
+            ? rest[1] === "auto" || rest[1] === "reset"
+              ? ""
+              : rest[1]
+            : undefined;
+          const res = await hub.setGroupModel(g.groupId, { model: modelVal, effort: effortVal });
+          console.log(
+            `Task ${g.groupId} (${res.group.leadAgent}) updated: model=${res.group.leadModel ?? "auto"}, effort=${res.group.leadEffort ?? "auto"}${res.session ? ` [live session switched -> ${res.session.currentModelId ?? "-"}]` : ""}`,
+          );
         }
       } else if (cmd === "/agents") {
         for (const a of hub.registry.getHealthList(true)) {

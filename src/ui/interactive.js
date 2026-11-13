@@ -11,6 +11,8 @@ const INTERACTIVE_STATE = {
     envText: "",
     color: "#3f6212",
     description: "",
+    defaultModel: "",
+    defaultEffort: "",
   },
   probeResults: new Map(), // agentId -> { testing?: boolean, ok?: boolean, latencyMs?: number, sessionId?: string, error?: string }
   questionDrafts: new Map(), // questionId -> Map<fieldId, string | string[]>
@@ -282,9 +284,13 @@ async function probeAgentHandshake(id) {
     });
     const data = await res.json();
     INTERACTIVE_STATE.probeResults.set(id, { testing: false, ...data });
+    if (data.ok && data.modelCatalog && app?.STATE?.modelCatalogs) {
+      app.STATE.modelCatalogs.set(id, data.modelCatalog);
+    }
+    const modelCount = data.modelCatalog?.models?.length || 0;
     app.appendLog(
       data.ok
-        ? `ACP 握手成功 [${id}] (${data.latencyMs}ms, session=${data.sessionId || "-"})`
+        ? `ACP 握手成功 [${id}] (${data.latencyMs}ms, 发现 ${modelCount} 个模型, session=${data.sessionId || "-"})`
         : `ACP 握手失败 [${id}]: ${data.error || "unknown"}`,
     );
   } catch (err) {
@@ -343,6 +349,8 @@ async function saveAgentForm(e) {
   const envEl = document.getElementById("agentCfgEnv");
   const colorEl = document.getElementById("agentCfgColor");
   const descEl = document.getElementById("agentCfgDesc");
+  const defaultModelEl = document.getElementById("agentCfgDefaultModel");
+  const defaultEffortEl = document.getElementById("agentCfgDefaultEffort");
 
   const payload = {
     id: idEl.value.trim(),
@@ -352,6 +360,8 @@ async function saveAgentForm(e) {
     env: parseEnvText(envEl.value),
     color: colorEl.value.trim() || undefined,
     description: descEl.value.trim() || undefined,
+    defaultModel: defaultModelEl ? defaultModelEl.value.trim() : undefined,
+    defaultEffort: defaultEffortEl ? defaultEffortEl.value.trim() : undefined,
     enabled: true,
   };
 
@@ -390,6 +400,8 @@ function openFormWithTemplate(tpl) {
     envText: tpl.envText || "",
     color: tpl.color || "#3f6212",
     description: tpl.description || "",
+    defaultModel: tpl.defaultModel || "",
+    defaultEffort: tpl.defaultEffort || "",
   };
   renderAgentsView();
 }
@@ -405,6 +417,8 @@ function openFormForEdit(agentItem) {
     envText: formatEnvText(agentItem.env),
     color: agentItem.color || "#3f6212",
     description: agentItem.description || "",
+    defaultModel: agentItem.defaultModel || "",
+    defaultEffort: agentItem.defaultEffort || "",
   };
   renderAgentsView();
 }
@@ -423,6 +437,19 @@ function renderAgentsView() {
   ).join("");
 
   const fv = INTERACTIVE_STATE.formValues;
+  const formCatalog = fv.id ? app.STATE.modelCatalogs?.get(fv.id) : null;
+  const modelDatalist =
+    formCatalog?.models?.length > 0
+      ? `<datalist id="agentModelChoices">${formCatalog.models
+          .map((m) => `<option value="${esc(m.id)}">${esc(m.name || m.id)}</option>`)
+          .join("")}</datalist>`
+      : "";
+  const effortDatalist =
+    formCatalog?.effort?.options?.length > 0
+      ? `<datalist id="agentEffortChoices">${formCatalog.effort.options
+          .map((o) => `<option value="${esc(o.id)}">${esc(o.name || o.id)}</option>`)
+          .join("")}</datalist>`
+      : "";
   const formHtml = INTERACTIVE_STATE.showForm
     ? `
       <form id="agentRegistryForm" class="rule-editor-box">
@@ -430,6 +457,7 @@ function renderAgentsView() {
           <span class="mono" style="font-size:11px;color:var(--muted)">快速模板：</span>
           ${templateButtons}
         </div>
+        ${modelDatalist}${effortDatalist}
         <div class="agent-form-grid">
           <div class="agent-form-field">
             <label>Agent ID (唯一标识)</label>
@@ -446,6 +474,14 @@ function renderAgentsView() {
           <div class="agent-form-field">
             <label>命令参数 (Args，空格或换行分隔)</label>
             <input id="agentCfgArgs" class="text-input" type="text" placeholder="如 acp 或 --experimental-acp" value="${esc(fv.argsText)}" />
+          </div>
+          <div class="agent-form-field">
+            <label>默认模型 ID (留空跟随 CLI)</label>
+            <input id="agentCfgDefaultModel" class="text-input" type="text" ${modelDatalist ? 'list="agentModelChoices"' : ""} placeholder="如 opus / gpt-6.1-sol / gemini-4-carbon" value="${esc(fv.defaultModel || "")}" />
+          </div>
+          <div class="agent-form-field">
+            <label>默认思考强度 (留空跟随 CLI)</label>
+            <input id="agentCfgDefaultEffort" class="text-input" type="text" ${effortDatalist ? 'list="agentEffortChoices"' : ""} placeholder="如 low / medium / high / xhigh / max" value="${esc(fv.defaultEffort || "")}" />
           </div>
           <div class="agent-form-field">
             <label>徽章颜色 (Hex)</label>
@@ -484,13 +520,17 @@ function renderAgentsView() {
         else statusBadge = `<span class="cov-pill off">未检测到命令</span>`;
       }
 
+      const catalog = app.STATE.modelCatalogs?.get(item.agent) || item.modelCatalog;
+      const modelCount = Array.isArray(catalog?.models) ? catalog.models.length : 0;
+      const defaultModelText = item.defaultModel || catalog?.currentModelId || "CLI 默认";
       let probeClass = "agent-probe-status";
       let probeText = item.authHint || item.reason || "点击「测试握手」实时验证 ACP initialize + session/new";
       if (probe?.testing) {
         probeText = "正在启动子进程并执行 ACP 握手...";
       } else if (probe && probe.ok === true) {
         probeClass += " ok";
-        probeText = `握手成功 (${probe.latencyMs}ms · session=${probe.sessionId || "ok"})`;
+        const probedCount = probe.modelCatalog?.models?.length ?? modelCount;
+        probeText = `握手成功 (${probe.latencyMs}ms · ${probedCount} 个模型 · session=${probe.sessionId || "ok"})`;
       } else if (probe && probe.ok === false) {
         probeClass += " err";
         probeText = `握手失败: ${probe.error || "unknown error"}`;
@@ -510,6 +550,7 @@ function renderAgentsView() {
             </label>
           </div>
           ${item.description ? `<div class="res-desc">${esc(item.description)}</div>` : ""}
+          <div class="res-meta">默认模型: ${esc(defaultModelText)}${item.defaultEffort ? ` (${esc(item.defaultEffort)})` : ""}${modelCount > 0 ? ` · 已发现 ${modelCount} 个模型` : ""}</div>
           <div class="agent-cmd-line" title="实际拉起的 stdio ACP 命令">${esc(cmdDisplay)}</div>
           <div class="${probeClass}">${esc(probeText)}</div>
           <div class="agent-cfg-actions">

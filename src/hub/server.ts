@@ -13,6 +13,7 @@ import {
   type PendingUserQuestion,
   type PermissionMode,
   type QuestionField,
+  type SessionRecord,
   type SessionUsageTotals,
   type TaskGroup,
   type TaskRecord,
@@ -45,11 +46,15 @@ const ChatBodySchema = z.object({
   leadAgent: AgentIdSchema.optional(),
   cwd: z.string().optional(),
   session: z.string().optional(),
+  model: z.string().optional(),
+  effort: z.string().optional(),
 });
 
 const CreateGroupBodySchema = z.object({
   title: z.string().optional(),
   leadAgent: AgentIdSchema.optional(),
+  leadModel: z.string().optional(),
+  leadEffort: z.string().optional(),
   cwd: z.string().optional(),
 });
 
@@ -59,6 +64,13 @@ const UpdateGroupBodySchema = z.object({
   leadAgent: AgentIdSchema.optional(),
 });
 
+const GroupModelBodySchema = z.object({
+  groupId: z.string().optional(),
+  agent: AgentIdSchema.optional(),
+  model: z.string().optional(),
+  effort: z.string().optional(),
+});
+
 const DeleteGroupBodySchema = z.object({
   groupId: z.string().min(1),
 });
@@ -66,6 +78,14 @@ const DeleteGroupBodySchema = z.object({
 const SessionChatBodySchema = z.object({
   sessionKey: z.string().min(1),
   prompt: z.string().min(1),
+  model: z.string().optional(),
+  effort: z.string().optional(),
+});
+
+const SessionModelBodySchema = z.object({
+  sessionKey: z.string().min(1),
+  model: z.string().optional(),
+  effort: z.string().optional(),
 });
 
 const PeerCallBodySchema = z.object({
@@ -75,6 +95,8 @@ const PeerCallBodySchema = z.object({
   session: z.string().optional(),
   cwd: z.string().optional(),
   isolateWorktree: z.boolean().optional().default(false),
+  model: z.string().optional(),
+  effort: z.string().optional(),
   callerAgent: z.union([AgentIdSchema, z.literal("user")]).optional().default("user"),
   callerSession: z.string().optional().default("main"),
   depth: z.number().int().min(0).optional().default(0),
@@ -154,6 +176,8 @@ const AgentSaveSchema = z.object({
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
+  defaultModel: z.string().optional(),
+  defaultEffort: z.string().optional(),
 });
 
 const AgentToggleSchema = z.object({
@@ -359,7 +383,8 @@ export class AgentHubServer {
 
   constructor(options: HubServerOptions) {
     this.baseCwd = path.resolve(options.baseCwd);
-    this.registry = new AgentRegistry(this.baseCwd);
+    this.writeRuntimeFile = options.writeRuntimeFile ?? true;
+    this.registry = new AgentRegistry(this.baseCwd, { persistCache: this.writeRuntimeFile });
     this.resources = new SharedResourceManager(this.baseCwd);
     this.resources.setAgentRegistry(this.registry);
     this.pool.setResourceManager(this.resources);
@@ -367,7 +392,6 @@ export class AgentHubServer {
     for (const def of this.registry.listDefinitions()) {
       this.telemetryByAgent[def.id] = createEmptyTotals();
     }
-    this.writeRuntimeFile = options.writeRuntimeFile ?? true;
     if (options.permissionMode) {
       this.pool.setPermissionMode(options.permissionMode);
     }
@@ -377,10 +401,13 @@ export class AgentHubServer {
       groupId: this.defaultGroupId,
       title: "任务 1",
       leadAgent: options.defaultLead ?? "claude",
+      agentModels: {},
+      agentEfforts: {},
       cwd: this.baseCwd,
       createdAt: now,
       updatedAt: now,
     };
+    this.syncGroupLeadModelFields(initialGroup);
     this.groups.set(initialGroup.groupId, initialGroup);
     this.ledgers.set(initialGroup.groupId, new ThreadLedger());
 
@@ -482,19 +509,42 @@ export class AgentHubServer {
     return clean;
   }
 
-  createGroup(input?: { title?: string; leadAgent?: AgentId; cwd?: string }): TaskGroup {
+  private syncGroupLeadModelFields(group: TaskGroup): void {
+    const def = this.registry.getDefinition(group.leadAgent);
+    group.leadModel = group.agentModels?.[group.leadAgent] ?? def?.defaultModel;
+    group.leadEffort = group.agentEfforts?.[group.leadAgent] ?? def?.defaultEffort;
+  }
+
+  createGroup(input?: {
+    title?: string;
+    leadAgent?: AgentId;
+    leadModel?: string;
+    leadEffort?: string;
+    cwd?: string;
+  }): TaskGroup {
     const now = Date.now();
     this.groupCounter += 1;
     const rawTitle = input?.title?.trim();
     const leadAgent = input?.leadAgent ? this.requireKnownAgent(input.leadAgent) : this.getLeadAgent();
+    const agentModels: Record<string, string> = {};
+    const agentEfforts: Record<string, string> = {};
+    if (input?.leadModel?.trim()) {
+      agentModels[leadAgent] = input.leadModel.trim();
+    }
+    if (input?.leadEffort?.trim()) {
+      agentEfforts[leadAgent] = input.leadEffort.trim();
+    }
     const group: TaskGroup = {
       groupId: `grp-${randomUUID().slice(0, 6)}`,
       title: rawTitle && rawTitle.length > 0 ? rawTitle : `任务 ${this.groupCounter}`,
       leadAgent,
+      agentModels,
+      agentEfforts,
       cwd: input?.cwd ? path.resolve(input.cwd) : this.baseCwd,
       createdAt: now,
       updatedAt: now,
     };
+    this.syncGroupLeadModelFields(group);
     this.groups.set(group.groupId, group);
     this.ledgers.set(group.groupId, new ThreadLedger());
     this.broadcast({
@@ -539,6 +589,7 @@ export class AgentHubServer {
     const previousLead = group.leadAgent;
     const now = Date.now();
     group.leadAgent = validAgent;
+    this.syncGroupLeadModelFields(group);
     group.updatedAt = now;
 
     this.upsertMessage({
@@ -577,6 +628,69 @@ export class AgentHubServer {
       });
     }
     return { ...group };
+  }
+
+  async setGroupModel(
+    groupId: string,
+    input: { agent?: AgentId; model?: string; effort?: string },
+  ): Promise<{ group: TaskGroup; session?: SessionRecord }> {
+    const group = this.groups.get(groupId);
+    if (!group) {
+      throw new Error(`Unknown task group: ${groupId}`);
+    }
+    const targetAgent = input.agent ? this.requireKnownAgent(input.agent) : group.leadAgent;
+    group.agentModels ??= {};
+    group.agentEfforts ??= {};
+
+    if (input.model !== undefined) {
+      const trimmed = input.model.trim();
+      if (!trimmed) {
+        delete group.agentModels[targetAgent];
+      } else {
+        group.agentModels[targetAgent] = trimmed;
+      }
+    }
+    if (input.effort !== undefined) {
+      const trimmed = input.effort.trim();
+      if (!trimmed) {
+        delete group.agentEfforts[targetAgent];
+      } else {
+        group.agentEfforts[targetAgent] = trimmed;
+      }
+    }
+
+    this.syncGroupLeadModelFields(group);
+    group.updatedAt = Date.now();
+    this.broadcast({
+      type: "group_updated",
+      group: { ...group },
+      timestamp: group.updatedAt,
+    });
+
+    const leadSessionKey = buildSessionKey(targetAgent, `${group.groupId}__lead`);
+    const existingSession = this.pool.getSession(leadSessionKey);
+    if (existingSession && existingSession.status !== "closed" && existingSession.status !== "error") {
+      const def = this.registry.getDefinition(targetAgent);
+      const catalog = existingSession.modelCatalog ?? this.registry.getModelCatalog(targetAgent);
+      const effectiveModel =
+        input.model !== undefined
+          ? input.model.trim() || def?.defaultModel || catalog?.models[0]?.id
+          : undefined;
+      const effectiveEffort =
+        input.effort !== undefined
+          ? input.effort.trim() || def?.defaultEffort
+          : undefined;
+      if (effectiveModel || effectiveEffort) {
+        const updatedSession = await this.pool.setSessionModel(
+          leadSessionKey,
+          effectiveModel,
+          effectiveEffort,
+        );
+        return { group: { ...group }, session: updatedSession };
+      }
+    }
+
+    return { group: { ...group } };
   }
 
   async deleteGroup(groupId: string): Promise<void> {
@@ -924,6 +1038,7 @@ export class AgentHubServer {
       telemetry: this.getTelemetrySnapshot(),
       resourceBudgets: this.resources.getAgentBudgets(this.baseCwd),
       agents: this.registry.getHealthList(true),
+      modelCatalogs: this.registry.getAllModelCatalogs(),
     };
   }
 
@@ -957,6 +1072,8 @@ export class AgentHubServer {
     leadAgent?: AgentId;
     cwd?: string;
     session?: string;
+    model?: string;
+    effort?: string;
   }): Promise<{
     groupId: string;
     leadAgent: AgentId;
@@ -1024,6 +1141,10 @@ export class AgentHubServer {
     this.upsertMessage(assistantMsg);
 
     try {
+      const def = this.registry.getDefinition(lead);
+      const effectiveModel = input.model?.trim() || group.agentModels?.[lead] || def?.defaultModel;
+      const effectiveEffort =
+        input.effort?.trim() || group.agentEfforts?.[lead] || def?.defaultEffort;
       const result = await this.pool.runTurn({
         agent: lead,
         sessionName,
@@ -1038,6 +1159,8 @@ export class AgentHubServer {
         groupId: group.groupId,
         role: "lead",
         label: "主导会话",
+        model: effectiveModel,
+        effort: effectiveEffort,
       });
 
       assistantMsg.status = result.stopReason === "cancelled" ? "cancelled" : "done";
@@ -1094,6 +1217,8 @@ export class AgentHubServer {
   async runSubSessionChat(input: {
     sessionKey: string;
     prompt: string;
+    model?: string;
+    effort?: string;
   }): Promise<{
     sessionKey: string;
     groupId: string;
@@ -1154,6 +1279,8 @@ export class AgentHubServer {
         role: session.role,
         label: session.label,
         parentSessionKey: session.parentSessionKey,
+        model: input.model,
+        effort: input.effort,
       });
 
       assistantMsg.status = result.stopReason === "cancelled" ? "cancelled" : "done";
@@ -1307,6 +1434,8 @@ export class AgentHubServer {
         role: "sub",
         label: target.rawLabel,
         parentSessionKey: target.parentSessionKey,
+        model: body.model,
+        effort: body.effort,
       })
       .then((res) => {
         task.status = res.stopReason === "cancelled" ? "cancelled" : "completed";
@@ -1522,6 +1651,18 @@ export class AgentHubServer {
         return;
       }
 
+      if (method === "POST" && pathname === "/api/groups/model") {
+        const body = GroupModelBodySchema.parse(await readJsonBody(req));
+        const gid = body.groupId || this.defaultGroupId;
+        const result = await this.setGroupModel(gid, {
+          agent: body.agent,
+          model: body.model,
+          effort: body.effort,
+        });
+        sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
       if (method === "POST" && pathname === "/api/groups/delete") {
         const body = DeleteGroupBodySchema.parse(await readJsonBody(req));
         await this.deleteGroup(body.groupId);
@@ -1547,6 +1688,13 @@ export class AgentHubServer {
         const body = SessionChatBodySchema.parse(await readJsonBody(req));
         const result = await this.runSubSessionChat(body);
         sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/sessions/model") {
+        const body = SessionModelBodySchema.parse(await readJsonBody(req));
+        const session = await this.pool.setSessionModel(body.sessionKey, body.model, body.effort);
+        sendJson(res, 200, { ok: true, session });
         return;
       }
 
@@ -1725,6 +1873,30 @@ export class AgentHubServer {
         return;
       }
 
+      if (method === "GET" && pathname === "/api/models") {
+        const agentParam = reqUrl.searchParams.get("agent")?.trim();
+        const refresh =
+          reqUrl.searchParams.get("refresh") === "1" ||
+          reqUrl.searchParams.get("refresh") === "true";
+        if (agentParam) {
+          const validAgent = this.requireKnownAgent(agentParam);
+          const catalog = await this.registry.discoverModels(validAgent, this.baseCwd, refresh);
+          this.broadcast({
+            type: "models_updated",
+            agent: validAgent,
+            catalog,
+            timestamp: Date.now(),
+          });
+          sendJson(res, 200, { ok: true, agent: validAgent, catalog });
+          return;
+        }
+        sendJson(res, 200, {
+          ok: true,
+          modelCatalogs: this.registry.getAllModelCatalogs(),
+        });
+        return;
+      }
+
       if (method === "GET" && pathname === "/api/agents") {
         sendJson(res, 200, {
           ok: true,
@@ -1739,6 +1911,12 @@ export class AgentHubServer {
         const agent = this.registry.upsertAgent(input);
         if (!this.telemetryByAgent[agent.id]) {
           this.telemetryByAgent[agent.id] = createEmptyTotals();
+        }
+        for (const group of this.groups.values()) {
+          if (group.leadAgent === agent.id) {
+            this.syncGroupLeadModelFields(group);
+            this.broadcast({ type: "group_updated", group: { ...group }, timestamp: Date.now() });
+          }
         }
         this.broadcastAgentsUpdated();
         sendJson(res, 200, {
@@ -1776,6 +1954,14 @@ export class AgentHubServer {
       if (method === "POST" && pathname === "/api/agents/test") {
         const input = AgentIdOnlySchema.parse(await readJsonBody(req));
         const probe = await this.registry.probeHandshake(input.id, this.baseCwd);
+        if (probe.modelCatalog && (probe.modelCatalog.models.length > 0 || probe.modelCatalog.effort)) {
+          this.broadcast({
+            type: "models_updated",
+            agent: input.id,
+            catalog: probe.modelCatalog,
+            timestamp: Date.now(),
+          });
+        }
         sendJson(res, 200, { ...probe });
         return;
       }

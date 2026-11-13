@@ -4,6 +4,29 @@ export type AgentId = string;
 
 export const ALL_AGENTS: readonly AgentId[] = ["claude", "codex", "agy", "opencode", "kimi"] as const;
 
+export interface ModelOptionItem {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface EffortConfigState {
+  configId: string;
+  name: string;
+  currentValue: string;
+  options: ModelOptionItem[];
+}
+
+export interface AgentModelCatalog {
+  agent: AgentId;
+  modelControl?: "config_option" | "legacy_set_model";
+  modelConfigId?: string;
+  currentModelId?: string;
+  models: ModelOptionItem[];
+  effort?: EffortConfigState;
+  updatedAt: number;
+}
+
 export interface AgentDefinition {
   id: AgentId;
   label: string;
@@ -15,6 +38,8 @@ export interface AgentDefinition {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  defaultModel?: string;
+  defaultEffort?: string;
   nativeProjectRuleFiles?: string[];
   nativeGlobalSkillDirs?: string[];
 }
@@ -138,6 +163,9 @@ export interface AdapterHealth {
   command: string[];
   customCommand?: string;
   customArgs?: string[];
+  defaultModel?: string;
+  defaultEffort?: string;
+  modelCatalog?: AgentModelCatalog;
   reason?: string;
 }
 
@@ -178,6 +206,10 @@ export interface TaskGroup {
   groupId: string;
   title: string;
   leadAgent: AgentId;
+  leadModel?: string;
+  leadEffort?: string;
+  agentModels?: Record<string, string>;
+  agentEfforts?: Record<string, string>;
   cwd: string;
   createdAt: number;
   updatedAt: number;
@@ -202,6 +234,9 @@ export interface SessionRecord {
   createdAt: number;
   updatedAt: number;
   lastTool?: string;
+  currentModelId?: string;
+  currentEffort?: string;
+  modelCatalog?: AgentModelCatalog;
   usage?: {
     usedTokens?: number;
     maxTokens?: number;
@@ -301,6 +336,13 @@ export type HubEvent =
       messages: ChatMessageRecord[];
       telemetry: TelemetrySnapshot;
       resourceBudgets: AgentResourceBudget[];
+      modelCatalogs: Record<string, AgentModelCatalog>;
+    }
+  | {
+      type: "models_updated";
+      agent: AgentId;
+      catalog: AgentModelCatalog;
+      timestamp: number;
     }
   | {
       type: "lead_changed";

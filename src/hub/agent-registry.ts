@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
-import type { AdapterHealth, AgentDefinition, AgentId } from "../types.js";
+import type { AdapterHealth, AgentDefinition, AgentId, AgentModelCatalog } from "../types.js";
+import { extractModelCatalogFromNewSession } from "./model-catalog.js";
 import {
   checkAdaptersHealth,
   killProcessTree,
@@ -74,6 +75,7 @@ export interface AgentProbeResult {
   ok: boolean;
   agentInfo?: unknown;
   sessionId?: string;
+  modelCatalog?: AgentModelCatalog;
   latencyMs: number;
   error?: string;
 }
@@ -84,11 +86,96 @@ export class AgentRegistry {
   readonly baseCwd: string;
   private readonly hubDir: string;
   private readonly configFile: string;
+  private readonly modelsCacheFile: string;
+  private readonly persistCache: boolean;
+  private readonly modelCatalogs = new Map<AgentId, AgentModelCatalog>();
+  private readonly discovering = new Map<AgentId, Promise<AgentModelCatalog>>();
 
-  constructor(baseCwd: string) {
+  constructor(baseCwd: string, options?: { persistCache?: boolean }) {
     this.baseCwd = path.resolve(baseCwd);
     this.hubDir = path.join(this.baseCwd, ".agent-hub");
     this.configFile = path.join(this.hubDir, "agents.json");
+    this.modelsCacheFile = path.join(this.hubDir, "models-cache.json");
+    this.persistCache = options?.persistCache ?? true;
+    this.loadModelsCache();
+  }
+
+  private loadModelsCache(): void {
+    if (!fs.existsSync(this.modelsCacheFile)) {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.modelsCacheFile, "utf8")) as Record<
+        string,
+        AgentModelCatalog
+      >;
+      if (!parsed || typeof parsed !== "object") {
+        return;
+      }
+      for (const [agent, catalog] of Object.entries(parsed)) {
+        if (catalog && typeof catalog === "object" && Array.isArray(catalog.models)) {
+          this.modelCatalogs.set(agent, { ...catalog, agent });
+        }
+      }
+    } catch {
+      // Ignore corrupt cache file
+    }
+  }
+
+  private saveModelsCache(): void {
+    if (!this.persistCache) {
+      return;
+    }
+    try {
+      fs.mkdirSync(this.hubDir, { recursive: true });
+      const gitignorePath = path.join(this.hubDir, ".gitignore");
+      if (!fs.existsSync(gitignorePath)) {
+        fs.writeFileSync(gitignorePath, "*\n", "utf8");
+      }
+      const obj = this.getAllModelCatalogs();
+      fs.writeFileSync(this.modelsCacheFile, JSON.stringify(obj, null, 2), "utf8");
+    } catch {
+      // Non-fatal cache write error
+    }
+  }
+
+  getModelCatalog(id: AgentId): AgentModelCatalog | undefined {
+    const cached = this.modelCatalogs.get(id);
+    if (!cached) {
+      return undefined;
+    }
+    return {
+      ...cached,
+      models: [...cached.models],
+      effort: cached.effort
+        ? { ...cached.effort, options: [...cached.effort.options] }
+        : undefined,
+    };
+  }
+
+  getAllModelCatalogs(): Record<string, AgentModelCatalog> {
+    const out: Record<string, AgentModelCatalog> = {};
+    for (const id of this.modelCatalogs.keys()) {
+      const copy = this.getModelCatalog(id);
+      if (copy) {
+        out[id] = copy;
+      }
+    }
+    return out;
+  }
+
+  updateModelCatalog(catalog: AgentModelCatalog): void {
+    if (catalog.models.length === 0 && !catalog.effort) {
+      return;
+    }
+    this.modelCatalogs.set(catalog.agent, {
+      ...catalog,
+      models: [...catalog.models],
+      effort: catalog.effort
+        ? { ...catalog.effort, options: [...catalog.effort.options] }
+        : undefined,
+    });
+    this.saveModelsCache();
   }
 
   private loadConfig(): AgentsConfigFile {
@@ -172,7 +259,10 @@ export class AgentRegistry {
 
   getHealthList(includeDisabled = false): AdapterHealth[] {
     const defs = includeDisabled ? this.listDefinitions() : this.listEnabledDefinitions();
-    return checkAdaptersHealth(defs);
+    return checkAdaptersHealth(defs).map((item) => ({
+      ...item,
+      modelCatalog: this.getModelCatalog(item.agent),
+    }));
   }
 
   upsertAgent(input: {
@@ -185,6 +275,8 @@ export class AgentRegistry {
     command?: string;
     args?: string[];
     env?: Record<string, string>;
+    defaultModel?: string;
+    defaultEffort?: string;
   }): AgentDefinition {
     const id = input.id.trim().toLowerCase();
     if (!VALID_AGENT_ID_RE.test(id)) {
@@ -207,6 +299,8 @@ export class AgentRegistry {
       if (input.command !== undefined) next.command = input.command.trim() || undefined;
       if (input.args !== undefined) next.args = input.args;
       if (input.env !== undefined) next.env = Object.keys(input.env).length ? input.env : undefined;
+      if (input.defaultModel !== undefined) next.defaultModel = input.defaultModel.trim() || undefined;
+      if (input.defaultEffort !== undefined) next.defaultEffort = input.defaultEffort.trim() || undefined;
       cfg.overrides[id] = next;
       this.saveConfig(cfg);
       return this.getDefinition(id)!;
@@ -230,6 +324,14 @@ export class AgentRegistry {
       command,
       args: input.args ?? prevCustom?.args ?? ["acp"],
       env: input.env ?? prevCustom?.env,
+      defaultModel:
+        input.defaultModel !== undefined
+          ? input.defaultModel.trim() || undefined
+          : prevCustom?.defaultModel,
+      defaultEffort:
+        input.defaultEffort !== undefined
+          ? input.defaultEffort.trim() || undefined
+          : prevCustom?.defaultEffort,
     };
 
     if (existingIdx >= 0) {
@@ -263,7 +365,7 @@ export class AgentRegistry {
     return true;
   }
 
-  async probeHandshake(id: AgentId, cwd = this.baseCwd): Promise<AgentProbeResult> {
+  async probeHandshake(id: AgentId, cwd = this.baseCwd, timeoutMs = 20_000): Promise<AgentProbeResult> {
     const started = Date.now();
     const resolved = this.resolveCommand(id);
     const child = spawn(resolved.command, resolved.args, {
@@ -297,7 +399,7 @@ export class AgentRegistry {
       conn = clientApp.connect(stream);
 
       const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("ACP handshake timed out (8s)")), 8000),
+        setTimeout(() => reject(new Error(`ACP handshake timed out (${Math.round(timeoutMs / 1000)}s)`)), timeoutMs),
       );
 
       const initResp = await Promise.race([
@@ -314,10 +416,16 @@ export class AgentRegistry {
         timeoutPromise,
       ]);
 
+      const catalog = extractModelCatalogFromNewSession(id, session.newSessionResponse);
+      if (catalog.models.length > 0 || catalog.effort) {
+        this.updateModelCatalog(catalog);
+      }
+
       return {
         ok: true,
         agentInfo: initResp.agentInfo,
         sessionId: session.sessionId,
+        modelCatalog: catalog,
         latencyMs: Date.now() - started,
       };
     } catch (err) {
@@ -335,6 +443,45 @@ export class AgentRegistry {
         // ignore
       }
       killProcessTree(child.pid);
+    }
+  }
+
+  /**
+   * Discovers available models & thinking effort levels for an agent via cache or live ACP probe.
+   */
+  async discoverModels(id: AgentId, cwd = this.baseCwd, force = false): Promise<AgentModelCatalog> {
+    if (!force) {
+      const cached = this.getModelCatalog(id);
+      if (cached && cached.models.length > 0) {
+        return cached;
+      }
+    }
+
+    const inflight = this.discovering.get(id);
+    if (inflight) {
+      return inflight;
+    }
+
+    const run = (async () => {
+      const probe = await this.probeHandshake(id, cwd, 25_000);
+      if (!probe.ok) {
+        throw new Error(probe.error ?? `Failed to probe models for ${id}`);
+      }
+      return (
+        probe.modelCatalog ??
+        this.getModelCatalog(id) ?? {
+          agent: id,
+          models: [],
+          updatedAt: Date.now(),
+        }
+      );
+    })();
+
+    this.discovering.set(id, run);
+    try {
+      return await run;
+    } finally {
+      this.discovering.delete(id);
     }
   }
 }

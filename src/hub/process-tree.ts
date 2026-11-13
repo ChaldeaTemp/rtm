@@ -579,6 +579,8 @@ export function checkAdaptersHealth(definitions?: AgentDefinition[]): AdapterHea
       command: argv,
       customCommand: def.command,
       customArgs: def.args,
+      defaultModel: def.defaultModel,
+      defaultEffort: def.defaultEffort,
     };
 
     const cmdExists =

@@ -6,6 +6,7 @@ import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import type {
   AgentId,
+  AgentModelCatalog,
   HubEvent,
   PendingPermission,
   PermissionMode,
@@ -14,6 +15,10 @@ import type {
   SessionUsageTotals,
   TurnUsage,
 } from "../types.js";
+import {
+  extractModelCatalogFromConfigOptions,
+  extractModelCatalogFromNewSession,
+} from "./model-catalog.js";
 import {
   killProcessTree,
   resolveAdapterCommand,
@@ -172,6 +177,7 @@ interface ManagedSession {
   initializeCapabilities?: unknown;
   callDepth: number;
   resourcesInjected: boolean;
+  modelCatalog?: AgentModelCatalog;
 }
 
 interface PendingPermissionWaiter {
@@ -194,6 +200,8 @@ export interface RunTurnOptions {
   role?: "lead" | "sub";
   label?: string;
   parentSessionKey?: string;
+  model?: string;
+  effort?: string;
 }
 
 export interface RunTurnResult {
@@ -285,6 +293,155 @@ export class AcpPool extends EventEmitter {
     this.emit("hub_event", event);
   }
 
+  private syncCatalogToManaged(
+    managed: ManagedSession,
+    catalog: AgentModelCatalog,
+    emitEvent = true,
+  ): void {
+    managed.modelCatalog = catalog;
+    managed.record.modelCatalog = catalog;
+    if (catalog.currentModelId) {
+      managed.record.currentModelId = catalog.currentModelId;
+    }
+    if (catalog.effort?.currentValue) {
+      managed.record.currentEffort = catalog.effort.currentValue;
+    }
+    if (catalog.models.length > 0 || catalog.effort) {
+      this.registry?.updateModelCatalog(catalog);
+      if (emitEvent) {
+        this.emitEvent({
+          type: "models_updated",
+          agent: managed.record.agent,
+          catalog,
+          timestamp: Date.now(),
+        });
+      }
+    }
+  }
+
+  private async applySessionSelection(
+    managed: ManagedSession,
+    desiredModel?: string,
+    desiredEffort?: string,
+  ): Promise<void> {
+    if (!managed.record.acpSessionId) {
+      throw new Error(`Session ${managed.record.sessionKey} has no ACP session ID yet.`);
+    }
+
+    const modelId = desiredModel?.trim();
+    const effort = desiredEffort?.trim();
+    let changed = false;
+
+    if (modelId && modelId !== managed.record.currentModelId) {
+      const catalog = managed.modelCatalog;
+      if (catalog?.modelControl === "config_option" && catalog.modelConfigId) {
+        const resp = await managed.conn.agent.request(acp.methods.agent.session.setConfigOption, {
+          sessionId: managed.record.acpSessionId,
+          configId: catalog.modelConfigId,
+          value: modelId,
+        });
+        const updated = extractModelCatalogFromConfigOptions(
+          managed.record.agent,
+          (resp as { configOptions?: unknown } | undefined)?.configOptions,
+          catalog,
+        );
+        if (!updated.currentModelId) {
+          updated.currentModelId = modelId;
+        }
+        this.syncCatalogToManaged(managed, updated, true);
+        managed.record.currentModelId = updated.currentModelId ?? modelId;
+        changed = true;
+      } else if (catalog?.modelControl === "legacy_set_model") {
+        await (
+          managed.conn.agent as unknown as {
+            request: (method: string, params: unknown) => Promise<unknown>;
+          }
+        ).request("session/set_model", {
+          sessionId: managed.record.acpSessionId,
+          modelId,
+        });
+        const updated: AgentModelCatalog = {
+          ...catalog,
+          currentModelId: modelId,
+          updatedAt: Date.now(),
+        };
+        this.syncCatalogToManaged(managed, updated, true);
+        managed.record.currentModelId = modelId;
+        changed = true;
+      } else {
+        const resp = await managed.conn.agent.request(acp.methods.agent.session.setConfigOption, {
+          sessionId: managed.record.acpSessionId,
+          configId: "model",
+          value: modelId,
+        });
+        const updated = extractModelCatalogFromConfigOptions(
+          managed.record.agent,
+          (resp as { configOptions?: unknown } | undefined)?.configOptions,
+          catalog,
+        );
+        if (!updated.currentModelId) {
+          updated.currentModelId = modelId;
+        }
+        this.syncCatalogToManaged(managed, updated, true);
+        managed.record.currentModelId = updated.currentModelId ?? modelId;
+        changed = true;
+      }
+    }
+
+    const effortCfg = managed.modelCatalog?.effort;
+    if (effort && effortCfg) {
+      const validOption =
+        effortCfg.options.length === 0 || effortCfg.options.some((o) => o.id === effort);
+      if (validOption && effort !== effortCfg.currentValue) {
+        const resp = await managed.conn.agent.request(acp.methods.agent.session.setConfigOption, {
+          sessionId: managed.record.acpSessionId,
+          configId: effortCfg.configId,
+          value: effort,
+        });
+        const updated = extractModelCatalogFromConfigOptions(
+          managed.record.agent,
+          (resp as { configOptions?: unknown } | undefined)?.configOptions,
+          managed.modelCatalog,
+        );
+        this.syncCatalogToManaged(managed, updated, true);
+        managed.record.currentEffort = updated.effort?.currentValue ?? effort;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      managed.record.updatedAt = Date.now();
+      this.emitEvent({
+        type: "session_updated",
+        session: { ...managed.record },
+        timestamp: managed.record.updatedAt,
+      });
+    }
+  }
+
+  /**
+   * Switches model and/or thinking effort on a live ACP session via session/set_config_option.
+   */
+  async setSessionModel(
+    sessionKey: string,
+    modelId?: string,
+    effort?: string,
+  ): Promise<SessionRecord> {
+    const managed = this.sessions.get(sessionKey);
+    if (!managed || managed.child.exitCode !== null || managed.conn.signal.aborted) {
+      throw new Error(`Active session not found: ${sessionKey}`);
+    }
+    const run = managed.queue.then(async () => {
+      await this.applySessionSelection(managed, modelId, effort);
+      return { ...managed.record };
+    });
+    managed.queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
   private async ensureSession(options: {
     agent: AgentId;
     sessionName: string;
@@ -296,6 +453,8 @@ export class AcpPool extends EventEmitter {
     role?: "lead" | "sub";
     label?: string;
     parentSessionKey?: string;
+    model?: string;
+    effort?: string;
   }): Promise<ManagedSession> {
     const sessionKey = buildSessionKey(options.agent, options.sessionName);
     const existing = this.sessions.get(sessionKey);
@@ -333,6 +492,8 @@ export class AcpPool extends EventEmitter {
       role?: "lead" | "sub";
       label?: string;
       parentSessionKey?: string;
+      model?: string;
+      effort?: string;
     },
   ): Promise<ManagedSession> {
     const workspace = ensureSessionWorkspace(
@@ -457,6 +618,26 @@ export class AcpPool extends EventEmitter {
         resourcesInjected: false,
       };
       this.sessions.set(sessionKey, managed);
+
+      const initialCatalog = extractModelCatalogFromNewSession(
+        options.agent,
+        activeSession.newSessionResponse,
+      );
+      this.syncCatalogToManaged(managed, initialCatalog, true);
+
+      const def = this.registry?.getDefinition(options.agent);
+      const targetModel = options.model?.trim() || def?.defaultModel?.trim();
+      const targetEffort = options.effort?.trim() || def?.defaultEffort?.trim();
+      if (targetModel || targetEffort) {
+        try {
+          await this.applySessionSelection(managed, targetModel, targetEffort);
+        } catch (err) {
+          stderrTail.push(
+            `[model-init-warn] ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+
       this.emitEvent({ type: "session_updated", session: { ...record }, timestamp: Date.now() });
       return managed;
     } catch (err) {
@@ -557,9 +738,20 @@ export class AcpPool extends EventEmitter {
       role: options.role,
       label: options.label,
       parentSessionKey: options.parentSessionKey,
+      model: options.model,
+      effort: options.effort,
     });
 
     const executeTurn = async (): Promise<RunTurnResult> => {
+      const wantModel = options.model?.trim();
+      const wantEffort = options.effort?.trim();
+      if (
+        (wantModel && wantModel !== managed.record.currentModelId) ||
+        (wantEffort && wantEffort !== managed.record.currentEffort)
+      ) {
+        await this.applySessionSelection(managed, wantModel, wantEffort);
+      }
+
       if (!managed.record.contextBreakdown) {
         managed.record.contextBreakdown = createEmptyContextBreakdown();
       }
@@ -703,6 +895,22 @@ export class AcpPool extends EventEmitter {
               session: { ...managed.record },
               timestamp: Date.now(),
             });
+          } else if ((update as { sessionUpdate?: string }).sessionUpdate === "config_option_update") {
+            const cfgOpts = (update as { configOptions?: unknown }).configOptions;
+            if (Array.isArray(cfgOpts)) {
+              const refreshed = extractModelCatalogFromConfigOptions(
+                managed.record.agent,
+                cfgOpts,
+                managed.modelCatalog,
+              );
+              this.syncCatalogToManaged(managed, refreshed, true);
+              managed.record.updatedAt = Date.now();
+              this.emitEvent({
+                type: "session_updated",
+                session: { ...managed.record },
+                timestamp: managed.record.updatedAt,
+              });
+            }
           }
         }
 
@@ -724,7 +932,7 @@ export class AcpPool extends EventEmitter {
           contextUsedTokens: managed.record.usage?.usedTokens,
           contextMaxTokens: managed.record.usage?.maxTokens,
           costUsd: latestCostUsd,
-          modelId: latestModelId,
+          modelId: latestModelId ?? managed.record.currentModelId,
         });
 
         managed.record.contextBreakdown.agentOutputsTokens += estimateTokens(
