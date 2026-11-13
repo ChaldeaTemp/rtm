@@ -248,6 +248,66 @@ async function main(): Promise<void> {
     },
   );
 
+  server.registerTool(
+    "resource_list_shared",
+    {
+      description:
+        "List enabled shared project/global rules and skills discovered across claude, codex, and agy.",
+      inputSchema: {},
+    },
+    async () => {
+      const res = await callHub<{
+        resources: Array<{
+          id: string;
+          kind: string;
+          scope: string;
+          name: string;
+          description: string;
+          primaryPath: string;
+          enabled: boolean;
+        }>;
+      }>(cfg.hubUrl, "/api/resources");
+      const enabled = res.resources
+        .filter((r) => r.enabled)
+        .map(({ id, kind, scope, name, description, primaryPath }) => ({
+          id,
+          kind,
+          scope,
+          name,
+          description,
+          primaryPath,
+        }));
+      return {
+        content: [{ type: "text", text: JSON.stringify(enabled, null, 2) }],
+      };
+    },
+  );
+
+  server.registerTool(
+    "resource_read_skill",
+    {
+      description: "Read the full SKILL.md instructions for a shared skill by skill name.",
+      inputSchema: {
+        skill_name: z.string().min(1).describe("Name of the shared skill to read."),
+      },
+    },
+    async ({ skill_name }) => {
+      const params = new URLSearchParams({ skill: skill_name });
+      const res = await callHub<{
+        item: { name: string; scope: string; primaryPath: string };
+        content: string;
+      }>(cfg.hubUrl, `/api/resources/content?${params.toString()}`);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `# Skill: ${res.item.name} (${res.item.scope})\nPath: ${res.item.primaryPath}\n\n${res.content}`,
+          },
+        ],
+      };
+    },
+  );
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

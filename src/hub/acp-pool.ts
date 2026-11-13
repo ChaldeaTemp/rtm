@@ -9,16 +9,157 @@ import type {
   HubEvent,
   PendingPermission,
   PermissionMode,
+  SessionContextBreakdown,
   SessionRecord,
+  SessionUsageTotals,
+  TurnUsage,
 } from "../types.js";
 import {
   killProcessTree,
   resolveAdapterCommand,
   resolvePeerMcpLaunch,
 } from "./process-tree.js";
+import { estimateTokens, type SharedResourceManager } from "./resources.js";
 import { ensureSessionWorkspace } from "./worktree.js";
 
 const READ_ONLY_KINDS = new Set(["read", "search", "think"]);
+
+function createEmptyContextBreakdown(): SessionContextBreakdown {
+  return {
+    sharedRulesTokens: 0,
+    skillsIndexTokens: 0,
+    handoffTokens: 0,
+    userPromptsTokens: 0,
+    agentOutputsTokens: 0,
+    injectedRules: [],
+    injectedSkillsCount: 0,
+    nativeRulesCount: 0,
+    nativeSkillsCount: 0,
+  };
+}
+
+function createEmptyUsageTotals(): SessionUsageTotals {
+  return {
+    turns: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedReadTokens: 0,
+    cachedWriteTokens: 0,
+    thoughtTokens: 0,
+    totalTokens: 0,
+    costUsd: 0,
+  };
+}
+
+function buildTurnUsage(params: {
+  promptResp: acp.PromptResponse | undefined;
+  effectivePrompt: string;
+  outputText: string;
+  thoughtText: string;
+  contextUsedTokens?: number;
+  contextMaxTokens?: number;
+  costUsd?: number;
+  modelId?: string;
+}): TurnUsage {
+  const rawResp = params.promptResp as
+    | {
+        usage?: {
+          totalTokens?: number;
+          inputTokens?: number;
+          outputTokens?: number;
+          cachedReadTokens?: number;
+          cachedWriteTokens?: number;
+          thoughtTokens?: number;
+        };
+        _meta?: {
+          quota?: {
+            token_count?: {
+              totalTokens?: number;
+              inputTokens?: number;
+              cachedInputTokens?: number;
+              cachedWriteTokens?: number;
+              outputTokens?: number;
+              reasoningOutputTokens?: number;
+            };
+          };
+        };
+      }
+    | undefined;
+  const u = rawResp?.usage;
+  const metaQuota = rawResp?._meta?.quota?.token_count;
+
+  if (u && ((u.totalTokens ?? 0) > 0 || (u.inputTokens ?? 0) > 0 || (u.outputTokens ?? 0) > 0)) {
+    const inputTokens = u.inputTokens ?? 0;
+    const outputTokens = u.outputTokens ?? 0;
+    const cachedReadTokens = u.cachedReadTokens ?? 0;
+    const cachedWriteTokens = u.cachedWriteTokens ?? 0;
+    const thoughtTokens = u.thoughtTokens ?? 0;
+    const totalTokens =
+      u.totalTokens && u.totalTokens > 0
+        ? u.totalTokens
+        : inputTokens + outputTokens + cachedReadTokens + cachedWriteTokens + thoughtTokens;
+    return {
+      inputTokens,
+      outputTokens,
+      cachedReadTokens,
+      cachedWriteTokens,
+      thoughtTokens,
+      totalTokens,
+      contextUsedTokens: params.contextUsedTokens,
+      contextMaxTokens: params.contextMaxTokens,
+      costUsd: params.costUsd,
+      modelId: params.modelId,
+      isEstimated: false,
+    };
+  }
+
+  if (
+    metaQuota &&
+    ((metaQuota.totalTokens ?? 0) > 0 ||
+      (metaQuota.inputTokens ?? 0) > 0 ||
+      (metaQuota.outputTokens ?? 0) > 0)
+  ) {
+    const inputTokens = metaQuota.inputTokens ?? 0;
+    const outputTokens = metaQuota.outputTokens ?? 0;
+    const cachedReadTokens = metaQuota.cachedInputTokens ?? 0;
+    const cachedWriteTokens = metaQuota.cachedWriteTokens ?? 0;
+    const thoughtTokens = metaQuota.reasoningOutputTokens ?? 0;
+    const totalTokens =
+      metaQuota.totalTokens && metaQuota.totalTokens > 0
+        ? metaQuota.totalTokens
+        : inputTokens + outputTokens + cachedReadTokens + cachedWriteTokens + thoughtTokens;
+    return {
+      inputTokens,
+      outputTokens,
+      cachedReadTokens,
+      cachedWriteTokens,
+      thoughtTokens,
+      totalTokens,
+      contextUsedTokens: params.contextUsedTokens,
+      contextMaxTokens: params.contextMaxTokens,
+      costUsd: params.costUsd,
+      modelId: params.modelId,
+      isEstimated: false,
+    };
+  }
+
+  const inputTokens = estimateTokens(params.effectivePrompt);
+  const thoughtTokens = estimateTokens(params.thoughtText);
+  const outputTokens = estimateTokens(params.outputText);
+  return {
+    inputTokens,
+    outputTokens,
+    cachedReadTokens: 0,
+    cachedWriteTokens: 0,
+    thoughtTokens,
+    totalTokens: inputTokens + outputTokens + thoughtTokens,
+    contextUsedTokens: params.contextUsedTokens,
+    contextMaxTokens: params.contextMaxTokens,
+    costUsd: params.costUsd,
+    modelId: params.modelId,
+    isEstimated: true,
+  };
+}
 
 interface ManagedSession {
   record: SessionRecord;
@@ -29,6 +170,7 @@ interface ManagedSession {
   stderrTail: string[];
   initializeCapabilities?: unknown;
   callDepth: number;
+  resourcesInjected: boolean;
 }
 
 interface PendingPermissionWaiter {
@@ -41,6 +183,9 @@ export interface RunTurnOptions {
   sessionName: string;
   baseCwd: string;
   prompt: string;
+  rawUserPrompt?: string;
+  handoffTokens?: number;
+  injectSharedResources?: boolean;
   isolateWorktree?: boolean;
   callDepth?: number;
   injectPeerMcp?: boolean;
@@ -58,6 +203,8 @@ export interface RunTurnResult {
   outputText: string;
   stopReason: string;
   peerToolsCalled: string[];
+  usage: TurnUsage;
+  injectedTokens: number;
 }
 
 export function buildSessionKey(agent: AgentId, sessionName: string): string {
@@ -70,9 +217,14 @@ export class AcpPool extends EventEmitter {
   private pendingPermissions = new Map<string, PendingPermissionWaiter>();
   private permissionMode: PermissionMode = "approve-all";
   private hubUrl = "";
+  private resourceManager?: SharedResourceManager;
 
   setHubUrl(url: string): void {
     this.hubUrl = url;
+  }
+
+  setResourceManager(rm: SharedResourceManager): void {
+    this.resourceManager = rm;
   }
 
   getPermissionMode(): PermissionMode {
@@ -294,6 +446,7 @@ export class AcpPool extends EventEmitter {
         stderrTail,
         initializeCapabilities: initResp.agentCapabilities,
         callDepth: options.callDepth,
+        resourcesInjected: false,
       };
       this.sessions.set(sessionKey, managed);
       this.emitEvent({ type: "session_updated", session: { ...record }, timestamp: Date.now() });
@@ -399,6 +552,40 @@ export class AcpPool extends EventEmitter {
     });
 
     const executeTurn = async (): Promise<RunTurnResult> => {
+      if (!managed.record.contextBreakdown) {
+        managed.record.contextBreakdown = createEmptyContextBreakdown();
+      }
+      if (!managed.record.tokenTotals) {
+        managed.record.tokenTotals = createEmptyUsageTotals();
+      }
+
+      let effectivePrompt = options.prompt;
+      let turnInjectedTokens = options.handoffTokens ?? 0;
+      const shouldInject = options.injectSharedResources ?? Boolean(options.role);
+
+      if (!managed.resourcesInjected && shouldInject && this.resourceManager) {
+        const inj = this.resourceManager.buildInjectionForAgent(
+          managed.record.agent,
+          managed.record.effectiveCwd,
+        );
+        managed.record.contextBreakdown.sharedRulesTokens = inj.sharedRulesTokens;
+        managed.record.contextBreakdown.skillsIndexTokens = inj.skillsIndexTokens;
+        managed.record.contextBreakdown.injectedRules = inj.injectedRules;
+        managed.record.contextBreakdown.injectedSkillsCount = inj.injectedSkillsCount;
+        managed.record.contextBreakdown.nativeRulesCount = inj.nativeRulesCount;
+        managed.record.contextBreakdown.nativeSkillsCount = inj.nativeSkillsCount;
+        if (inj.promptPrefix) {
+          effectivePrompt = `${inj.promptPrefix}${effectivePrompt}`;
+          turnInjectedTokens += inj.sharedRulesTokens + inj.skillsIndexTokens;
+        }
+        managed.resourcesInjected = true;
+      }
+
+      managed.record.contextBreakdown.handoffTokens += options.handoffTokens ?? 0;
+      managed.record.contextBreakdown.userPromptsTokens += estimateTokens(
+        options.rawUserPrompt ?? options.prompt,
+      );
+
       managed.record.status = "busy";
       managed.record.updatedAt = Date.now();
       this.emitEvent({
@@ -408,9 +595,12 @@ export class AcpPool extends EventEmitter {
       });
 
       let outputText = "";
+      let thoughtText = "";
+      let latestCostUsd: number | undefined;
+      let latestModelId: string | undefined;
       const peerToolsCalled: string[] = [];
 
-      const promptPromise = managed.activeSession.prompt(options.prompt);
+      const promptPromise = managed.activeSession.prompt(effectivePrompt);
       // Prevent unhandled rejection if draining loop throws first
       void promptPromise.catch(() => {});
 
@@ -438,6 +628,7 @@ export class AcpPool extends EventEmitter {
             }
           } else if (update.sessionUpdate === "agent_thought_chunk") {
             if (update.content.type === "text" && update.content.text) {
+              thoughtText += update.content.text;
               this.emitEvent({
                 type: "agent_chunk",
                 sessionKey: managed.record.sessionKey,
@@ -480,8 +671,21 @@ export class AcpPool extends EventEmitter {
               timestamp: Date.now(),
             });
           } else if (update.sessionUpdate === "usage_update") {
-            const used = (update as { used?: number }).used;
-            const size = (update as { size?: number }).size;
+            const rawUpdate = update as {
+              used?: number;
+              size?: number;
+              cost?: { amount?: number; currency?: string };
+              _meta?: Record<string, unknown>;
+            };
+            const used = rawUpdate.used;
+            const size = rawUpdate.size;
+            if (typeof rawUpdate.cost?.amount === "number") {
+              latestCostUsd = rawUpdate.cost.amount;
+            }
+            const metaModel = rawUpdate._meta?.["_claude/model"];
+            if (typeof metaModel === "string" && metaModel.trim()) {
+              latestModelId = metaModel.trim();
+            }
             managed.record.usage = {
               usedTokens: typeof used === "number" ? used : managed.record.usage?.usedTokens,
               maxTokens: typeof size === "number" ? size : managed.record.usage?.maxTokens,
@@ -492,6 +696,45 @@ export class AcpPool extends EventEmitter {
               timestamp: Date.now(),
             });
           }
+        }
+
+        let promptResp: acp.PromptResponse | undefined;
+        try {
+          promptResp = await Promise.race([
+            promptPromise,
+            new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 500)),
+          ]);
+        } catch {
+          promptResp = undefined;
+        }
+
+        const turnUsage = buildTurnUsage({
+          promptResp,
+          effectivePrompt,
+          outputText,
+          thoughtText,
+          contextUsedTokens: managed.record.usage?.usedTokens,
+          contextMaxTokens: managed.record.usage?.maxTokens,
+          costUsd: latestCostUsd,
+          modelId: latestModelId,
+        });
+
+        managed.record.contextBreakdown.agentOutputsTokens += estimateTokens(
+          outputText + thoughtText,
+        );
+        const totals = managed.record.tokenTotals;
+        totals.turns += 1;
+        totals.inputTokens += turnUsage.inputTokens;
+        totals.outputTokens += turnUsage.outputTokens;
+        totals.cachedReadTokens += turnUsage.cachedReadTokens;
+        totals.cachedWriteTokens += turnUsage.cachedWriteTokens;
+        totals.thoughtTokens += turnUsage.thoughtTokens;
+        totals.totalTokens += turnUsage.totalTokens;
+        if (typeof turnUsage.costUsd === "number") {
+          totals.costUsd = turnUsage.costUsd;
+        }
+        if (turnUsage.modelId) {
+          totals.modelId = turnUsage.modelId;
         }
 
         managed.record.status = "idle";
@@ -510,6 +753,8 @@ export class AcpPool extends EventEmitter {
           outputText,
           stopReason,
           peerToolsCalled,
+          usage: turnUsage,
+          injectedTokens: turnInjectedTokens,
         };
       } catch (err) {
         managed.record.status = "error";

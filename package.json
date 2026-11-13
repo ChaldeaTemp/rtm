@@ -13,7 +13,8 @@
     "start": "tsx src/index.ts",
     "ui": "tsx src/index.ts --ui",
     "status": "tsx src/index.ts status",
-    "verify": "tsx scripts/verify-phase1.ts"
+    "verify": "tsx scripts/verify-phase1.ts",
+    "verify:phase2-3": "tsx scripts/verify-phase2-3.ts"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "latest",

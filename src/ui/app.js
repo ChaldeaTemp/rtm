@@ -12,6 +12,10 @@ const STATE = {
   sendingStreams: new Set(),
   newTaskLead: "claude",
   inspectorCollapsed: false,
+  stageView: "chat",
+  telemetry: null,
+  resourceBudgets: [],
+  resourcesList: [],
   logs: [],
 };
 
@@ -27,6 +31,13 @@ const els = {
   groupCountBadge: document.getElementById("groupCountBadge"),
   groupList: document.getElementById("groupList"),
   themeToggleBtn: document.getElementById("themeToggleBtn"),
+  navResBadge: document.getElementById("navResBadge"),
+  navTokBadge: document.getElementById("navTokBadge"),
+  liveContextPill: document.getElementById("liveContextPill"),
+  chatStageHeader: document.getElementById("chatStageHeader"),
+  chatComposerWrap: document.getElementById("chatComposerWrap"),
+  resourcesView: document.getElementById("resourcesView"),
+  telemetryView: document.getElementById("telemetryView"),
   stageTaskTitle: document.getElementById("stageTaskTitle"),
   streamBadge: document.getElementById("streamBadge"),
   leadSwitcher: document.getElementById("leadSwitcher"),
@@ -64,6 +75,88 @@ function formatTime(ts) {
     minute: "2-digit",
     second: "2-digit",
   });
+}
+
+function formatTokens(n) {
+  const val = Number(n || 0);
+  if (!Number.isFinite(val) || val <= 0) return "0";
+  if (val >= 1_000_000) return `${(val / 1_000_000).toFixed(2)}M`;
+  if (val >= 10_000) return `${(val / 1_000).toFixed(1)}k`;
+  if (val >= 1_000) return `${(val / 1_000).toFixed(2)}k`;
+  return String(Math.round(val));
+}
+
+function refreshHeaderMetrics() {
+  const totalTok = STATE.telemetry?.totals?.totalTokens || 0;
+  if (els.navTokBadge) {
+    els.navTokBadge.textContent = formatTokens(totalTok);
+  }
+  if (els.navResBadge) {
+    const count =
+      STATE.resourcesList.length > 0
+        ? STATE.resourcesList.filter((r) => r.enabled).length
+        : STATE.resourceBudgets[0]
+          ? STATE.resourceBudgets[0].nativeRules +
+            STATE.resourceBudgets[0].bridgedRules +
+            STATE.resourceBudgets[0].nativeSkills +
+            STATE.resourceBudgets[0].bridgedSkills
+          : 0;
+    els.navResBadge.textContent = String(count);
+  }
+  if (els.liveContextPill) {
+    const key = activeSessionKeyForCurrentView();
+    const sess = key ? STATE.sessions.get(key) : null;
+    if (sess && sess.usage && sess.usage.maxTokens) {
+      const used = sess.usage.usedTokens || 0;
+      const pct = Math.min(100, Math.round((used / sess.usage.maxTokens) * 100));
+      els.liveContextPill.textContent = `上下文 ${formatTokens(used)} / ${formatTokens(sess.usage.maxTokens)} (${pct}%)`;
+    } else if (sess && sess.contextBreakdown) {
+      const inj =
+        (sess.contextBreakdown.sharedRulesTokens || 0) +
+        (sess.contextBreakdown.skillsIndexTokens || 0) +
+        (sess.contextBreakdown.handoffTokens || 0);
+      const sessTotal = sess.tokenTotals?.totalTokens || 0;
+      els.liveContextPill.textContent = `注入 ${formatTokens(inj)} · 消耗 ${formatTokens(sessTotal)} tok`;
+    } else {
+      const group = getActiveGroup();
+      const budget = group ? STATE.resourceBudgets.find((b) => b.agent === group.leadAgent) : null;
+      els.liveContextPill.textContent = budget
+        ? `首轮注入 ~${formatTokens(budget.firstTurnInjectionTokens)} tok`
+        : "上下文 0 tok";
+    }
+  }
+}
+
+function setStageView(view) {
+  STATE.stageView = view;
+  const stageEl = document.querySelector("main.stage");
+  if (stageEl) {
+    stageEl.dataset.view = view;
+  }
+  const isChat = view === "chat";
+  if (els.chatStageHeader) els.chatStageHeader.hidden = !isChat;
+  if (els.sessionTabs) els.sessionTabs.hidden = !isChat || !shouldShowSessionTabs();
+  if (els.permBanner) els.permBanner.hidden = !isChat || STATE.pendingPermissions.size === 0;
+  if (els.messages) els.messages.hidden = !isChat;
+  if (els.chatComposerWrap) els.chatComposerWrap.hidden = !isChat;
+  if (els.resourcesView) els.resourcesView.hidden = view !== "resources";
+  if (els.telemetryView) els.telemetryView.hidden = view !== "telemetry";
+
+  document.querySelectorAll(".mode-tab[data-stage-view]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.stageView === view);
+  });
+
+  if (isChat) {
+    renderStageHeaderAndTabs();
+    renderPermissions();
+  }
+  refreshHeaderMetrics();
+  window.HUB_APP?.onStateChange?.();
+}
+
+function shouldShowSessionTabs() {
+  const group = getActiveGroup();
+  return Boolean(group && getGroupSubSessions(group.groupId).length > 0);
 }
 
 function renderInlineMarkdown(escapedText) {
@@ -223,6 +316,9 @@ function selectGroup(groupId, streamKey) {
   if (!group) return;
   STATE.activeGroupId = groupId;
   STATE.activeStreamKey = streamKey || `lead:${groupId}`;
+  if (STATE.stageView !== "chat") {
+    setStageView("chat");
+  }
   renderAll();
   els.promptInput.focus();
 }
@@ -602,7 +698,20 @@ function buildMessageElement(msg, linkedTasks) {
   const meta = document.createElement("div");
   meta.className = "msg-meta";
   if (msg.agent) {
-    meta.innerHTML = `<span class="agent-tag" data-agent="${escapeHtml(msg.agent)}">${escapeHtml(msg.senderLabel)}</span><span>${formatTime(msg.timestamp)}</span>`;
+    let usageHtml = "";
+    if (msg.usage && (msg.usage.totalTokens > 0 || msg.usage.inputTokens > 0)) {
+      const estMark = msg.usage.isEstimated ? "~" : "";
+      const cachePart =
+        msg.usage.cachedReadTokens > 0
+          ? ` · 缓存 ${formatTokens(msg.usage.cachedReadTokens)}`
+          : "";
+      const injPart =
+        msg.injectedTokens && msg.injectedTokens > 0
+          ? ` · 首轮注入 +${formatTokens(msg.injectedTokens)}`
+          : "";
+      usageHtml = `<span class="msg-usage-pill" title="输入 ${msg.usage.inputTokens} / 缓存 ${msg.usage.cachedReadTokens} / 输出 ${msg.usage.outputTokens} / 思考 ${msg.usage.thoughtTokens}">${estMark}↑${formatTokens(msg.usage.inputTokens)} ↓${formatTokens(msg.usage.outputTokens)}${cachePart}${injPart}</span>`;
+    }
+    meta.innerHTML = `<span class="agent-tag" data-agent="${escapeHtml(msg.agent)}">${escapeHtml(msg.senderLabel)}</span><span>${formatTime(msg.timestamp)}</span>${usageHtml}`;
   } else {
     meta.textContent = `${msg.senderLabel} · ${formatTime(msg.timestamp)}`;
   }
@@ -813,6 +922,8 @@ function renderAll() {
   renderPermissions();
   renderMessages();
   renderInspector();
+  refreshHeaderMetrics();
+  window.HUB_APP?.onStateChange?.();
 }
 
 function updateStreamingMessageDom(msg) {
@@ -944,7 +1055,18 @@ function connectWs() {
       STATE.messagesByStream.clear();
       (msg.messages || []).forEach((m) => upsertMessageRecord(m));
 
+      STATE.telemetry = msg.telemetry || null;
+      STATE.resourceBudgets = msg.resourceBudgets || [];
+
       renderAll();
+    } else if (msg.type === "telemetry_updated") {
+      STATE.telemetry = msg.telemetry;
+      refreshHeaderMetrics();
+      window.HUB_APP?.onStateChange?.();
+    } else if (msg.type === "resources_updated") {
+      STATE.resourceBudgets = msg.budgets || [];
+      refreshHeaderMetrics();
+      window.HUB_APP?.onResourcesUpdated?.();
     } else if (msg.type === "group_created" || msg.type === "group_updated") {
       STATE.taskGroups.set(msg.group.groupId, msg.group);
       renderSidebarGroups();
@@ -1015,6 +1137,8 @@ function connectWs() {
       renderSidebarGroups();
       renderStageHeaderAndTabs();
       renderInspector();
+      refreshHeaderMetrics();
+      window.HUB_APP?.onStateChange?.();
     } else if (msg.type === "task_updated") {
       STATE.tasks.set(msg.task.taskId, msg.task);
       renderSidebarGroups();
@@ -1143,11 +1267,40 @@ els.messages.addEventListener("click", (e) => {
   }, 1200);
 });
 
+document.querySelectorAll(".mode-tab[data-stage-view]").forEach((btn) => {
+  btn.onclick = () => {
+    const view = btn.dataset.stageView;
+    if (view) setStageView(view);
+  };
+});
+
+if (els.liveContextPill) {
+  els.liveContextPill.onclick = () => {
+    setStageView("telemetry");
+  };
+}
+
+window.HUB_APP = {
+  STATE,
+  els,
+  escapeHtml,
+  formatTime,
+  formatTokens,
+  renderMarkdown,
+  appendLog,
+  selectGroup,
+  setStageView,
+  refreshHeaderMetrics,
+  onStateChange: null,
+  onResourcesUpdated: null,
+};
+
 // Init theme & connections
 try {
   applyTheme(localStorage.getItem("agent-hub-theme") === "dark");
 } catch {
   applyTheme(false);
 }
+setStageView("chat");
 connectWs();
 void loadAdapterHealth();

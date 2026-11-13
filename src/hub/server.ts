@@ -10,12 +10,17 @@ import {
   type ChatMessageRecord,
   type HubEvent,
   type PermissionMode,
+  type SessionUsageTotals,
   type TaskGroup,
   type TaskRecord,
+  type TelemetrySnapshot,
+  type TurnTelemetryRecord,
+  type TurnUsage,
 } from "../types.js";
 import { AcpPool, buildSessionKey } from "./acp-pool.js";
 import { ThreadLedger } from "./ledger.js";
 import { checkAdaptersHealth, PROJECT_ROOT } from "./process-tree.js";
+import { SharedResourceManager } from "./resources.js";
 import { summarizeWorkspaceChanges } from "./worktree.js";
 
 const MAX_PEER_DEPTH = 3;
@@ -82,6 +87,34 @@ const PermissionResolveSchema = z.object({
 const PermissionModeBodySchema = z.object({
   mode: PermissionModeSchema,
 });
+
+const ResourceToggleSchema = z.object({
+  id: z.string().min(1),
+  enabled: z.boolean(),
+});
+
+const ResourceSaveRuleSchema = z.object({
+  name: z.string().min(1),
+  scope: z.enum(["project", "global"]),
+  content: z.string().min(1),
+});
+
+const ResourceDeleteRuleSchema = z.object({
+  id: z.string().min(1),
+});
+
+function createEmptyTotals(): SessionUsageTotals {
+  return {
+    turns: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedReadTokens: 0,
+    cachedWriteTokens: 0,
+    thoughtTokens: 0,
+    totalTokens: 0,
+    costUsd: 0,
+  };
+}
 
 export interface HubServerOptions {
   baseCwd: string;
@@ -152,6 +185,7 @@ function cloneMessage(msg: ChatMessageRecord): ChatMessageRecord {
 export class AgentHubServer {
   readonly baseCwd: string;
   readonly pool = new AcpPool();
+  readonly resources: SharedResourceManager;
   private groups = new Map<string, TaskGroup>();
   private ledgers = new Map<string, ThreadLedger>();
   private defaultGroupId = "grp-default";
@@ -160,6 +194,14 @@ export class AgentHubServer {
   private taskWaiters = new Map<string, Array<() => void>>();
   private messages = new Map<string, ChatMessageRecord>();
   private activeAssistantBySession = new Map<string, ChatMessageRecord>();
+  private turnSeq = 0;
+  private telemetryTotals: SessionUsageTotals = createEmptyTotals();
+  private telemetryByAgent: Record<AgentId, SessionUsageTotals> = {
+    claude: createEmptyTotals(),
+    codex: createEmptyTotals(),
+    agy: createEmptyTotals(),
+  };
+  private recentTurns: TurnTelemetryRecord[] = [];
   private server: http.Server | undefined;
   private wss: WebSocketServer | undefined;
   private wsClients = new Set<WebSocket>();
@@ -169,6 +211,8 @@ export class AgentHubServer {
 
   constructor(options: HubServerOptions) {
     this.baseCwd = path.resolve(options.baseCwd);
+    this.resources = new SharedResourceManager(this.baseCwd);
+    this.pool.setResourceManager(this.resources);
     this.writeRuntimeFile = options.writeRuntimeFile ?? true;
     if (options.permissionMode) {
       this.pool.setPermissionMode(options.permissionMode);
@@ -440,6 +484,73 @@ export class AgentHubServer {
     }
   }
 
+  getTelemetrySnapshot(): TelemetrySnapshot {
+    return {
+      generatedAt: Date.now(),
+      totals: { ...this.telemetryTotals },
+      byAgent: {
+        claude: { ...this.telemetryByAgent.claude },
+        codex: { ...this.telemetryByAgent.codex },
+        agy: { ...this.telemetryByAgent.agy },
+      },
+      recentTurns: [...this.recentTurns],
+    };
+  }
+
+  private recordTurnTelemetry(params: {
+    groupId: string;
+    sessionKey: string;
+    role: "lead" | "sub";
+    agent: AgentId;
+    handoffTokens: number;
+    usage: TurnUsage;
+  }): void {
+    const addToTotals = (target: SessionUsageTotals, usage: TurnUsage) => {
+      target.turns += 1;
+      target.inputTokens += usage.inputTokens;
+      target.outputTokens += usage.outputTokens;
+      target.cachedReadTokens += usage.cachedReadTokens;
+      target.cachedWriteTokens += usage.cachedWriteTokens;
+      target.thoughtTokens += usage.thoughtTokens;
+      target.totalTokens += usage.totalTokens;
+      if (typeof usage.costUsd === "number") {
+        target.costUsd += usage.costUsd;
+      }
+      if (usage.modelId) {
+        target.modelId = usage.modelId;
+      }
+    };
+
+    addToTotals(this.telemetryTotals, params.usage);
+    addToTotals(this.telemetryByAgent[params.agent], params.usage);
+
+    const session = this.pool.getSession(params.sessionKey);
+    const group = this.groups.get(params.groupId);
+    const turnRecord: TurnTelemetryRecord = {
+      turnSeq: ++this.turnSeq,
+      timestamp: Date.now(),
+      groupId: params.groupId,
+      groupTitle: group?.title,
+      sessionKey: params.sessionKey,
+      role: params.role,
+      agent: params.agent,
+      injectedRulesTokens: session?.contextBreakdown?.sharedRulesTokens ?? 0,
+      injectedSkillsTokens: session?.contextBreakdown?.skillsIndexTokens ?? 0,
+      handoffTokens: params.handoffTokens,
+      usage: { ...params.usage },
+    };
+    this.recentTurns.push(turnRecord);
+    if (this.recentTurns.length > 200) {
+      this.recentTurns.shift();
+    }
+
+    this.broadcast({
+      type: "telemetry_updated",
+      telemetry: this.getTelemetrySnapshot(),
+      timestamp: Date.now(),
+    });
+  }
+
   private createSnapshot(): HubEvent {
     const ledger: ReturnType<ThreadLedger["getAllTurns"]> = [];
     for (const [groupId, groupLedger] of this.ledgers.entries()) {
@@ -461,6 +572,8 @@ export class AgentHubServer {
       pendingPermissions: this.pool.getPendingPermissions(),
       ledger,
       messages: this.getMessages(),
+      telemetry: this.getTelemetrySnapshot(),
+      resourceBudgets: this.resources.getAgentBudgets(this.baseCwd),
     };
   }
 
@@ -525,7 +638,7 @@ export class AgentHubServer {
     const sessionName = input.session ?? `${group.groupId}__lead`;
     const sessionKey = buildSessionKey(lead, sessionName);
     const streamKey = `lead:${group.groupId}`;
-    const effectivePrompt = ledger.buildLeadPrompt(lead, input.prompt);
+    const leadPromptMeta = ledger.buildLeadPromptWithMeta(lead, input.prompt);
 
     const now = Date.now();
     this.upsertMessage({
@@ -565,7 +678,10 @@ export class AgentHubServer {
         agent: lead,
         sessionName,
         baseCwd: input.cwd ?? group.cwd,
-        prompt: effectivePrompt,
+        prompt: leadPromptMeta.prompt,
+        rawUserPrompt: input.prompt,
+        handoffTokens: leadPromptMeta.handoffTokens,
+        injectSharedResources: true,
         isolateWorktree: false,
         callDepth: 0,
         injectPeerMcp: true,
@@ -578,8 +694,19 @@ export class AgentHubServer {
       if (!assistantMsg.text && result.outputText) {
         assistantMsg.text = result.outputText;
       }
+      assistantMsg.usage = result.usage;
+      assistantMsg.injectedTokens = result.injectedTokens;
       assistantMsg.completedAt = Date.now();
       this.upsertMessage(assistantMsg);
+
+      this.recordTurnTelemetry({
+        groupId: group.groupId,
+        sessionKey: result.sessionKey,
+        role: "lead",
+        agent: lead,
+        handoffTokens: leadPromptMeta.handoffTokens,
+        usage: result.usage,
+      });
 
       const turn = ledger.recordTurn({
         leadAgent: lead,
@@ -668,6 +795,8 @@ export class AgentHubServer {
         sessionName: session.name,
         baseCwd: session.baseCwd,
         prompt: input.prompt,
+        rawUserPrompt: input.prompt,
+        injectSharedResources: true,
         isolateWorktree: session.isWorktree,
         callDepth: 1,
         injectPeerMcp: true,
@@ -681,8 +810,19 @@ export class AgentHubServer {
       if (!assistantMsg.text && result.outputText) {
         assistantMsg.text = result.outputText;
       }
+      assistantMsg.usage = result.usage;
+      assistantMsg.injectedTokens = result.injectedTokens;
       assistantMsg.completedAt = Date.now();
       this.upsertMessage(assistantMsg);
+
+      this.recordTurnTelemetry({
+        groupId: session.groupId,
+        sessionKey: result.sessionKey,
+        role: session.role,
+        agent: session.agent,
+        handoffTokens: 0,
+        usage: result.usage,
+      });
 
       return {
         sessionKey: result.sessionKey,
@@ -807,6 +947,8 @@ export class AgentHubServer {
         sessionName: target.targetSessionName,
         baseCwd: body.cwd ?? group.cwd,
         prompt: body.prompt,
+        rawUserPrompt: body.prompt,
+        injectSharedResources: true,
         isolateWorktree: body.isolateWorktree,
         callDepth: body.depth + 1,
         injectPeerMcp: body.depth + 1 < MAX_PEER_DEPTH,
@@ -828,8 +970,19 @@ export class AgentHubServer {
         if (!assistantMsg.text && res.outputText) {
           assistantMsg.text = res.outputText;
         }
+        assistantMsg.usage = res.usage;
+        assistantMsg.injectedTokens = res.injectedTokens;
         assistantMsg.completedAt = Date.now();
         this.upsertMessage(assistantMsg);
+
+        this.recordTurnTelemetry({
+          groupId: target.groupId,
+          sessionKey: res.sessionKey,
+          role: "sub",
+          agent: body.targetAgent,
+          handoffTokens: 0,
+          usage: res.usage,
+        });
       })
       .catch((err) => {
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -923,8 +1076,25 @@ export class AgentHubServer {
         return;
       }
 
+      if (method === "GET" && pathname === "/ui/panels.css") {
+        const css = fs.readFileSync(this.getUiAssetPath("panels.css"), "utf8");
+        res.writeHead(200, { "Content-Type": "text/css; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(css);
+        return;
+      }
+
       if (method === "GET" && pathname === "/ui/app.js") {
         const js = fs.readFileSync(this.getUiAssetPath("app.js"), "utf8");
+        res.writeHead(200, {
+          "Content-Type": "application/javascript; charset=utf-8",
+          "Cache-Control": "no-store",
+        });
+        res.end(js);
+        return;
+      }
+
+      if (method === "GET" && pathname === "/ui/panels.js") {
+        const js = fs.readFileSync(this.getUiAssetPath("panels.js"), "utf8");
         res.writeHead(200, {
           "Content-Type": "application/javascript; charset=utf-8",
           "Cache-Control": "no-store",
@@ -1075,6 +1245,73 @@ export class AgentHubServer {
         return;
       }
 
+      if (method === "GET" && pathname === "/api/resources") {
+        const cwd = reqUrl.searchParams.get("cwd") || this.baseCwd;
+        sendJson(res, 200, {
+          ok: true,
+          resources: this.resources.discover(cwd),
+          budgets: this.resources.getAgentBudgets(cwd),
+        });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/resources/content") {
+        const id = reqUrl.searchParams.get("id") || undefined;
+        const skillName = reqUrl.searchParams.get("skill") || undefined;
+        const cwd = reqUrl.searchParams.get("cwd") || this.baseCwd;
+        const result = this.resources.readResourceContent({ id, skillName, cwd });
+        sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/resources/toggle") {
+        const body = ResourceToggleSchema.parse(await readJsonBody(req));
+        this.resources.setResourceEnabled(body.id, body.enabled);
+        const resources = this.resources.discover(this.baseCwd);
+        const budgets = this.resources.getAgentBudgets(this.baseCwd);
+        this.broadcast({ type: "resources_updated", budgets, timestamp: Date.now() });
+        sendJson(res, 200, { ok: true, resources, budgets });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/resources/rules") {
+        const body = ResourceSaveRuleSchema.parse(await readJsonBody(req));
+        const item = this.resources.saveHubRule(body);
+        const resources = this.resources.discover(this.baseCwd);
+        const budgets = this.resources.getAgentBudgets(this.baseCwd);
+        this.broadcast({ type: "resources_updated", budgets, timestamp: Date.now() });
+        sendJson(res, 200, { ok: true, item, resources, budgets });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/resources/rules/delete") {
+        const body = ResourceDeleteRuleSchema.parse(await readJsonBody(req));
+        const deleted = this.resources.deleteHubRule(body.id);
+        const resources = this.resources.discover(this.baseCwd);
+        const budgets = this.resources.getAgentBudgets(this.baseCwd);
+        this.broadcast({ type: "resources_updated", budgets, timestamp: Date.now() });
+        sendJson(res, 200, { ok: true, deleted, resources, budgets });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/resources/sync-project") {
+        const updatedFiles = this.resources.syncProjectRuleFiles(this.baseCwd);
+        const budgets = this.resources.getAgentBudgets(this.baseCwd);
+        this.broadcast({ type: "resources_updated", budgets, timestamp: Date.now() });
+        sendJson(res, 200, { ok: true, updatedFiles });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/telemetry") {
+        sendJson(res, 200, {
+          ok: true,
+          telemetry: this.getTelemetrySnapshot(),
+          sessions: this.pool.listSessions(),
+          budgets: this.resources.getAgentBudgets(this.baseCwd),
+        });
+        return;
+      }
+
       sendJson(res, 404, { ok: false, error: `Not found: ${method} ${pathname}` });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1124,7 +1361,7 @@ export class AgentHubServer {
           break;
         } catch (err) {
           const code = (err as NodeJS.ErrnoException).code;
-          if (code !== "EADDRUSE") {
+          if (code !== "EADDRINUSE") {
             throw err;
           }
         }

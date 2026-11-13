@@ -8,6 +8,105 @@ export type SessionStatus = "starting" | "idle" | "busy" | "error" | "closed";
 
 export type TaskStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
+export type ResourceKind = "rule" | "skill";
+
+export type ResourceScope = "project" | "global";
+
+export interface SharedResourceItem {
+  id: string;
+  kind: ResourceKind;
+  scope: ResourceScope;
+  name: string;
+  description: string;
+  origin: string;
+  primaryPath: string;
+  sources: string[];
+  nativeAgents: AgentId[];
+  bridgedAgents: AgentId[];
+  enabled: boolean;
+  fullTokens: number;
+  indexTokens: number;
+  updatedAt: number;
+}
+
+export interface AgentResourceBudget {
+  agent: AgentId;
+  nativeRules: number;
+  bridgedRules: number;
+  nativeSkills: number;
+  bridgedSkills: number;
+  rulesTokens: number;
+  skillsIndexTokens: number;
+  firstTurnInjectionTokens: number;
+}
+
+export interface TurnUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedReadTokens: number;
+  cachedWriteTokens: number;
+  thoughtTokens: number;
+  totalTokens: number;
+  contextUsedTokens?: number;
+  contextMaxTokens?: number;
+  costUsd?: number;
+  modelId?: string;
+  isEstimated: boolean;
+}
+
+export interface InjectedItemSummary {
+  id: string;
+  name: string;
+  kind: ResourceKind;
+  scope: ResourceScope;
+  tokens: number;
+}
+
+export interface SessionContextBreakdown {
+  sharedRulesTokens: number;
+  skillsIndexTokens: number;
+  handoffTokens: number;
+  userPromptsTokens: number;
+  agentOutputsTokens: number;
+  injectedRules: InjectedItemSummary[];
+  injectedSkillsCount: number;
+  nativeRulesCount: number;
+  nativeSkillsCount: number;
+}
+
+export interface SessionUsageTotals {
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedReadTokens: number;
+  cachedWriteTokens: number;
+  thoughtTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  modelId?: string;
+}
+
+export interface TurnTelemetryRecord {
+  turnSeq: number;
+  timestamp: number;
+  groupId: string;
+  groupTitle?: string;
+  sessionKey: string;
+  role: "lead" | "sub";
+  agent: AgentId;
+  injectedRulesTokens: number;
+  injectedSkillsTokens: number;
+  handoffTokens: number;
+  usage: TurnUsage;
+}
+
+export interface TelemetrySnapshot {
+  generatedAt: number;
+  totals: SessionUsageTotals;
+  byAgent: Record<AgentId, SessionUsageTotals>;
+  recentTurns: TurnTelemetryRecord[];
+}
+
 export interface AdapterHealth {
   agent: AgentId;
   available: boolean;
@@ -49,6 +148,8 @@ export interface SessionRecord {
     usedTokens?: number;
     maxTokens?: number;
   };
+  contextBreakdown?: SessionContextBreakdown;
+  tokenTotals?: SessionUsageTotals;
 }
 
 export interface TaskRecord {
@@ -119,6 +220,8 @@ export interface ChatMessageRecord {
   status: "streaming" | "done" | "error" | "cancelled";
   timestamp: number;
   completedAt?: number;
+  usage?: TurnUsage;
+  injectedTokens?: number;
 }
 
 export type HubEvent =
@@ -134,6 +237,8 @@ export type HubEvent =
       pendingPermissions: PendingPermission[];
       ledger: LedgerTurn[];
       messages: ChatMessageRecord[];
+      telemetry: TelemetrySnapshot;
+      resourceBudgets: AgentResourceBudget[];
     }
   | {
       type: "lead_changed";
@@ -222,5 +327,15 @@ export type HubEvent =
   | {
       type: "ledger_turn";
       turn: LedgerTurn;
+      timestamp: number;
+    }
+  | {
+      type: "telemetry_updated";
+      telemetry: TelemetrySnapshot;
+      timestamp: number;
+    }
+  | {
+      type: "resources_updated";
+      budgets: AgentResourceBudget[];
       timestamp: number;
     };

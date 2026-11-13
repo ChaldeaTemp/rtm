@@ -1,4 +1,5 @@
 import type { AgentId, LedgerTurn } from "../types.js";
+import { estimateTokens } from "./resources.js";
 
 const MAX_SUMMARY_CHARS = 800;
 
@@ -43,13 +44,17 @@ export class ThreadLedger {
   }
 
   /**
-   * Prepends unsynced prior turns to the user prompt when switching to a different lead agent.
+   * Prepends unsynced prior turns to the user prompt when switching to a different lead agent,
+   * returning both the combined prompt and the estimated handoff token size.
    */
-  buildLeadPrompt(targetLead: AgentId, userText: string): string {
+  buildLeadPromptWithMeta(
+    targetLead: AgentId,
+    userText: string,
+  ): { prompt: string; handoffTokens: number; missedTurnsCount: number } {
     const lastSynced = this.lastSyncedTurnByAgent.get(targetLead) ?? 0;
     const missedTurns = this.turns.filter((turn) => turn.turnId > lastSynced);
     if (missedTurns.length === 0) {
-      return userText;
+      return { prompt: userText, handoffTokens: 0, missedTurnsCount: 0 };
     }
 
     const latestTurnId = missedTurns[missedTurns.length - 1]!.turnId;
@@ -63,13 +68,24 @@ export class ThreadLedger {
       return `[Turn ${turn.turnId} | Lead: ${turn.leadAgent}]\nUser: ${turn.userText}\nLead Response Summary: ${turn.assistantSummary}${peerNote}`;
     });
 
-    return [
+    const handoffBlock = [
       "<handoff_context>",
       "You are now the Lead Agent for this main thread. Below are the recent turns handled before handoff:",
       historyLines.join("\n\n"),
       "</handoff_context>",
-      "",
-      userText,
     ].join("\n");
+
+    return {
+      prompt: `${handoffBlock}\n\n${userText}`,
+      handoffTokens: estimateTokens(handoffBlock),
+      missedTurnsCount: missedTurns.length,
+    };
+  }
+
+  /**
+   * Prepends unsynced prior turns to the user prompt when switching to a different lead agent.
+   */
+  buildLeadPrompt(targetLead: AgentId, userText: string): string {
+    return this.buildLeadPromptWithMeta(targetLead, userText).prompt;
   }
 }

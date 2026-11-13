@@ -120,6 +120,8 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
             "  /browser                     Open interactive workbench in default browser",
             "  /sessions                    List all active ACP sessions and worktrees",
             "  /worktrees                   List sessions isolated in git worktrees",
+            "  /resources                   List shared rules & skills and per-agent budgets",
+            "  /usage                       Show token consumption and context injection summary",
             "  /approve <all|reads|manual>  Set tool permission policy",
             "  /cancel <sessionKey>         Cancel a busy session",
             "  /quit                        Stop hub and exit",
@@ -196,6 +198,28 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
           for (const s of wts) {
             console.log(`- ${s.sessionKey}: ${s.effectiveCwd} (${s.branch ?? "detached"})`);
           }
+        }
+      } else if (cmd === "/resources") {
+        const items = hub.resources.discover();
+        const budgets = hub.resources.getAgentBudgets();
+        const rules = items.filter((i) => i.kind === "rule");
+        const skills = items.filter((i) => i.kind === "skill");
+        console.log(`Shared resources: ${rules.length} rules, ${skills.length} skills`);
+        for (const b of budgets) {
+          console.log(
+            `  ${b.agent}: native=(${b.nativeRules}r/${b.nativeSkills}s) bridged=(${b.bridgedRules}r/${b.bridgedSkills}s) firstTurn~${b.firstTurnInjectionTokens} tok`,
+          );
+        }
+      } else if (cmd === "/usage") {
+        const snap = hub.getTelemetrySnapshot();
+        console.log(
+          `Totals: turns=${snap.totals.turns} total=${snap.totals.totalTokens} (in=${snap.totals.inputTokens}, cache=${snap.totals.cachedReadTokens}, out=${snap.totals.outputTokens}, thought=${snap.totals.thoughtTokens})`,
+        );
+        for (const agent of ["claude", "codex", "agy"] as const) {
+          const t = snap.byAgent[agent];
+          console.log(
+            `  ${agent}: turns=${t.turns} total=${t.totalTokens} in=${t.inputTokens} cache=${t.cachedReadTokens} out=${t.outputTokens}`,
+          );
         }
       } else if (cmd === "/approve") {
         const mode = parsePermissionMode(arg);
