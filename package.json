@@ -1,0 +1,33 @@
+{
+  "name": "agent-hub",
+  "version": "0.1.0",
+  "description": "Multi-agent collaborative hub built on ACP / acpx with unified MCP peer messaging and interactive UI",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "agent-hub": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "tsx src/index.ts",
+    "ui": "tsx src/index.ts --ui",
+    "status": "tsx src/index.ts status",
+    "verify": "tsx scripts/verify-phase1.ts"
+  },
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "latest",
+    "@agentclientprotocol/codex-acp": "latest",
+    "@agentclientprotocol/sdk": "latest",
+    "@modelcontextprotocol/sdk": "latest",
+    "acpx": "latest",
+    "ws": "^8.18.0",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.14",
+    "tsx": "latest",
+    "typescript": "^5.7.0"
+  }
+}

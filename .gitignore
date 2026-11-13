@@ -1,0 +1,6 @@
+node_modules/
+.venv/
+dist/
+.agent-hub/
+.agent-hub-worktrees/
+*.log
