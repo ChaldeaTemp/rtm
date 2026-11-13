@@ -90,14 +90,14 @@ async function main(): Promise<void> {
     "peer_list_agents",
     {
       description:
-        "List available peer coding agents (claude, codex, agy), adapter health, and active sessions in the hub.",
+        "List available peer coding agents (including built-in claude, codex, agy, opencode, kimi and any custom ACP agents), adapter health, and active sessions in the hub.",
       inputSchema: {},
     },
     async () => {
       const health = await callHub<{
         leadAgent: string;
         baseCwd: string;
-        adapters: Array<{ agent: string; available: boolean; reason?: string }>;
+        adapters: Array<{ agent: string; label?: string; available: boolean; reason?: string }>;
         sessions: Array<{ sessionKey: string; status: string; effectiveCwd: string; branch?: string }>;
       }>(cfg.hubUrl, `/api/health${cfg.groupId ? `?groupId=${encodeURIComponent(cfg.groupId)}` : ""}`);
       return {
@@ -110,9 +110,9 @@ async function main(): Promise<void> {
     "peer_ask",
     {
       description:
-        "Synchronously ask another local agent (claude, codex, or agy) to perform a sub-task, review code, or answer a question, and return its full response and workspace diff summary.",
+        "Synchronously ask another local agent (e.g. claude, codex, agy, opencode, kimi, or custom ACP agent; check peer_list_agents) to perform a sub-task, review code, or answer a question, and return its full response and workspace diff summary.",
       inputSchema: {
-        agent: z.enum(["claude", "codex", "agy"]).describe("Target peer agent ID."),
+        agent: z.string().min(1).describe("Target peer agent ID."),
         prompt: z.string().min(1).describe("Clear, self-contained instruction for the peer agent."),
         session: z.string().optional().describe("Optional named session to reuse context."),
         cwd: z.string().optional().describe("Optional working directory override."),
@@ -147,9 +147,9 @@ async function main(): Promise<void> {
     "peer_dispatch",
     {
       description:
-        "Asynchronously dispatch a long-running sub-task to another local agent (claude, codex, or agy) and immediately return task_id for parallel execution.",
+        "Asynchronously dispatch a long-running sub-task to another local agent (e.g. claude, codex, agy, opencode, kimi, or custom ACP agent) and immediately return task_id for parallel execution.",
       inputSchema: {
-        agent: z.enum(["claude", "codex", "agy"]).describe("Target peer agent ID."),
+        agent: z.string().min(1).describe("Target peer agent ID."),
         prompt: z.string().min(1).describe("Clear, self-contained instruction for the peer agent."),
         session: z.string().optional().describe("Optional named session to reuse context."),
         cwd: z.string().optional().describe("Optional working directory override."),
@@ -252,7 +252,7 @@ async function main(): Promise<void> {
     "resource_list_shared",
     {
       description:
-        "List enabled shared project/global rules and skills discovered across claude, codex, and agy.",
+        "List enabled shared project/global rules and skills discovered across configured hub agents.",
       inputSchema: {},
     },
     async () => {
@@ -304,6 +304,91 @@ async function main(): Promise<void> {
             text: `# Skill: ${res.item.name} (${res.item.scope})\nPath: ${res.item.primaryPath}\n\n${res.content}`,
           },
         ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "ui_render_artifact",
+    {
+      description:
+        "Render an interactive HTML/SVG/Mermaid widget directly inside the Agent Hub Workbench chat stream inside a sandboxed iframe.",
+      inputSchema: {
+        title: z.string().min(1).describe("Short descriptive title for the interactive widget."),
+        kind: z.enum(["html", "svg", "mermaid"]).optional().default("html").describe("Widget content type."),
+        content: z.string().min(1).describe("Self-contained HTML snippet/document, SVG markup, or Mermaid definition."),
+        height: z.number().int().min(140).max(900).optional().describe("Optional initial iframe height in pixels."),
+        open_window: z.boolean().optional().describe("Optional: also pop open the widget in a standalone app window."),
+      },
+    },
+    async ({ title, kind, content, height, open_window }) => {
+      const res = await callHub<{
+        artifact: { artifactId: string; title: string; kind: string };
+        previewUrl: string;
+        openedWindow: boolean;
+      }>(cfg.hubUrl, "/api/artifacts", {
+        method: "POST",
+        body: {
+          groupId: cfg.groupId,
+          sessionKey: cfg.callerSession,
+          agent: cfg.callerAgent,
+          title,
+          kind,
+          content,
+          height,
+          openWindow: Boolean(open_window),
+        },
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Rendered interactive artifact ${res.artifact.artifactId} ("${res.artifact.title}", kind=${res.artifact.kind}). Preview URL: ${res.previewUrl}`,
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "hub_ask_user",
+    {
+      description:
+        "Show an interactive structured questionnaire card in the Agent Hub Workbench UI and wait for the user's choices or text input.",
+      inputSchema: {
+        title: z.string().optional().describe("Optional card header title."),
+        questions: z
+          .array(
+            z.object({
+              id: z.string().optional().describe("Stable key returned in the answers object."),
+              question: z.string().min(1).describe("Prompt shown to the user."),
+              type: z.enum(["single", "multi", "text"]).optional().default("single"),
+              options: z.array(z.string()).optional().describe("Choices for single/multi questions."),
+              placeholder: z.string().optional().describe("Placeholder for free-text questions."),
+            }),
+          )
+          .min(1),
+        timeout_seconds: z.number().min(5).max(600).optional().describe("Max wait time before auto-cancelling."),
+      },
+    },
+    async ({ title, questions, timeout_seconds }) => {
+      const res = await callHub<{
+        questionId: string;
+        cancelled: boolean;
+        answers: Record<string, unknown>;
+      }>(cfg.hubUrl, "/api/questions/ask", {
+        method: "POST",
+        body: {
+          groupId: cfg.groupId,
+          sessionKey: cfg.callerSession,
+          agent: cfg.callerAgent,
+          title,
+          questions,
+          timeoutSeconds: timeout_seconds,
+        },
+      });
+      return {
+        content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
       };
     },
   );

@@ -1,6 +1,23 @@
-export type AgentId = "claude" | "codex" | "agy";
+export type BuiltinAgentId = "claude" | "codex" | "agy" | "opencode" | "kimi";
 
-export const ALL_AGENTS: readonly AgentId[] = ["claude", "codex", "agy"] as const;
+export type AgentId = string;
+
+export const ALL_AGENTS: readonly AgentId[] = ["claude", "codex", "agy", "opencode", "kimi"] as const;
+
+export interface AgentDefinition {
+  id: AgentId;
+  label: string;
+  color: string;
+  darkColor?: string;
+  description?: string;
+  enabled: boolean;
+  builtin: boolean;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  nativeProjectRuleFiles?: string[];
+  nativeGlobalSkillDirs?: string[];
+}
 
 export type PermissionMode = "approve-all" | "approve-reads" | "manual";
 
@@ -103,17 +120,58 @@ export interface TurnTelemetryRecord {
 export interface TelemetrySnapshot {
   generatedAt: number;
   totals: SessionUsageTotals;
-  byAgent: Record<AgentId, SessionUsageTotals>;
+  byAgent: Record<string, SessionUsageTotals>;
   recentTurns: TurnTelemetryRecord[];
 }
 
 export interface AdapterHealth {
   agent: AgentId;
+  label: string;
+  color: string;
+  darkColor?: string;
+  description?: string;
+  builtin: boolean;
+  enabled: boolean;
   available: boolean;
   authReady: boolean;
   authHint?: string;
   command: string[];
+  customCommand?: string;
+  customArgs?: string[];
   reason?: string;
+}
+
+export type ArtifactKind = "html" | "svg" | "mermaid";
+
+export interface ArtifactRecord {
+  artifactId: string;
+  groupId: string;
+  sessionKey: string;
+  messageId?: string;
+  agent: AgentId;
+  title: string;
+  kind: ArtifactKind;
+  content: string;
+  height: number;
+  createdAt: number;
+}
+
+export interface QuestionField {
+  id: string;
+  question: string;
+  type: "single" | "multi" | "text";
+  options?: string[];
+  placeholder?: string;
+}
+
+export interface PendingUserQuestion {
+  questionId: string;
+  groupId: string;
+  sessionKey: string;
+  agent: AgentId;
+  title: string;
+  fields: QuestionField[];
+  createdAt: number;
 }
 
 export interface TaskGroup {
@@ -222,6 +280,7 @@ export interface ChatMessageRecord {
   completedAt?: number;
   usage?: TurnUsage;
   injectedTokens?: number;
+  artifactIds?: string[];
 }
 
 export type HubEvent =
@@ -231,10 +290,13 @@ export type HubEvent =
       leadAgent: AgentId;
       permissionMode: PermissionMode;
       baseCwd: string;
+      agents: AdapterHealth[];
       taskGroups: TaskGroup[];
       sessions: SessionRecord[];
       tasks: TaskRecord[];
       pendingPermissions: PendingPermission[];
+      pendingQuestions: PendingUserQuestion[];
+      artifacts: ArtifactRecord[];
       ledger: LedgerTurn[];
       messages: ChatMessageRecord[];
       telemetry: TelemetrySnapshot;
@@ -337,5 +399,27 @@ export type HubEvent =
   | {
       type: "resources_updated";
       budgets: AgentResourceBudget[];
+      timestamp: number;
+    }
+  | {
+      type: "agents_updated";
+      agents: AdapterHealth[];
+      timestamp: number;
+    }
+  | {
+      type: "artifact_created";
+      artifact: ArtifactRecord;
+      timestamp: number;
+    }
+  | {
+      type: "question_requested";
+      question: PendingUserQuestion;
+      timestamp: number;
+    }
+  | {
+      type: "question_resolved";
+      questionId: string;
+      answers: Record<string, unknown>;
+      cancelled: boolean;
       timestamp: number;
     };

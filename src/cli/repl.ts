@@ -3,10 +3,6 @@ import type { AgentId, HubEvent, PermissionMode } from "../types.js";
 import type { AgentHubServer } from "../hub/server.js";
 import { openInteractiveWindow } from "../ui/launcher.js";
 
-function isValidAgent(value: string | undefined): value is AgentId {
-  return value === "claude" || value === "codex" || value === "agy";
-}
-
 function parsePermissionMode(value: string | undefined): PermissionMode | undefined {
   if (value === "all" || value === "approve-all") return "approve-all";
   if (value === "reads" || value === "approve-reads") return "approve-reads";
@@ -77,6 +73,22 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
       process.stdout.write(
         `\x1b[33m[permission] ${p.sessionKey} requests "${p.toolTitle}". Open /ui to approve or resolve via API (requestId=${p.requestId}).\x1b[0m\n`,
       );
+    } else if (event.type === "artifact_created") {
+      if (wroteStreamLine) {
+        process.stdout.write("\n");
+        wroteStreamLine = false;
+      }
+      process.stdout.write(
+        `\x1b[35m[artifact] ${event.artifact.title} (${event.artifact.kind}) -> ${hub.getUrl()}/artifacts/${event.artifact.artifactId}\x1b[0m\n`,
+      );
+    } else if (event.type === "question_requested") {
+      if (wroteStreamLine) {
+        process.stdout.write("\n");
+        wroteStreamLine = false;
+      }
+      process.stdout.write(
+        `\x1b[33m[question] ${event.question.title} (questionId=${event.question.questionId}) - open /ui to answer.\x1b[0m\n`,
+      );
     }
   };
 
@@ -108,14 +120,16 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
       }
 
       if (cmd === "/help") {
+        const enabledIds = hub.registry.listEnabledIds().join("|");
         console.log(
           [
             "Commands:",
             "  /tasks                       List all task groups and sub-session counts",
-            "  /new [claude|codex|agy] [t]  Create a new parallel task group and switch to it",
+            `  /new [${enabledIds}] [title]  Create a new parallel task group and switch to it`,
             "  /use <groupId>               Switch active task group",
-            "  /lead <claude|codex|agy>     Switch the lead agent of the current task group",
+            `  /lead <${enabledIds}>        Switch the lead agent of the current task group`,
             "  /subs                        List all sub-sessions in the current task group",
+            "  /agents                      List built-in and custom ACP agents & availability",
             "  /ui | /pop                   Open interactive desktop app window",
             "  /browser                     Open interactive workbench in default browser",
             "  /sessions                    List all active ACP sessions and worktrees",
@@ -138,7 +152,7 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
       } else if (cmd === "/new") {
         let leadAgent: AgentId | undefined;
         let titleParts = rest;
-        if (isValidAgent(rest[0])) {
+        if (rest[0] && hub.registry.isEnabledAgent(rest[0])) {
           leadAgent = rest[0];
           titleParts = rest.slice(1);
         }
@@ -156,11 +170,18 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
         }
       } else if (cmd === "/lead") {
         const g = ensureValidGroup();
-        if (!isValidAgent(arg)) {
-          console.log(`Usage: /lead <claude|codex|agy> (current for ${g.groupId}: ${g.leadAgent})`);
+        if (!arg || !hub.registry.isEnabledAgent(arg)) {
+          console.log(
+            `Usage: /lead <${hub.registry.listEnabledIds().join("|")}> (current for ${g.groupId}: ${g.leadAgent})`,
+          );
         } else {
           hub.setGroupLeadAgent(g.groupId, arg);
           console.log(`Lead for task ${g.groupId} switched to ${arg}`);
+        }
+      } else if (cmd === "/agents") {
+        for (const a of hub.registry.getHealthList(true)) {
+          const status = !a.enabled ? "disabled" : a.available ? "ready" : "unavailable";
+          console.log(`- ${a.agent} (${a.label}) [${status}${a.builtin ? ", builtin" : ", custom"}]: ${a.reason ?? "OK"}`);
         }
       } else if (cmd === "/subs") {
         const subs = hub.pool
@@ -215,8 +236,8 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
         console.log(
           `Totals: turns=${snap.totals.turns} total=${snap.totals.totalTokens} (in=${snap.totals.inputTokens}, cache=${snap.totals.cachedReadTokens}, out=${snap.totals.outputTokens}, thought=${snap.totals.thoughtTokens})`,
         );
-        for (const agent of ["claude", "codex", "agy"] as const) {
-          const t = snap.byAgent[agent];
+        for (const [agent, t] of Object.entries(snap.byAgent)) {
+          if (!t) continue;
           console.log(
             `  ${agent}: turns=${t.turns} total=${t.totalTokens} in=${t.inputTokens} cache=${t.cachedReadTokens} out=${t.outputTokens}`,
           );

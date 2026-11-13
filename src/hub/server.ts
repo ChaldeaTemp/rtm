@@ -5,11 +5,14 @@ import path from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { z } from "zod";
 import {
-  ALL_AGENTS,
   type AgentId,
+  type ArtifactKind,
+  type ArtifactRecord,
   type ChatMessageRecord,
   type HubEvent,
+  type PendingUserQuestion,
   type PermissionMode,
+  type QuestionField,
   type SessionUsageTotals,
   type TaskGroup,
   type TaskRecord,
@@ -17,16 +20,18 @@ import {
   type TurnTelemetryRecord,
   type TurnUsage,
 } from "../types.js";
+import { openInteractiveWindow } from "../ui/launcher.js";
 import { AcpPool, buildSessionKey } from "./acp-pool.js";
+import { AgentRegistry } from "./agent-registry.js";
 import { ThreadLedger } from "./ledger.js";
-import { checkAdaptersHealth, PROJECT_ROOT } from "./process-tree.js";
+import { PROJECT_ROOT } from "./process-tree.js";
 import { SharedResourceManager } from "./resources.js";
 import { summarizeWorkspaceChanges } from "./worktree.js";
 
 const MAX_PEER_DEPTH = 3;
 const RUNTIME_FILE = path.join(PROJECT_ROOT, ".agent-hub", "runtime.json");
 
-const AgentIdSchema = z.enum(["claude", "codex", "agy"]);
+const AgentIdSchema = z.string().trim().min(1);
 const PermissionModeSchema = z.enum(["approve-all", "approve-reads", "manual"]);
 
 const LeadBodySchema = z.object({
@@ -102,6 +107,143 @@ const ResourceSaveRuleSchema = z.object({
 const ResourceDeleteRuleSchema = z.object({
   id: z.string().min(1),
 });
+
+const ArtifactCreateSchema = z.object({
+  groupId: z.string().optional(),
+  sessionKey: z.string().optional(),
+  agent: AgentIdSchema.optional(),
+  title: z.string().min(1),
+  kind: z.enum(["html", "svg", "mermaid"]).optional().default("html"),
+  content: z.string().min(1),
+  height: z.number().int().min(140).max(900).optional(),
+  openWindow: z.boolean().optional(),
+});
+
+const QuestionAskSchema = z.object({
+  groupId: z.string().optional(),
+  sessionKey: z.string().optional(),
+  agent: AgentIdSchema.optional(),
+  title: z.string().optional(),
+  questions: z
+    .array(
+      z.object({
+        id: z.string().optional(),
+        question: z.string().min(1),
+        type: z.enum(["single", "multi", "text"]).optional().default("single"),
+        options: z.array(z.string()).optional(),
+        placeholder: z.string().optional(),
+      }),
+    )
+    .min(1),
+  timeoutSeconds: z.number().min(5).max(600).optional(),
+});
+
+const QuestionResolveSchema = z.object({
+  questionId: z.string().min(1),
+  answers: z.record(z.string(), z.unknown()).optional().default({}),
+  cancelled: z.boolean().optional().default(false),
+});
+
+const AgentSaveSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().optional(),
+  color: z.string().optional(),
+  darkColor: z.string().optional(),
+  description: z.string().optional(),
+  enabled: z.boolean().optional(),
+  command: z.string().optional(),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+});
+
+const AgentToggleSchema = z.object({
+  id: z.string().min(1),
+  enabled: z.boolean(),
+});
+
+const AgentIdOnlySchema = z.object({
+  id: z.string().min(1),
+});
+
+function buildArtifactHtmlDocument(artifact: ArtifactRecord): string {
+  const safeTitle = artifact.title.replace(/[<>&"]/g, (c) =>
+    c === "<" ? "&lt;" : c === ">" ? "&gt;" : c === "&" ? "&amp;" : "&quot;",
+  );
+  let bodyMarkup = artifact.content;
+  const trimmed = artifact.content.trim();
+  if (artifact.kind === "svg" && !/<svg[\s>]/i.test(trimmed)) {
+    bodyMarkup = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 300">${artifact.content}</svg>`;
+  } else if (artifact.kind === "mermaid") {
+    bodyMarkup = `<pre class="mermaid">${trimmed.replace(/</g, "&lt;")}</pre>
+    <p style="font-size:12px;color:var(--muted);margin-top:8px;">Mermaid 源码视图（离线环境不依赖外部 CDN）：</p>`;
+  }
+
+  // If the HTML already defines a full <html> document, inject auto-height reporter cleanly before </body>
+  const resizeScript = `<script>
+  (function(){
+    function report(){
+      var h = Math.max(document.documentElement.scrollHeight || 0, document.body ? document.body.scrollHeight : 0);
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ __hubArtifactId: ${JSON.stringify(artifact.artifactId)}, height: h }, "*");
+      }
+    }
+    window.addEventListener("load", report);
+    if (typeof ResizeObserver !== "undefined") {
+      try { new ResizeObserver(report).observe(document.documentElement); } catch (e) {}
+    }
+    setTimeout(report, 120);
+  })();
+  </script>`;
+
+  if (/<html[\s>]/i.test(trimmed)) {
+    return trimmed.includes("</body>")
+      ? trimmed.replace("</body>", `${resizeScript}\n</body>`)
+      : `${trimmed}\n${resizeScript}`;
+  }
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${safeTitle}</title>
+  <style>
+    :root {
+      --bg: #f3f2ec;
+      --card: #faf9f5;
+      --ink: #151514;
+      --muted: #56564f;
+      --line: #c4c2b6;
+      --accent: #0d7148;
+      --background: #f3f2ec;
+      --foreground: #151514;
+      --border: #c4c2b6;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 16px;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+    pre.mermaid {
+      padding: 12px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      font-family: "JetBrains Mono", Consolas, monospace;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+${bodyMarkup}
+${resizeScript}
+</body>
+</html>`;
+}
 
 function createEmptyTotals(): SessionUsageTotals {
   return {
@@ -185,6 +327,7 @@ function cloneMessage(msg: ChatMessageRecord): ChatMessageRecord {
 export class AgentHubServer {
   readonly baseCwd: string;
   readonly pool = new AcpPool();
+  readonly registry: AgentRegistry;
   readonly resources: SharedResourceManager;
   private groups = new Map<string, TaskGroup>();
   private ledgers = new Map<string, ThreadLedger>();
@@ -194,13 +337,18 @@ export class AgentHubServer {
   private taskWaiters = new Map<string, Array<() => void>>();
   private messages = new Map<string, ChatMessageRecord>();
   private activeAssistantBySession = new Map<string, ChatMessageRecord>();
+  private artifacts = new Map<string, ArtifactRecord>();
+  private pendingQuestions = new Map<
+    string,
+    {
+      info: PendingUserQuestion;
+      timer: ReturnType<typeof setTimeout>;
+      resolve: (res: { cancelled: boolean; answers: Record<string, unknown> }) => void;
+    }
+  >();
   private turnSeq = 0;
   private telemetryTotals: SessionUsageTotals = createEmptyTotals();
-  private telemetryByAgent: Record<AgentId, SessionUsageTotals> = {
-    claude: createEmptyTotals(),
-    codex: createEmptyTotals(),
-    agy: createEmptyTotals(),
-  };
+  private telemetryByAgent: Record<string, SessionUsageTotals> = {};
   private recentTurns: TurnTelemetryRecord[] = [];
   private server: http.Server | undefined;
   private wss: WebSocketServer | undefined;
@@ -211,8 +359,14 @@ export class AgentHubServer {
 
   constructor(options: HubServerOptions) {
     this.baseCwd = path.resolve(options.baseCwd);
+    this.registry = new AgentRegistry(this.baseCwd);
     this.resources = new SharedResourceManager(this.baseCwd);
+    this.resources.setAgentRegistry(this.registry);
     this.pool.setResourceManager(this.resources);
+    this.pool.setAgentRegistry(this.registry);
+    for (const def of this.registry.listDefinitions()) {
+      this.telemetryByAgent[def.id] = createEmptyTotals();
+    }
     this.writeRuntimeFile = options.writeRuntimeFile ?? true;
     if (options.permissionMode) {
       this.pool.setPermissionMode(options.permissionMode);
@@ -319,14 +473,24 @@ export class AgentHubServer {
     this.setGroupLeadAgent(this.defaultGroupId, agent);
   }
 
+  private requireKnownAgent(agent: string): AgentId {
+    const clean = agent.trim().toLowerCase();
+    if (!this.registry.isKnownAgent(clean)) {
+      const available = this.registry.listEnabledIds().join(", ");
+      throw new Error(`Unknown agent "${agent}". Enabled agents: ${available}`);
+    }
+    return clean;
+  }
+
   createGroup(input?: { title?: string; leadAgent?: AgentId; cwd?: string }): TaskGroup {
     const now = Date.now();
     this.groupCounter += 1;
     const rawTitle = input?.title?.trim();
+    const leadAgent = input?.leadAgent ? this.requireKnownAgent(input.leadAgent) : this.getLeadAgent();
     const group: TaskGroup = {
       groupId: `grp-${randomUUID().slice(0, 6)}`,
       title: rawTitle && rawTitle.length > 0 ? rawTitle : `任务 ${this.groupCounter}`,
-      leadAgent: input?.leadAgent ?? this.getLeadAgent(),
+      leadAgent,
       cwd: input?.cwd ? path.resolve(input.cwd) : this.baseCwd,
       createdAt: now,
       updatedAt: now,
@@ -364,26 +528,27 @@ export class AgentHubServer {
   }
 
   setGroupLeadAgent(groupId: string, agent: AgentId): TaskGroup {
+    const validAgent = this.requireKnownAgent(agent);
     const group = this.groups.get(groupId);
     if (!group) {
       throw new Error(`Unknown task group: ${groupId}`);
     }
-    if (group.leadAgent === agent) {
+    if (group.leadAgent === validAgent) {
       return { ...group };
     }
     const previousLead = group.leadAgent;
     const now = Date.now();
-    group.leadAgent = agent;
+    group.leadAgent = validAgent;
     group.updatedAt = now;
 
     this.upsertMessage({
       messageId: `msg-${randomUUID().slice(0, 8)}`,
       groupId,
       streamKey: `lead:${groupId}`,
-      sessionKey: buildSessionKey(agent, `${groupId}__lead`),
+      sessionKey: buildSessionKey(validAgent, `${groupId}__lead`),
       role: "system",
       senderLabel: "系统",
-      text: `主导会话已切换：${previousLead} → ${agent}`,
+      text: `主导会话已切换：${previousLead} → ${validAgent}`,
       thoughtText: "",
       toolCalls: [],
       status: "done",
@@ -485,14 +650,19 @@ export class AgentHubServer {
   }
 
   getTelemetrySnapshot(): TelemetrySnapshot {
+    const byAgent: Record<string, SessionUsageTotals> = {};
+    for (const def of this.registry.listDefinitions()) {
+      byAgent[def.id] = { ...(this.telemetryByAgent[def.id] ?? createEmptyTotals()) };
+    }
+    for (const [id, totals] of Object.entries(this.telemetryByAgent)) {
+      if (!byAgent[id]) {
+        byAgent[id] = { ...totals };
+      }
+    }
     return {
       generatedAt: Date.now(),
       totals: { ...this.telemetryTotals },
-      byAgent: {
-        claude: { ...this.telemetryByAgent.claude },
-        codex: { ...this.telemetryByAgent.codex },
-        agy: { ...this.telemetryByAgent.agy },
-      },
+      byAgent,
       recentTurns: [...this.recentTurns],
     };
   }
@@ -522,6 +692,9 @@ export class AgentHubServer {
     };
 
     addToTotals(this.telemetryTotals, params.usage);
+    if (!this.telemetryByAgent[params.agent]) {
+      this.telemetryByAgent[params.agent] = createEmptyTotals();
+    }
     addToTotals(this.telemetryByAgent[params.agent], params.usage);
 
     const session = this.pool.getSession(params.sessionKey);
@@ -551,6 +724,180 @@ export class AgentHubServer {
     });
   }
 
+  listArtifacts(): ArtifactRecord[] {
+    return [...this.artifacts.values()].sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  listPendingQuestions(): PendingUserQuestion[] {
+    return [...this.pendingQuestions.values()]
+      .map((entry) => entry.info)
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  createArtifact(rawInput: unknown): { artifact: ArtifactRecord; previewUrl: string; openedWindow: boolean } {
+    const input = ArtifactCreateSchema.parse(rawInput);
+    const callerSession = input.sessionKey ? this.pool.getSession(input.sessionKey) : undefined;
+    const groupId =
+      (input.groupId && this.groups.has(input.groupId) ? input.groupId : callerSession?.groupId) ??
+      this.defaultGroupId;
+    const agent = input.agent ?? callerSession?.agent ?? this.getLeadAgent(groupId);
+    const resolvedSessionKey =
+      input.sessionKey ?? callerSession?.sessionKey ?? buildSessionKey(agent, `${groupId}__lead`);
+    const now = Date.now();
+    const artifactId = `art-${randomUUID().slice(0, 8)}`;
+    const artifact: ArtifactRecord = {
+      artifactId,
+      groupId,
+      sessionKey: resolvedSessionKey,
+      agent,
+      title: input.title,
+      kind: input.kind,
+      content: input.content,
+      height: input.height ?? 320,
+      createdAt: now,
+    };
+    this.artifacts.set(artifactId, artifact);
+    if (this.artifacts.size > 120) {
+      const oldestKey = this.artifacts.keys().next().value;
+      if (oldestKey) this.artifacts.delete(oldestKey);
+    }
+
+    const activeMsg = this.activeAssistantBySession.get(resolvedSessionKey);
+    if (activeMsg) {
+      activeMsg.artifactIds = [...(activeMsg.artifactIds ?? []), artifactId];
+      this.upsertMessage(activeMsg);
+    } else {
+      this.upsertMessage({
+        messageId: `msg-${randomUUID().slice(0, 8)}`,
+        groupId,
+        streamKey: callerSession?.role === "sub" ? `sub:${resolvedSessionKey}` : `lead:${groupId}`,
+        sessionKey: resolvedSessionKey,
+        role: "assistant",
+        senderLabel: agent,
+        agent,
+        text: `生成交互组件：**${artifact.title}**`,
+        thoughtText: "",
+        toolCalls: [],
+        artifactIds: [artifactId],
+        status: "done",
+        timestamp: now,
+        completedAt: now,
+      });
+    }
+
+    this.broadcast({ type: "artifact_created", artifact, timestamp: now });
+
+    const previewUrl = `${this.url}/artifacts/${encodeURIComponent(artifactId)}`;
+    let openedWindow = false;
+    if (input.openWindow && this.url) {
+      try {
+        openInteractiveWindow(previewUrl, true);
+        openedWindow = true;
+      } catch {
+        openedWindow = false;
+      }
+    }
+
+    return { artifact, previewUrl, openedWindow };
+  }
+
+  async askUserQuestion(
+    rawInput: unknown,
+  ): Promise<{ questionId: string; cancelled: boolean; answers: Record<string, unknown> }> {
+    const input = QuestionAskSchema.parse(rawInput);
+    const callerSession = input.sessionKey ? this.pool.getSession(input.sessionKey) : undefined;
+    const groupId =
+      (input.groupId && this.groups.has(input.groupId) ? input.groupId : callerSession?.groupId) ??
+      this.defaultGroupId;
+    const agent = input.agent ?? callerSession?.agent ?? this.getLeadAgent(groupId);
+    const resolvedSessionKey =
+      input.sessionKey ?? callerSession?.sessionKey ?? buildSessionKey(agent, `${groupId}__lead`);
+    const now = Date.now();
+    const questionId = `q-${randomUUID().slice(0, 8)}`;
+    const fields: QuestionField[] = input.questions.map((q, index) => ({
+      id: q.id?.trim() || `q${index + 1}`,
+      question: q.question,
+      type: q.type,
+      options: q.options && q.options.length > 0 ? q.options : undefined,
+      placeholder: q.placeholder,
+    }));
+
+    const info: PendingUserQuestion = {
+      questionId,
+      groupId,
+      sessionKey: resolvedSessionKey,
+      agent,
+      title: input.title?.trim() || `${agent} 需要你确认以下问题`,
+      fields,
+      createdAt: now,
+    };
+
+    return await new Promise<{ questionId: string; cancelled: boolean; answers: Record<string, unknown> }>(
+      (resolve) => {
+        const timeoutMs = (input.timeoutSeconds ?? 300) * 1000;
+        const timer = setTimeout(() => {
+          const entry = this.pendingQuestions.get(questionId);
+          if (!entry) return;
+          this.pendingQuestions.delete(questionId);
+          this.broadcast({
+            type: "question_resolved",
+            questionId,
+            cancelled: true,
+            answers: {},
+            timestamp: Date.now(),
+          });
+          entry.resolve({ cancelled: true, answers: {} });
+        }, timeoutMs);
+
+        this.pendingQuestions.set(questionId, {
+          info,
+          timer,
+          resolve: (res) => resolve({ questionId, ...res }),
+        });
+
+        this.broadcast({
+          type: "question_requested",
+          question: info,
+          timestamp: now,
+        });
+      },
+    );
+  }
+
+  resolveUserQuestion(rawInput: unknown): { resolved: boolean; questionId: string } {
+    const input = QuestionResolveSchema.parse(rawInput);
+    const entry = this.pendingQuestions.get(input.questionId);
+    if (!entry) {
+      throw new Error(`Unknown or expired question: ${input.questionId}`);
+    }
+    clearTimeout(entry.timer);
+    this.pendingQuestions.delete(input.questionId);
+    const answers = input.cancelled ? {} : input.answers;
+    this.broadcast({
+      type: "question_resolved",
+      questionId: input.questionId,
+      cancelled: input.cancelled,
+      answers,
+      timestamp: Date.now(),
+    });
+    entry.resolve({ cancelled: input.cancelled, answers });
+    return { resolved: true, questionId: input.questionId };
+  }
+
+  private broadcastAgentsUpdated(): void {
+    const now = Date.now();
+    this.broadcast({
+      type: "agents_updated",
+      agents: this.registry.getHealthList(true),
+      timestamp: now,
+    });
+    this.broadcast({
+      type: "resources_updated",
+      budgets: this.resources.getAgentBudgets(this.baseCwd),
+      timestamp: now,
+    });
+  }
+
   private createSnapshot(): HubEvent {
     const ledger: ReturnType<ThreadLedger["getAllTurns"]> = [];
     for (const [groupId, groupLedger] of this.ledgers.entries()) {
@@ -570,10 +917,13 @@ export class AgentHubServer {
       sessions: this.pool.listSessions(),
       tasks: [...this.tasks.values()],
       pendingPermissions: this.pool.getPendingPermissions(),
+      pendingQuestions: this.listPendingQuestions(),
       ledger,
       messages: this.getMessages(),
+      artifacts: this.listArtifacts(),
       telemetry: this.getTelemetrySnapshot(),
       resourceBudgets: this.resources.getAgentBudgets(this.baseCwd),
+      agents: this.registry.getHealthList(true),
     };
   }
 
@@ -853,6 +1203,7 @@ export class AgentHubServer {
     targetSessionKey: string;
     parentSessionKey?: string;
   } {
+    body.targetAgent = this.requireKnownAgent(body.targetAgent);
     if (body.depth >= MAX_PEER_DEPTH) {
       throw new Error(
         `Peer delegation depth limit (${MAX_PEER_DEPTH}) reached. Summarize your current findings instead of nesting further calls.`,
@@ -1103,6 +1454,33 @@ export class AgentHubServer {
         return;
       }
 
+      if (method === "GET" && pathname === "/ui/interactive.js") {
+        const js = fs.readFileSync(this.getUiAssetPath("interactive.js"), "utf8");
+        res.writeHead(200, {
+          "Content-Type": "application/javascript; charset=utf-8",
+          "Cache-Control": "no-store",
+        });
+        res.end(js);
+        return;
+      }
+
+      if (method === "GET" && pathname.startsWith("/artifacts/")) {
+        const artifactId = decodeURIComponent(pathname.slice("/artifacts/".length));
+        const artifact = this.artifacts.get(artifactId);
+        if (!artifact) {
+          res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end(`Artifact not found: ${artifactId}`);
+          return;
+        }
+        const html = buildArtifactHtmlDocument(artifact);
+        res.writeHead(200, {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store",
+        });
+        res.end(html);
+        return;
+      }
+
       if (method === "GET" && pathname === "/api/health") {
         const groupId = reqUrl.searchParams.get("groupId") || undefined;
         sendJson(res, 200, {
@@ -1113,9 +1491,10 @@ export class AgentHubServer {
           leadAgent: this.getLeadAgent(groupId),
           taskGroups: this.listGroups(),
           permissionMode: this.pool.getPermissionMode(),
-          adapters: checkAdaptersHealth(),
+          adapters: this.registry.getHealthList(false),
+          allAgents: this.registry.getHealthList(true),
           sessions: this.pool.listSessions(),
-          agents: ALL_AGENTS,
+          agents: this.registry.listEnabledIds(),
         });
         return;
       }
@@ -1312,6 +1691,95 @@ export class AgentHubServer {
         return;
       }
 
+      if (method === "GET" && pathname === "/api/artifacts") {
+        sendJson(res, 200, {
+          ok: true,
+          artifacts: this.listArtifacts(),
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/artifacts") {
+        const result = this.createArtifact(await readJsonBody(req));
+        sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/questions") {
+        sendJson(res, 200, {
+          ok: true,
+          questions: this.listPendingQuestions(),
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/questions/ask") {
+        const result = await this.askUserQuestion(await readJsonBody(req));
+        sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/questions/resolve") {
+        const result = this.resolveUserQuestion(await readJsonBody(req));
+        sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/agents") {
+        sendJson(res, 200, {
+          ok: true,
+          agents: this.registry.getHealthList(true),
+          definitions: this.registry.listDefinitions(),
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/agents/save") {
+        const input = AgentSaveSchema.parse(await readJsonBody(req));
+        const agent = this.registry.upsertAgent(input);
+        if (!this.telemetryByAgent[agent.id]) {
+          this.telemetryByAgent[agent.id] = createEmptyTotals();
+        }
+        this.broadcastAgentsUpdated();
+        sendJson(res, 200, {
+          ok: true,
+          agent,
+          agents: this.registry.getHealthList(true),
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/agents/toggle") {
+        const input = AgentToggleSchema.parse(await readJsonBody(req));
+        const agent = this.registry.toggleAgent(input.id, input.enabled);
+        this.broadcastAgentsUpdated();
+        sendJson(res, 200, {
+          ok: true,
+          agent,
+          agents: this.registry.getHealthList(true),
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/agents/delete") {
+        const input = AgentIdOnlySchema.parse(await readJsonBody(req));
+        const deleted = this.registry.deleteCustomAgent(input.id);
+        this.broadcastAgentsUpdated();
+        sendJson(res, 200, {
+          ok: true,
+          deleted,
+          agents: this.registry.getHealthList(true),
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/agents/test") {
+        const input = AgentIdOnlySchema.parse(await readJsonBody(req));
+        const probe = await this.registry.probeHandshake(input.id, this.baseCwd);
+        sendJson(res, 200, { ...probe });
+        return;
+      }
+
       sendJson(res, 404, { ok: false, error: `Not found: ${method} ${pathname}` });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1391,6 +1859,11 @@ export class AgentHubServer {
   }
 
   async stop(): Promise<void> {
+    for (const [questionId, entry] of this.pendingQuestions.entries()) {
+      clearTimeout(entry.timer);
+      entry.resolve({ cancelled: true, answers: {} });
+      this.pendingQuestions.delete(questionId);
+    }
     await this.pool.disposeAll();
     for (const ws of this.wsClients) {
       ws.close();

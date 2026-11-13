@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AdapterHealth, AgentId } from "../types.js";
+import { ALL_AGENTS, type AdapterHealth, type AgentDefinition, type AgentId } from "../types.js";
 
 const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const PROJECT_ROOT = path.resolve(THIS_DIR, "../..");
@@ -16,7 +16,7 @@ export interface ResolvedCommand {
   env?: Record<string, string>;
 }
 
-function findExecutableInPath(names: string[]): string | undefined {
+export function findExecutableInPath(names: string[]): string | undefined {
   const pathEnv = process.env.PATH ?? "";
   for (const dir of pathEnv.split(path.delimiter)) {
     if (!dir) {
@@ -72,6 +72,94 @@ function resolveAgyExecutable(localSecrets: Record<string, string>): string | un
   return findExecutableInPath(["agy"]);
 }
 
+export function resolveOpencodeExecutable(localSecrets: Record<string, string>): string | undefined {
+  const explicit = process.env.OPENCODE_EXECUTABLE || localSecrets.OPENCODE_EXECUTABLE;
+  if (explicit?.trim() && fs.existsSync(explicit.trim())) {
+    return explicit.trim();
+  }
+  if (process.platform === "win32") {
+    const inPath = findExecutableInPath(["opencode.exe", "opencode.cmd", "opencode.ps1"]);
+    if (inPath) {
+      if (inPath.toLowerCase().endsWith(".exe")) {
+        return inPath;
+      }
+      const dir = path.dirname(inPath);
+      const binExe = path.join(dir, "node_modules", "@opencode", "cli", "bin", "opencode.exe");
+      if (fs.existsSync(binExe)) {
+        return binExe;
+      }
+    }
+    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+    const defaultExe = path.join(localAppData, "opencode", "bin", "opencode.exe");
+    if (fs.existsSync(defaultExe)) {
+      return defaultExe;
+    }
+    return undefined;
+  }
+  for (const candidate of [
+    path.join(os.homedir(), ".opencode", "bin", "opencode"),
+    path.join(os.homedir(), ".local", "bin", "opencode"),
+    "/usr/local/bin/opencode",
+  ]) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return findExecutableInPath(["opencode"]);
+}
+
+export function resolveKimiExecutable(localSecrets: Record<string, string>): string | undefined {
+  const explicit = process.env.KIMI_EXECUTABLE || localSecrets.KIMI_EXECUTABLE;
+  if (explicit?.trim() && fs.existsSync(explicit.trim())) {
+    return explicit.trim();
+  }
+  const exeName = process.platform === "win32" ? "kimi.exe" : "kimi";
+  for (const candidate of [
+    path.join(os.homedir(), ".kimi-code", "bin", exeName),
+    path.join(os.homedir(), ".kimi", "bin", exeName),
+    path.join(os.homedir(), ".local", "bin", exeName),
+  ]) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return findExecutableInPath(process.platform === "win32" ? ["kimi.exe"] : ["kimi"]);
+}
+
+function resolveGenericCommand(
+  rawCommand: string,
+  args: string[],
+  env?: Record<string, string>,
+): ResolvedCommand {
+  const trimmed = rawCommand.trim();
+  const isPathLike = trimmed.includes("/") || trimmed.includes("\\") || path.isAbsolute(trimmed);
+  let resolvedCmd = trimmed;
+  if (isPathLike) {
+    resolvedCmd = path.isAbsolute(trimmed) ? trimmed : path.resolve(PROJECT_ROOT, trimmed);
+  } else {
+    const pathCandidates =
+      process.platform === "win32"
+        ? [trimmed, `${trimmed}.exe`, `${trimmed}.cmd`, `${trimmed}.bat`]
+        : [trimmed];
+    resolvedCmd = findExecutableInPath(pathCandidates) ?? trimmed;
+  }
+
+  if (process.platform === "win32" && /\.(cmd|bat)$/i.test(resolvedCmd)) {
+    return {
+      command: process.env.ComSpec || "cmd.exe",
+      args: ["/d", "/s", "/c", resolvedCmd, ...args],
+      entrypointFile: resolvedCmd,
+      env,
+    };
+  }
+
+  return {
+    command: resolvedCmd,
+    args,
+    env,
+  };
+}
+
 /**
  * Reads optional local API keys/tokens from .agent-hub/secrets.json without touching global user configs.
  */
@@ -96,8 +184,17 @@ export function loadLocalSecrets(): Record<string, string> {
 /**
  * Resolves a Windows-safe direct executable and argument list for each supported ACP adapter.
  */
-export function resolveAdapterCommand(agent: AgentId): ResolvedCommand {
+export function resolveAdapterCommand(agent: AgentId, customDef?: AgentDefinition): ResolvedCommand {
   const localSecrets = loadLocalSecrets();
+  const mergedEnv: Record<string, string> = {
+    ...localSecrets,
+    ...(customDef?.env ?? {}),
+  };
+  const envOut = Object.keys(mergedEnv).length ? mergedEnv : undefined;
+
+  if (customDef?.command?.trim()) {
+    return resolveGenericCommand(customDef.command, customDef.args ?? [], envOut);
+  }
 
   if (agent === "claude") {
     const reclaudeShim = path.join(PROJECT_ROOT, "bridges", "reclaude-acp.mjs");
@@ -111,7 +208,7 @@ export function resolveAdapterCommand(agent: AgentId): ResolvedCommand {
     );
     const entry = fs.existsSync(reclaudeShim) ? reclaudeShim : fallbackEntry;
     const reclaudeExe = resolveReclaudeExecutable(localSecrets);
-    const env: Record<string, string> = { ...localSecrets };
+    const env: Record<string, string> = { ...mergedEnv };
     if (reclaudeExe) {
       env.CLAUDE_CODE_EXECUTABLE = reclaudeExe;
     }
@@ -136,37 +233,59 @@ export function resolveAdapterCommand(agent: AgentId): ResolvedCommand {
       command: process.execPath,
       args: [entry],
       entrypointFile: entry,
-      env: Object.keys(localSecrets).length ? localSecrets : undefined,
+      env: envOut,
     };
   }
 
-  const adapterMode = (process.env.AGY_ADAPTER_MODE || localSecrets.AGY_ADAPTER_MODE || "").toLowerCase();
-  const agyExe = adapterMode === "sdk" ? undefined : resolveAgyExecutable(localSecrets);
-  if (agyExe) {
+  if (agent === "opencode") {
+    const opencodeExe = resolveOpencodeExecutable(localSecrets);
     return {
-      command: agyExe,
-      args: ["acp"],
-      env: Object.keys(localSecrets).length ? localSecrets : undefined,
+      command: opencodeExe ?? (process.platform === "win32" ? "opencode.exe" : "opencode"),
+      args: customDef?.args?.length ? customDef.args : ["acp"],
+      env: envOut,
     };
   }
 
-  const venvPython = path.join(
-    PROJECT_ROOT,
-    ".venv",
-    process.platform === "win32" ? "Scripts" : "bin",
-    process.platform === "win32" ? "python.exe" : "python",
-  );
-  const bridgeScript = path.join(PROJECT_ROOT, "bridges", "agy_acp_server.py");
-  return {
-    command: venvPython,
-    args: [bridgeScript],
-    entrypointFile: bridgeScript,
-    env: {
-      ...localSecrets,
-      PYTHONUTF8: "1",
-      PYTHONIOENCODING: "utf-8",
-    },
-  };
+  if (agent === "kimi") {
+    const kimiExe = resolveKimiExecutable(localSecrets);
+    return {
+      command: kimiExe ?? (process.platform === "win32" ? "kimi.exe" : "kimi"),
+      args: customDef?.args?.length ? customDef.args : ["acp"],
+      env: envOut,
+    };
+  }
+
+  if (agent === "agy") {
+    const adapterMode = (process.env.AGY_ADAPTER_MODE || localSecrets.AGY_ADAPTER_MODE || "").toLowerCase();
+    const agyExe = adapterMode === "sdk" ? undefined : resolveAgyExecutable(localSecrets);
+    if (agyExe) {
+      return {
+        command: agyExe,
+        args: ["acp"],
+        env: envOut,
+      };
+    }
+
+    const venvPython = path.join(
+      PROJECT_ROOT,
+      ".venv",
+      process.platform === "win32" ? "Scripts" : "bin",
+      process.platform === "win32" ? "python.exe" : "python",
+    );
+    const bridgeScript = path.join(PROJECT_ROOT, "bridges", "agy_acp_server.py");
+    return {
+      command: venvPython,
+      args: [bridgeScript],
+      entrypointFile: bridgeScript,
+      env: {
+        ...mergedEnv,
+        PYTHONUTF8: "1",
+        PYTHONIOENCODING: "utf-8",
+      },
+    };
+  }
+
+  return resolveGenericCommand(agent, customDef?.args?.length ? customDef.args : ["acp"], envOut);
 }
 
 /**
@@ -241,7 +360,11 @@ function readClaudeSettingsEnv(): Record<string, string> {
   }
 }
 
-function checkAgentAuthReady(agent: AgentId, localSecrets: Record<string, string>): {
+function checkAgentAuthReady(
+  agent: AgentId,
+  localSecrets: Record<string, string>,
+  customDef?: AgentDefinition,
+): {
   authReady: boolean;
   authHint?: string;
 } {
@@ -327,86 +450,157 @@ function checkAgentAuthReady(agent: AgentId, localSecrets: Record<string, string
         };
   }
 
-  const hasGeminiKey = Boolean(process.env.GEMINI_API_KEY || localSecrets.GEMINI_API_KEY);
-  if (hasGeminiKey) {
-    return { authReady: true };
+  if (agent === "opencode") {
+    const ocDataAuth = path.join(os.homedir(), ".local", "share", "opencode", "auth.json");
+    const ocConfig = path.join(os.homedir(), ".config", "opencode", "opencode.json");
+    const hasAuth = Boolean(
+      process.env.OPENCODE_API_KEY ||
+        process.env.OPENAI_API_KEY ||
+        process.env.ANTHROPIC_API_KEY ||
+        localSecrets.OPENCODE_API_KEY ||
+        customDef?.env?.OPENCODE_API_KEY ||
+        fs.existsSync(ocDataAuth) ||
+        fs.existsSync(ocConfig),
+    );
+    return hasAuth
+      ? { authReady: true }
+      : {
+          authReady: false,
+          authHint: "OpenCode 未检测到配置或凭证：请运行 opencode auth login 或检查 ~/.config/opencode/opencode.json",
+        };
   }
 
-  const adapterMode = (process.env.AGY_ADAPTER_MODE || localSecrets.AGY_ADAPTER_MODE || "").toLowerCase();
-  const agyExe = adapterMode === "sdk" ? undefined : resolveAgyExecutable(localSecrets);
-  if (agyExe) {
-    if (process.platform === "win32") {
+  if (agent === "kimi") {
+    const kimiCredsDir = path.join(os.homedir(), ".kimi-code", "credentials");
+    const kimiLegacyCredsDir = path.join(os.homedir(), ".kimi", "credentials");
+    const hasCredDir = (dir: string) => {
+      if (!fs.existsSync(dir)) return false;
       try {
-        const res = spawnSync("cmdkey", ["/list"], {
-          encoding: "utf8",
-          timeout: 3000,
-          windowsHide: true,
-        });
-        if (res.status === 0 && /gemini:antigravity/i.test(res.stdout ?? "")) {
+        return fs.readdirSync(dir).length > 0;
+      } catch {
+        return false;
+      }
+    };
+    const hasAuth = Boolean(
+      process.env.KIMI_API_KEY ||
+        process.env.MOONSHOT_API_KEY ||
+        localSecrets.KIMI_API_KEY ||
+        localSecrets.MOONSHOT_API_KEY ||
+        customDef?.env?.KIMI_API_KEY ||
+        hasCredDir(kimiCredsDir) ||
+        hasCredDir(kimiLegacyCredsDir),
+    );
+    return hasAuth
+      ? { authReady: true }
+      : {
+          authReady: false,
+          authHint: "Kimi CLI 未检测到登录凭证：请运行 kimi login 或在环境变量配置 KIMI_API_KEY",
+        };
+  }
+
+  if (agent === "agy") {
+    const hasGeminiKey = Boolean(process.env.GEMINI_API_KEY || localSecrets.GEMINI_API_KEY);
+    if (hasGeminiKey) {
+      return { authReady: true };
+    }
+
+    const adapterMode = (process.env.AGY_ADAPTER_MODE || localSecrets.AGY_ADAPTER_MODE || "").toLowerCase();
+    const agyExe = adapterMode === "sdk" ? undefined : resolveAgyExecutable(localSecrets);
+    if (agyExe) {
+      if (process.platform === "win32") {
+        try {
+          const res = spawnSync("cmdkey", ["/list"], {
+            encoding: "utf8",
+            timeout: 3000,
+            windowsHide: true,
+          });
+          if (res.status === 0 && /gemini:antigravity/i.test(res.stdout ?? "")) {
+            return { authReady: true };
+          }
+        } catch {
+          // Fall through to authHint
+        }
+      } else {
+        const cliDir = path.join(os.homedir(), ".gemini", "antigravity-cli");
+        if (
+          fs.existsSync(path.join(cliDir, "oauth_creds.json")) ||
+          fs.existsSync(path.join(cliDir, "credentials.json"))
+        ) {
           return { authReady: true };
         }
-      } catch {
-        // Fall through to authHint
       }
-    } else {
-      const cliDir = path.join(os.homedir(), ".gemini", "antigravity-cli");
-      if (
-        fs.existsSync(path.join(cliDir, "oauth_creds.json")) ||
-        fs.existsSync(path.join(cliDir, "credentials.json"))
-      ) {
-        return { authReady: true };
-      }
+      return {
+        authReady: false,
+        authHint:
+          "Antigravity CLI 已安装但未登录：请在终端运行 agy 或 agy acp --login 完成一次 Google 账号登录（无需配置 GEMINI_API_KEY）",
+      };
     }
+
     return {
       authReady: false,
-      authHint:
-        "Antigravity CLI 已安装但未登录：请在终端运行 agy 或 agy acp --login 完成一次 Google 账号登录（无需配置 GEMINI_API_KEY）",
+      authHint: "未检测到 GEMINI_API_KEY：请在环境变量或 .agent-hub/secrets.json 中设置以启用 google-antigravity SDK",
     };
   }
 
-  return {
-    authReady: false,
-    authHint: "未检测到 GEMINI_API_KEY：请在环境变量或 .agent-hub/secrets.json 中设置以启用 google-antigravity SDK",
-  };
+  return { authReady: true };
 }
 
 /**
  * Checks whether local entrypoints for each adapter exist on disk and whether local auth is ready.
  */
-export function checkAdaptersHealth(): AdapterHealth[] {
+export function checkAdaptersHealth(definitions?: AgentDefinition[]): AdapterHealth[] {
   const localSecrets = loadLocalSecrets();
-  const agents: AgentId[] = ["claude", "codex", "agy"];
-  return agents.map((agent) => {
-    const resolved = resolveAdapterCommand(agent);
+  const defs: AgentDefinition[] =
+    definitions ??
+    ALL_AGENTS.map((id) => ({
+      id,
+      label: id,
+      color: "#0d7148",
+      enabled: true,
+      builtin: true,
+    }));
+
+  return defs.map((def) => {
+    const agent = def.id;
+    const resolved = resolveAdapterCommand(agent, def);
     const argv = [resolved.command, ...resolved.args];
     const targetFile = resolved.entrypointFile;
-    const auth = checkAgentAuthReady(agent, localSecrets);
-    if (!fs.existsSync(resolved.command)) {
+    const auth = checkAgentAuthReady(agent, localSecrets, def);
+    const base: Omit<AdapterHealth, "available"> = {
+      agent,
+      label: def.label,
+      color: def.color,
+      darkColor: def.darkColor,
+      description: def.description,
+      builtin: def.builtin,
+      enabled: def.enabled,
+      authReady: auth.authReady,
+      authHint: auth.authHint,
+      command: argv,
+      customCommand: def.command,
+      customArgs: def.args,
+    };
+
+    const cmdExists =
+      fs.existsSync(resolved.command) ||
+      (!path.isAbsolute(resolved.command) && Boolean(findExecutableInPath([resolved.command])));
+    if (!cmdExists) {
       return {
-        agent,
+        ...base,
         available: false,
-        authReady: auth.authReady,
-        authHint: auth.authHint,
-        command: argv,
         reason: `Executable not found: ${resolved.command}`,
       };
     }
     if (targetFile && !fs.existsSync(targetFile)) {
       return {
-        agent,
+        ...base,
         available: false,
-        authReady: auth.authReady,
-        authHint: auth.authHint,
-        command: argv,
         reason: `Adapter entrypoint not found: ${targetFile}`,
       };
     }
     return {
-      agent,
+      ...base,
       available: true,
-      authReady: auth.authReady,
-      authHint: auth.authHint,
-      command: argv,
     };
   });
 }

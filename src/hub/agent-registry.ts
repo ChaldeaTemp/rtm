@@ -1,0 +1,340 @@
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { Readable, Writable } from "node:stream";
+import * as acp from "@agentclientprotocol/sdk";
+import type { AdapterHealth, AgentDefinition, AgentId } from "../types.js";
+import {
+  checkAdaptersHealth,
+  killProcessTree,
+  resolveAdapterCommand,
+  type ResolvedCommand,
+} from "./process-tree.js";
+
+const BUILTIN_DEFINITIONS: AgentDefinition[] = [
+  {
+    id: "claude",
+    label: "Claude",
+    color: "#b8542c",
+    darkColor: "#ef936c",
+    description: "reclaude / Claude Agent ACP",
+    enabled: true,
+    builtin: true,
+    nativeProjectRuleFiles: ["CLAUDE.md", ".claude/rules"],
+  },
+  {
+    id: "codex",
+    label: "Codex",
+    color: "#0d7148",
+    darkColor: "#6fe0a0",
+    description: "OpenAI Codex ACP",
+    enabled: true,
+    builtin: true,
+    nativeProjectRuleFiles: ["AGENTS.md"],
+  },
+  {
+    id: "agy",
+    label: "Antigravity",
+    color: "#2358a6",
+    darkColor: "#7cb3ff",
+    description: "Google Antigravity CLI (agy acp)",
+    enabled: true,
+    builtin: true,
+    nativeProjectRuleFiles: ["AGENTS.md", "GEMINI.md", ".agents/rules"],
+  },
+  {
+    id: "opencode",
+    label: "OpenCode",
+    color: "#0891b2",
+    darkColor: "#5eead4",
+    description: "OpenCode CLI (opencode acp)",
+    enabled: true,
+    builtin: true,
+    nativeProjectRuleFiles: ["AGENTS.md", "CLAUDE.md"],
+    nativeGlobalSkillDirs: ["~/.config/opencode/skills"],
+  },
+  {
+    id: "kimi",
+    label: "Kimi",
+    color: "#7c4dff",
+    darkColor: "#b99aff",
+    description: "Kimi Code CLI (kimi acp)",
+    enabled: true,
+    builtin: true,
+    nativeProjectRuleFiles: ["AGENTS.md"],
+  },
+];
+
+interface AgentsConfigFile {
+  overrides: Record<string, Partial<AgentDefinition>>;
+  customAgents: AgentDefinition[];
+}
+
+export interface AgentProbeResult {
+  ok: boolean;
+  agentInfo?: unknown;
+  sessionId?: string;
+  latencyMs: number;
+  error?: string;
+}
+
+const VALID_AGENT_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+
+export class AgentRegistry {
+  readonly baseCwd: string;
+  private readonly hubDir: string;
+  private readonly configFile: string;
+
+  constructor(baseCwd: string) {
+    this.baseCwd = path.resolve(baseCwd);
+    this.hubDir = path.join(this.baseCwd, ".agent-hub");
+    this.configFile = path.join(this.hubDir, "agents.json");
+  }
+
+  private loadConfig(): AgentsConfigFile {
+    if (!fs.existsSync(this.configFile)) {
+      return { overrides: {}, customAgents: [] };
+    }
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.configFile, "utf8")) as Partial<AgentsConfigFile>;
+      return {
+        overrides: parsed.overrides && typeof parsed.overrides === "object" ? parsed.overrides : {},
+        customAgents: Array.isArray(parsed.customAgents) ? parsed.customAgents : [],
+      };
+    } catch {
+      return { overrides: {}, customAgents: [] };
+    }
+  }
+
+  private saveConfig(cfg: AgentsConfigFile): void {
+    fs.mkdirSync(this.hubDir, { recursive: true });
+    const gitignorePath = path.join(this.hubDir, ".gitignore");
+    if (!fs.existsSync(gitignorePath)) {
+      fs.writeFileSync(gitignorePath, "*\n", "utf8");
+    }
+    fs.writeFileSync(this.configFile, JSON.stringify(cfg, null, 2), "utf8");
+  }
+
+  listDefinitions(): AgentDefinition[] {
+    const cfg = this.loadConfig();
+    const list: AgentDefinition[] = [];
+
+    for (const base of BUILTIN_DEFINITIONS) {
+      const ov = cfg.overrides[base.id];
+      list.push({
+        ...base,
+        ...(ov ?? {}),
+        id: base.id,
+        builtin: true,
+      });
+    }
+
+    for (const custom of cfg.customAgents) {
+      if (!custom?.id || BUILTIN_DEFINITIONS.some((b) => b.id === custom.id)) {
+        continue;
+      }
+      list.push({
+        ...custom,
+        label: custom.label || custom.id,
+        color: custom.color || "#5c6ac4",
+        enabled: custom.enabled !== false,
+        builtin: false,
+      });
+    }
+
+    return list;
+  }
+
+  listEnabledDefinitions(): AgentDefinition[] {
+    return this.listDefinitions().filter((d) => d.enabled);
+  }
+
+  listEnabledIds(): AgentId[] {
+    return this.listEnabledDefinitions().map((d) => d.id);
+  }
+
+  getDefinition(id: AgentId): AgentDefinition | undefined {
+    return this.listDefinitions().find((d) => d.id === id);
+  }
+
+  isKnownAgent(id: string): boolean {
+    return this.listDefinitions().some((d) => d.id === id);
+  }
+
+  isEnabledAgent(id: string): boolean {
+    return this.listEnabledDefinitions().some((d) => d.id === id);
+  }
+
+  resolveCommand(id: AgentId): ResolvedCommand {
+    const def = this.getDefinition(id);
+    return resolveAdapterCommand(id, def);
+  }
+
+  getHealthList(includeDisabled = false): AdapterHealth[] {
+    const defs = includeDisabled ? this.listDefinitions() : this.listEnabledDefinitions();
+    return checkAdaptersHealth(defs);
+  }
+
+  upsertAgent(input: {
+    id: string;
+    label?: string;
+    color?: string;
+    darkColor?: string;
+    description?: string;
+    enabled?: boolean;
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+  }): AgentDefinition {
+    const id = input.id.trim().toLowerCase();
+    if (!VALID_AGENT_ID_RE.test(id)) {
+      throw new Error(
+        `Invalid agent ID "${input.id}". Use lowercase alphanumeric characters, '-' or '_' (max 32 chars).`,
+      );
+    }
+
+    const cfg = this.loadConfig();
+    const isBuiltin = BUILTIN_DEFINITIONS.some((b) => b.id === id);
+
+    if (isBuiltin) {
+      const prev = cfg.overrides[id] ?? {};
+      const next: Partial<AgentDefinition> = { ...prev };
+      if (input.label !== undefined) next.label = input.label.trim() || id;
+      if (input.color !== undefined) next.color = input.color.trim();
+      if (input.darkColor !== undefined) next.darkColor = input.darkColor.trim();
+      if (input.description !== undefined) next.description = input.description.trim();
+      if (input.enabled !== undefined) next.enabled = input.enabled;
+      if (input.command !== undefined) next.command = input.command.trim() || undefined;
+      if (input.args !== undefined) next.args = input.args;
+      if (input.env !== undefined) next.env = Object.keys(input.env).length ? input.env : undefined;
+      cfg.overrides[id] = next;
+      this.saveConfig(cfg);
+      return this.getDefinition(id)!;
+    }
+
+    const existingIdx = cfg.customAgents.findIndex((a) => a.id === id);
+    const prevCustom = existingIdx >= 0 ? cfg.customAgents[existingIdx] : undefined;
+    const command = (input.command ?? prevCustom?.command ?? "").trim();
+    if (!command) {
+      throw new Error(`Custom agent "${id}" requires a command path or executable name.`);
+    }
+
+    const def: AgentDefinition = {
+      id,
+      label: input.label?.trim() || prevCustom?.label || id,
+      color: input.color?.trim() || prevCustom?.color || "#5c6ac4",
+      darkColor: input.darkColor?.trim() || prevCustom?.darkColor,
+      description: input.description?.trim() || prevCustom?.description || `Custom ACP agent (${command})`,
+      enabled: input.enabled ?? prevCustom?.enabled ?? true,
+      builtin: false,
+      command,
+      args: input.args ?? prevCustom?.args ?? ["acp"],
+      env: input.env ?? prevCustom?.env,
+    };
+
+    if (existingIdx >= 0) {
+      cfg.customAgents[existingIdx] = def;
+    } else {
+      cfg.customAgents.push(def);
+    }
+    this.saveConfig(cfg);
+    return def;
+  }
+
+  toggleAgent(id: AgentId, enabled: boolean): AgentDefinition {
+    const existing = this.getDefinition(id);
+    if (!existing) {
+      throw new Error(`Unknown agent "${id}"`);
+    }
+    return this.upsertAgent({ id, enabled });
+  }
+
+  deleteCustomAgent(id: AgentId): boolean {
+    if (BUILTIN_DEFINITIONS.some((b) => b.id === id)) {
+      return false;
+    }
+    const cfg = this.loadConfig();
+    const next = cfg.customAgents.filter((a) => a.id !== id);
+    if (next.length === cfg.customAgents.length) {
+      return false;
+    }
+    cfg.customAgents = next;
+    this.saveConfig(cfg);
+    return true;
+  }
+
+  async probeHandshake(id: AgentId, cwd = this.baseCwd): Promise<AgentProbeResult> {
+    const started = Date.now();
+    const resolved = this.resolveCommand(id);
+    const child = spawn(resolved.command, resolved.args, {
+      cwd,
+      env: resolved.env ? { ...process.env, ...resolved.env } : process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+
+    const stderrTail: string[] = [];
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      for (const line of chunk.split(/\r?\n/)) {
+        if (line.trim()) {
+          stderrTail.push(line);
+          if (stderrTail.length > 15) stderrTail.shift();
+        }
+      }
+    });
+
+    let conn: acp.ClientConnection | undefined;
+    try {
+      if (!child.stdin || !child.stdout) {
+        throw new Error(`Failed to open stdio pipes for ${id}`);
+      }
+      const stream = acp.ndJsonStream(
+        Writable.toWeb(child.stdin) as unknown as WritableStream<Uint8Array>,
+        Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>,
+      );
+      const clientApp = acp.client({ name: `probe-${id}` });
+      conn = clientApp.connect(stream);
+
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("ACP handshake timed out (8s)")), 8000),
+      );
+
+      const initResp = await Promise.race([
+        conn.agent.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: {},
+          clientInfo: { name: "agent-hub-probe", version: "0.1.0" },
+        }),
+        timeoutPromise,
+      ]);
+
+      const session = await Promise.race([
+        conn.agent.buildSession(path.resolve(cwd)).start(),
+        timeoutPromise,
+      ]);
+
+      return {
+        ok: true,
+        agentInfo: initResp.agentInfo,
+        sessionId: session.sessionId,
+        latencyMs: Date.now() - started,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const tail = stderrTail.slice(-5).join(" | ");
+      return {
+        ok: false,
+        latencyMs: Date.now() - started,
+        error: tail ? `${msg} (${tail})` : msg,
+      };
+    } finally {
+      try {
+        conn?.close();
+      } catch {
+        // ignore
+      }
+      killProcessTree(child.pid);
+    }
+  }
+}

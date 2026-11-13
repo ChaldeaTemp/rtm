@@ -2,10 +2,13 @@ const STATE = {
   defaultGroupId: "grp-default",
   baseCwd: "",
   permissionMode: "approve-all",
+  agents: [],
   taskGroups: new Map(),
   sessions: new Map(),
   tasks: new Map(),
   pendingPermissions: new Map(),
+  pendingQuestions: new Map(),
+  artifacts: new Map(),
   messagesByStream: new Map(),
   activeGroupId: "grp-default",
   activeStreamKey: "lead:grp-default",
@@ -19,25 +22,38 @@ const STATE = {
   logs: [],
 };
 
+const BUILTIN_FALLBACK_AGENTS = [
+  { agent: "claude", label: "claude", color: "#b8542c", darkColor: "#ef936c", enabled: true, available: true, authReady: true },
+  { agent: "codex", label: "codex", color: "#0d7148", darkColor: "#6fe0a0", enabled: true, available: true, authReady: true },
+  { agent: "agy", label: "agy", color: "#2358a6", darkColor: "#7cb3ff", enabled: true, available: true, authReady: true },
+  { agent: "opencode", label: "opencode", color: "#6d3fc0", darkColor: "#b896ff", enabled: true, available: true, authReady: true },
+  { agent: "kimi", label: "kimi", color: "#0d7490", darkColor: "#5eead4", enabled: true, available: true, authReady: true },
+];
+
 const els = {
   workbench: document.getElementById("workbench"),
   wsDot: document.getElementById("wsDot"),
   wsText: document.getElementById("wsText"),
   cwdPill: document.getElementById("cwdPill"),
   toggleNewTaskBtn: document.getElementById("toggleNewTaskBtn"),
+  quickLaunchRow: document.getElementById("quickLaunchRow"),
   newTaskPopover: document.getElementById("newTaskPopover"),
   newTaskTitleInput: document.getElementById("newTaskTitleInput"),
+  newTaskAgents: document.getElementById("newTaskAgents"),
   cancelNewTaskBtn: document.getElementById("cancelNewTaskBtn"),
   groupCountBadge: document.getElementById("groupCountBadge"),
   groupList: document.getElementById("groupList"),
+  adapterPills: document.getElementById("adapterPills"),
   themeToggleBtn: document.getElementById("themeToggleBtn"),
   navResBadge: document.getElementById("navResBadge"),
   navTokBadge: document.getElementById("navTokBadge"),
+  navAgentsBadge: document.getElementById("navAgentsBadge"),
   liveContextPill: document.getElementById("liveContextPill"),
   chatStageHeader: document.getElementById("chatStageHeader"),
   chatComposerWrap: document.getElementById("chatComposerWrap"),
   resourcesView: document.getElementById("resourcesView"),
   telemetryView: document.getElementById("telemetryView"),
+  agentsView: document.getElementById("agentsView"),
   stageTaskTitle: document.getElementById("stageTaskTitle"),
   streamBadge: document.getElementById("streamBadge"),
   leadSwitcher: document.getElementById("leadSwitcher"),
@@ -46,6 +62,7 @@ const els = {
   toggleInspectorBtn: document.getElementById("toggleInspectorBtn"),
   sessionTabs: document.getElementById("sessionTabs"),
   permBanner: document.getElementById("permBanner"),
+  questionBanner: document.getElementById("questionBanner"),
   messages: document.getElementById("messages"),
   composerLabel: document.getElementById("composerLabel"),
   promptInput: document.getElementById("promptInput"),
@@ -127,6 +144,115 @@ function refreshHeaderMetrics() {
   }
 }
 
+function getEnabledAgents() {
+  const list = STATE.agents && STATE.agents.length > 0 ? STATE.agents : BUILTIN_FALLBACK_AGENTS;
+  const enabled = list.filter((a) => a.enabled !== false);
+  return enabled.length > 0 ? enabled : BUILTIN_FALLBACK_AGENTS;
+}
+
+function getAgentColorStyle(agentId) {
+  const found = (STATE.agents || []).find((a) => a.agent === agentId);
+  if (!found || !found.color) return "";
+  const isBuiltinStyled =
+    agentId === "claude" ||
+    agentId === "codex" ||
+    agentId === "agy" ||
+    agentId === "opencode" ||
+    agentId === "kimi";
+  if (isBuiltinStyled) return "";
+  const isDark = document.body.classList.contains("dark");
+  const color = isDark && found.darkColor ? found.darkColor : found.color;
+  return ` style="--agent-color:${escapeHtml(color)}"`;
+}
+
+function agentTagHtml(agentId, text) {
+  const label = text ?? agentId;
+  return `<span class="agent-tag" data-agent="${escapeHtml(agentId)}"${getAgentColorStyle(agentId)}>${escapeHtml(label)}</span>`;
+}
+
+function renderAgentControls() {
+  const enabled = getEnabledAgents();
+  if (!enabled.some((a) => a.agent === STATE.newTaskLead)) {
+    STATE.newTaskLead = enabled[0]?.agent || "claude";
+  }
+
+  if (els.navAgentsBadge) {
+    els.navAgentsBadge.textContent = String(enabled.length);
+  }
+
+  if (els.quickLaunchRow) {
+    els.quickLaunchRow.innerHTML = "";
+    for (const item of enabled) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "quick-btn";
+      btn.dataset.quickLead = item.agent;
+      btn.textContent = `+ ${item.agent}`;
+      btn.title = item.label || item.agent;
+      btn.onclick = () => {
+        void createTaskGroup({ leadAgent: item.agent });
+      };
+      els.quickLaunchRow.appendChild(btn);
+    }
+  }
+
+  if (els.newTaskAgents) {
+    els.newTaskAgents.innerHTML = "";
+    for (const item of enabled) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `popover-agent-opt${item.agent === STATE.newTaskLead ? " active" : ""}`;
+      btn.dataset.agent = item.agent;
+      btn.textContent = item.agent;
+      btn.onclick = () => {
+        STATE.newTaskLead = item.agent;
+        els.newTaskAgents
+          .querySelectorAll(".popover-agent-opt")
+          .forEach((b) => b.classList.toggle("active", b === btn));
+      };
+      els.newTaskAgents.appendChild(btn);
+    }
+  }
+
+  if (els.leadSwitcher) {
+    const activeLead = getActiveGroup()?.leadAgent;
+    els.leadSwitcher.innerHTML = '<span class="lead-switch-label">主导</span>';
+    for (const item of enabled) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `lead-pill${item.agent === activeLead ? " active" : ""}`;
+      btn.dataset.agent = item.agent;
+      btn.textContent = item.agent;
+      btn.title = item.available ? `${item.label || item.agent} (就绪)` : `${item.label || item.agent}: ${item.reason || "未就绪"}`;
+      btn.onclick = () => {
+        const group = getActiveGroup();
+        if (group) void switchGroupLead(group.groupId, item.agent);
+      };
+      els.leadSwitcher.appendChild(btn);
+    }
+  }
+
+  if (els.adapterPills) {
+    els.adapterPills.innerHTML = "";
+    for (const item of enabled) {
+      const pill = document.createElement("span");
+      pill.className = "adapter-pill";
+      pill.dataset.adapter = item.agent;
+      pill.title = item.authReady
+        ? `${item.agent}: 已就绪`
+        : item.authHint || item.reason || `${item.agent}: 未就绪`;
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      dot.dataset.authDot = item.agent;
+      if (!item.available) dot.classList.add("down");
+      else if (item.authReady) dot.classList.add("ready");
+      pill.appendChild(dot);
+      pill.appendChild(document.createTextNode(item.agent));
+      els.adapterPills.appendChild(pill);
+    }
+  }
+}
+
 function setStageView(view) {
   STATE.stageView = view;
   const stageEl = document.querySelector("main.stage");
@@ -137,10 +263,12 @@ function setStageView(view) {
   if (els.chatStageHeader) els.chatStageHeader.hidden = !isChat;
   if (els.sessionTabs) els.sessionTabs.hidden = !isChat || !shouldShowSessionTabs();
   if (els.permBanner) els.permBanner.hidden = !isChat || STATE.pendingPermissions.size === 0;
+  if (els.questionBanner) els.questionBanner.hidden = !isChat || STATE.pendingQuestions.size === 0;
   if (els.messages) els.messages.hidden = !isChat;
   if (els.chatComposerWrap) els.chatComposerWrap.hidden = !isChat;
   if (els.resourcesView) els.resourcesView.hidden = view !== "resources";
   if (els.telemetryView) els.telemetryView.hidden = view !== "telemetry";
+  if (els.agentsView) els.agentsView.hidden = view !== "agents";
 
   document.querySelectorAll(".mode-tab[data-stage-view]").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.stageView === view);
@@ -149,6 +277,7 @@ function setStageView(view) {
   if (isChat) {
     renderStageHeaderAndTabs();
     renderPermissions();
+    window.HUB_INTERACTIVE?.renderQuestions?.();
   }
   refreshHeaderMetrics();
   window.HUB_APP?.onStateChange?.();
@@ -178,6 +307,17 @@ function renderInlineMarkdown(escapedText) {
   return s;
 }
 
+function buildInlinePreviewSrcdoc(lang, rawCode) {
+  const isSvg = lang === "svg";
+  const body = isSvg
+    ? `<div style="display:flex;align-items:center;justify-content:center;min-height:180px;">${rawCode}</div>`
+    : rawCode;
+  if (!isSvg && /<html[\s>]/i.test(rawCode)) {
+    return rawCode;
+  }
+  return `<!doctype html><html><head><meta charset="utf-8" /><style>*{box-sizing:border-box}body{margin:0;padding:12px;background:#f3f2ec;color:#151514;font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;font-size:13px;line-height:1.5}</style></head><body>${body}</body></html>`;
+}
+
 function renderMarkdown(raw) {
   const src = String(raw || "");
   if (!src.trim()) return "";
@@ -185,11 +325,21 @@ function renderMarkdown(raw) {
   const codeBlocks = [];
   const withPlaceholders = src.replace(/```([a-zA-Z0-9_-]*)\r?\n([\s\S]*?)```/g, (_m, lang, code) => {
     const idx = codeBlocks.length;
+    const lowerLang = (lang || "").trim().toLowerCase();
     const cleanLang = escapeHtml(lang || "text");
-    const cleanCode = escapeHtml(code.replace(/\n$/, ""));
-    codeBlocks.push(
-      `<div class="md-code-wrap"><div class="md-code-head"><span>${cleanLang}</span><button type="button" class="copy-code-btn" data-copy-code="${idx}">复制</button></div><pre><code data-raw-code="${idx}">${cleanCode}</code></pre></div>`,
-    );
+    const rawCode = code.replace(/\n$/, "");
+    const cleanCode = escapeHtml(rawCode);
+    const canPreview = (lowerLang === "html" || lowerLang === "svg") && rawCode.trim().length > 0;
+    if (canPreview) {
+      const srcdocAttr = escapeHtml(buildInlinePreviewSrcdoc(lowerLang, rawCode));
+      codeBlocks.push(
+        `<div class="md-code-wrap"><div class="md-code-head"><span>${cleanLang} · 交互预览</span><div style="display:flex;gap:6px"><button type="button" class="copy-code-btn inline-preview-toggle active" data-toggle-inline-preview="${idx}">源码/预览</button><button type="button" class="copy-code-btn" data-copy-code="${idx}">复制</button></div></div><div class="inline-preview-box" data-inline-preview="${idx}"><iframe class="artifact-frame" sandbox="allow-scripts" style="height:260px" srcdoc="${srcdocAttr}"></iframe></div><pre hidden><code data-raw-code="${idx}">${cleanCode}</code></pre></div>`,
+      );
+    } else {
+      codeBlocks.push(
+        `<div class="md-code-wrap"><div class="md-code-head"><span>${cleanLang}</span><button type="button" class="copy-code-btn" data-copy-code="${idx}">复制</button></div><pre><code data-raw-code="${idx}">${cleanCode}</code></pre></div>`,
+      );
+    }
     return `\n@@CBLOCK${idx}@@\n`;
   });
 
@@ -459,7 +609,7 @@ function renderSidebarGroups() {
     const meta = document.createElement("div");
     meta.className = "group-meta";
     meta.innerHTML = `
-      <span class="agent-tag" data-agent="${escapeHtml(group.leadAgent)}">★ ${escapeHtml(group.leadAgent)}</span>
+      ${agentTagHtml(group.leadAgent, `★ ${group.leadAgent}`)}
       <span>${subs.length} 子会话 · ${groupTasks.length} 委派</span>
     `;
 
@@ -647,18 +797,18 @@ function renderEmptyStage(group) {
     <span class="alma-box-corner-br">+</span>
     <div class="empty-inner">
       <h2>任务「${escapeHtml(group?.title || "任务 1")}」就绪 · 主导 ${escapeHtml(group?.leadAgent || "claude")}</h2>
-      <p>每个任务拥有独立的主导 Agent 与上下文账本；你可以随时新建多个并行任务，或查看主导委派出的全部子会话记录。</p>
+      <p>每个任务拥有独立的主导 Agent 与上下文账本；你可以随时新建多个并行任务，查看委派子会话，或在对话中让 Agent 渲染交互式 HTML 组件。</p>
       <div class="starter-list">
         <button type="button" class="starter-btn" data-starter="列出当前项目目录核心文件，并委派 codex 检查主要入口逻辑是否存在边界问题">
           <span>列出项目核心文件，并委派 codex 协同审查边界问题</span>
           <span class="arrow">→</span>
         </button>
-        <button type="button" class="starter-btn" data-starter="分别调用 claude、codex、agy 检查各自状态并汇总一份简明报告">
-          <span>汇总本地多 Agent（claude / codex / agy）状态报告</span>
+        <button type="button" class="starter-btn" data-starter="调用 peer_list_agents 查看当前已接入的本地 Agent（含 claude / codex / agy / opencode / kimi），并汇总状态报告">
+          <span>查看多 Agent（claude / codex / agy / opencode / kimi）接入状态</span>
           <span class="arrow">→</span>
         </button>
-        <button type="button" class="starter-btn" data-starter="用 isolate_worktree=true 派发 codex 在独立工作树分支上起草一份 README 改进建议（先不改主目录）">
-          <span>在独立 git worktree 子会话中沙箱实验改动</span>
+        <button type="button" class="starter-btn" data-starter="调用 ui_render_artifact 生成一个交互式的项目模块结构与 Token 消耗估算看板（HTML）">
+          <span>让 Agent 直接渲染可交互 HTML 组件卡片</span>
           <span class="arrow">→</span>
         </button>
       </div>
@@ -680,6 +830,40 @@ function matchTasksForAssistantMessage(msg, nextAssistantTimestamp) {
   return getGroupTasks(msg.groupId).filter(
     (t) => t.createdAt >= start && t.createdAt <= end,
   );
+}
+
+function buildArtifactCardElement(artifact) {
+  const card = document.createElement("div");
+  card.className = "artifact-card";
+  const url = `/artifacts/${encodeURIComponent(artifact.artifactId)}`;
+  const initialHeight = Math.max(160, Math.min(780, Number(artifact.height) || 320));
+  card.innerHTML = `
+    <div class="artifact-head">
+      <div class="artifact-title">
+        <span class="artifact-kind">${escapeHtml(artifact.kind)}</span>
+        <span title="${escapeHtml(artifact.title)}">${escapeHtml(artifact.title)}</span>
+      </div>
+      <div class="artifact-actions">
+        <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-art-reload>刷新</button>
+        <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-art-open>独立窗口 ↗</button>
+      </div>
+    </div>
+    <iframe
+      class="artifact-frame"
+      data-artifact-frame="${escapeHtml(artifact.artifactId)}"
+      sandbox="allow-scripts"
+      src="${url}"
+      style="height:${initialHeight}px"
+    ></iframe>
+  `;
+  const frame = card.querySelector("iframe");
+  card.querySelector("[data-art-reload]").onclick = () => {
+    if (frame) frame.src = `${url}?t=${Date.now()}`;
+  };
+  card.querySelector("[data-art-open]").onclick = () => {
+    window.open(url, "_blank", "noopener");
+  };
+  return card;
 }
 
 function buildMessageElement(msg, linkedTasks) {
@@ -711,7 +895,7 @@ function buildMessageElement(msg, linkedTasks) {
           : "";
       usageHtml = `<span class="msg-usage-pill" title="输入 ${msg.usage.inputTokens} / 缓存 ${msg.usage.cachedReadTokens} / 输出 ${msg.usage.outputTokens} / 思考 ${msg.usage.thoughtTokens}">${estMark}↑${formatTokens(msg.usage.inputTokens)} ↓${formatTokens(msg.usage.outputTokens)}${cachePart}${injPart}</span>`;
     }
-    meta.innerHTML = `<span class="agent-tag" data-agent="${escapeHtml(msg.agent)}">${escapeHtml(msg.senderLabel)}</span><span>${formatTime(msg.timestamp)}</span>${usageHtml}`;
+    meta.innerHTML = `${agentTagHtml(msg.agent, msg.senderLabel)}<span>${formatTime(msg.timestamp)}</span>${usageHtml}`;
   } else {
     meta.textContent = `${msg.senderLabel} · ${formatTime(msg.timestamp)}`;
   }
@@ -740,16 +924,26 @@ function buildMessageElement(msg, linkedTasks) {
       bubble.appendChild(strip);
     }
 
+    const artifactList = Array.isArray(msg.artifactIds)
+      ? msg.artifactIds.map((id) => STATE.artifacts.get(id)).filter(Boolean)
+      : [];
+
     const body = document.createElement("div");
     body.className = "md-body";
     if (msg.text && msg.text.trim()) {
       body.innerHTML = renderMarkdown(msg.text);
+      bubble.appendChild(body);
     } else if (msg.status === "streaming") {
       body.innerHTML = '<span class="mono" style="color:var(--faint)">思考并生成中...</span>';
-    } else {
+      bubble.appendChild(body);
+    } else if (artifactList.length === 0) {
       body.innerHTML = '<span class="mono" style="color:var(--faint)">(空回复)</span>';
+      bubble.appendChild(body);
     }
-    bubble.appendChild(body);
+
+    for (const art of artifactList) {
+      bubble.appendChild(buildArtifactCardElement(art));
+    }
 
     if (linkedTasks.length > 0) {
       const delWrap = document.createElement("div");
@@ -762,7 +956,7 @@ function buildMessageElement(msg, linkedTasks) {
         card.innerHTML = `
           <div class="delegation-info">
             <span class="dot ${escapeHtml(task.status)}"></span>
-            <span class="agent-tag" data-agent="${escapeHtml(task.targetAgent)}">${escapeHtml(task.targetAgent)}</span>
+            ${agentTagHtml(task.targetAgent)}
             <span class="mono">子会话: ${escapeHtml(label)}</span>
             <span class="mono" style="color:var(--faint)">[${escapeHtml(task.status)}]</span>
           </div>
@@ -917,12 +1111,14 @@ function renderAll() {
     STATE.activeGroupId = STATE.defaultGroupId;
     STATE.activeStreamKey = `lead:${STATE.defaultGroupId}`;
   }
+  renderAgentControls();
   renderSidebarGroups();
   renderStageHeaderAndTabs();
   renderPermissions();
   renderMessages();
   renderInspector();
   refreshHeaderMetrics();
+  window.HUB_INTERACTIVE?.renderQuestions?.();
   window.HUB_APP?.onStateChange?.();
 }
 
@@ -989,23 +1185,23 @@ async function sendPrompt() {
 
 async function loadAdapterHealth() {
   try {
+    const res = await fetch("/api/agents");
+    const data = await res.json();
+    if (Array.isArray(data.agents)) {
+      STATE.agents = data.agents;
+      renderAgentControls();
+      return;
+    }
+  } catch {
+    // fallback to /api/health
+  }
+  try {
     const res = await fetch("/api/health");
     const data = await res.json();
-    if (Array.isArray(data.adapters)) {
-      for (const item of data.adapters) {
-        const pill = document.querySelector(`.adapter-pill[data-adapter="${item.agent}"]`);
-        const dot = document.querySelector(`[data-auth-dot="${item.agent}"]`);
-        if (dot) {
-          dot.classList.remove("ready", "down");
-          if (!item.available) dot.classList.add("down");
-          else if (item.authReady) dot.classList.add("ready");
-        }
-        if (pill) {
-          pill.title = item.authReady
-            ? `${item.agent}: 已就绪`
-            : item.authHint || item.reason || `${item.agent}: 未就绪`;
-        }
-      }
+    const list = Array.isArray(data.allAgents) ? data.allAgents : data.adapters;
+    if (Array.isArray(list)) {
+      STATE.agents = list;
+      renderAgentControls();
     }
   } catch {
     // ignore transient error
@@ -1052,13 +1248,47 @@ function connectWs() {
       STATE.pendingPermissions.clear();
       (msg.pendingPermissions || []).forEach((p) => STATE.pendingPermissions.set(p.requestId, p));
 
+      STATE.pendingQuestions.clear();
+      (msg.pendingQuestions || []).forEach((q) => STATE.pendingQuestions.set(q.questionId, q));
+
+      STATE.artifacts.clear();
+      (msg.artifacts || []).forEach((a) => STATE.artifacts.set(a.artifactId, a));
+
       STATE.messagesByStream.clear();
       (msg.messages || []).forEach((m) => upsertMessageRecord(m));
 
+      if (Array.isArray(msg.agents) && msg.agents.length > 0) {
+        STATE.agents = msg.agents;
+      }
       STATE.telemetry = msg.telemetry || null;
       STATE.resourceBudgets = msg.resourceBudgets || [];
 
       renderAll();
+    } else if (msg.type === "agents_updated") {
+      STATE.agents = msg.agents || [];
+      renderAgentControls();
+      renderSidebarGroups();
+      renderStageHeaderAndTabs();
+      window.HUB_INTERACTIVE?.onAgentsUpdated?.();
+      window.HUB_APP?.onStateChange?.();
+    } else if (msg.type === "artifact_created") {
+      if (msg.artifact) {
+        STATE.artifacts.set(msg.artifact.artifactId, msg.artifact);
+        if (msg.artifact.groupId === STATE.activeGroupId) {
+          renderMessages();
+        }
+        appendLog(`生成交互组件: ${msg.artifact.title} (${msg.artifact.kind})`);
+      }
+    } else if (msg.type === "question_requested") {
+      if (msg.question) {
+        STATE.pendingQuestions.set(msg.question.questionId, msg.question);
+        window.HUB_INTERACTIVE?.renderQuestions?.();
+        appendLog(`待确认问题: ${msg.question.title}`);
+      }
+    } else if (msg.type === "question_resolved") {
+      STATE.pendingQuestions.delete(msg.questionId);
+      window.HUB_INTERACTIVE?.renderQuestions?.();
+      appendLog(msg.cancelled ? `已取消问题 ${msg.questionId}` : `已提交问题回答 ${msg.questionId}`);
     } else if (msg.type === "telemetry_updated") {
       STATE.telemetry = msg.telemetry;
       refreshHeaderMetrics();
@@ -1174,15 +1404,6 @@ els.cancelNewTaskBtn.onclick = () => {
   els.newTaskPopover.hidden = true;
 };
 
-document.querySelectorAll("#newTaskAgents .popover-agent-opt").forEach((btn) => {
-  btn.onclick = () => {
-    STATE.newTaskLead = btn.dataset.agent;
-    document
-      .querySelectorAll("#newTaskAgents .popover-agent-opt")
-      .forEach((b) => b.classList.toggle("active", b === btn));
-  };
-});
-
 els.newTaskPopover.onsubmit = async (e) => {
   e.preventDefault();
   const title = els.newTaskTitleInput.value.trim();
@@ -1190,22 +1411,6 @@ els.newTaskPopover.onsubmit = async (e) => {
   els.newTaskPopover.hidden = true;
   await createTaskGroup({ title: title || undefined, leadAgent: STATE.newTaskLead });
 };
-
-document.querySelectorAll("[data-quick-lead]").forEach((btn) => {
-  btn.onclick = () => {
-    const leadAgent = btn.getAttribute("data-quick-lead");
-    void createTaskGroup({ leadAgent });
-  };
-});
-
-document.querySelectorAll("#leadSwitcher .lead-pill").forEach((btn) => {
-  btn.onclick = () => {
-    const group = getActiveGroup();
-    if (group && btn.dataset.agent) {
-      void switchGroupLead(group.groupId, btn.dataset.agent);
-    }
-  };
-});
 
 els.stageTaskTitle.onclick = () => {
   const group = getActiveGroup();
@@ -1254,6 +1459,20 @@ els.promptInput.addEventListener("keydown", (e) => {
 });
 
 els.messages.addEventListener("click", (e) => {
+  const toggleBtn = e.target.closest("[data-toggle-inline-preview]");
+  if (toggleBtn) {
+    const wrap = toggleBtn.closest(".md-code-wrap");
+    const previewBox = wrap?.querySelector(".inline-preview-box");
+    const preEl = wrap?.querySelector("pre");
+    if (previewBox && preEl) {
+      const showingPreview = !previewBox.hidden;
+      previewBox.hidden = showingPreview;
+      preEl.hidden = !showingPreview;
+      toggleBtn.classList.toggle("active", !showingPreview);
+    }
+    return;
+  }
+
   const btn = e.target.closest("[data-copy-code]");
   if (!btn) return;
   const wrap = btn.closest(".md-code-wrap");
@@ -1291,6 +1510,9 @@ window.HUB_APP = {
   selectGroup,
   setStageView,
   refreshHeaderMetrics,
+  getEnabledAgents,
+  agentTagHtml,
+  renderAgentControls,
   onStateChange: null,
   onResourcesUpdated: null,
 };
@@ -1301,6 +1523,7 @@ try {
 } catch {
   applyTheme(false);
 }
+renderAgentControls();
 setStageView("chat");
 connectWs();
 void loadAdapterHealth();

@@ -27,8 +27,8 @@ function parseCliFlags(argv: string[]): {
     if (arg === "--ui" || arg === "--app") {
       openUi = true;
     } else if (arg === "--lead" && argv[i + 1]) {
-      const val = argv[++i]!;
-      if (val === "claude" || val === "codex" || val === "agy") {
+      const val = argv[++i]!.trim();
+      if (val) {
         lead = val;
       } else {
         throw new Error(`Invalid --lead agent: ${val}`);

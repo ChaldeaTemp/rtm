@@ -175,6 +175,9 @@ function renderResourcesPanel() {
     )
     .join("");
 
+  const enabledAgentIds = (app.getEnabledAgents?.() || []).map((a) => a.agent);
+  const covAgents = enabledAgentIds.length > 0 ? enabledAgentIds : ["claude", "codex", "agy", "opencode", "kimi"];
+
   const ruleFormHtml = PANEL_STATE.showRuleForm
     ? `
       <form id="hubRuleForm" class="rule-editor-box">
@@ -185,9 +188,9 @@ function renderResourcesPanel() {
             <option value="global">作用域：全局 Hub (~/.agent-hub)</option>
           </select>
         </div>
-        <textarea id="hubRuleContent" class="rule-editor-textarea" placeholder="# 规则标题&#10;&#10;在这里编写跨 claude / codex / agy 共享的 Markdown 规则..."></textarea>
+        <textarea id="hubRuleContent" class="rule-editor-textarea" placeholder="# 规则标题&#10;&#10;在这里编写跨 ${esc(covAgents.join(" / "))} 共享的 Markdown 规则..."></textarea>
         <div class="panel-toolbar">
-          <span class="mono" style="font-size:11px;color:var(--faint)">仅写入 .agent-hub 目录，不修改原生 ~/.claude / ~/.codex / ~/.gemini</span>
+          <span class="mono" style="font-size:11px;color:var(--faint)">仅写入 .agent-hub 目录，不修改原生全局配置</span>
           <div style="display:flex;gap:8px">
             <button id="cancelRuleFormBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button">取消</button>
             <button class="alma-btn alma-btn-primary alma-btn-sm" type="submit">保存共享规则</button>
@@ -204,7 +207,7 @@ function renderResourcesPanel() {
             const isExpanded = PANEL_STATE.expandedId === item.id;
             const previewText = isExpanded ? PANEL_STATE.previewCache.get(item.id) || "加载中..." : "";
             const canDelete = item.origin === "hub-project" || item.origin === "hub-global";
-            const covHtml = ["claude", "codex", "agy"]
+            const covHtml = covAgents
               .map((ag) => {
                 if (!item.enabled) {
                   return `<span class="cov-pill off">${ag}: 停用</span>`;
@@ -362,30 +365,30 @@ function renderTelemetryPanel() {
 
   const esc = app.escapeHtml;
   const fmtTok = app.formatTokens;
+  const enabledAgentIds = (app.getEnabledAgents?.() || []).map((a) => a.agent);
+  const baseAgentList = enabledAgentIds.length > 0 ? enabledAgentIds : ["claude", "codex", "agy", "opencode", "kimi"];
   const telemetry = app.STATE.telemetry || {
     totals: { turns: 0, inputTokens: 0, outputTokens: 0, cachedReadTokens: 0, thoughtTokens: 0, totalTokens: 0, costUsd: 0 },
-    byAgent: {
-      claude: { turns: 0, inputTokens: 0, outputTokens: 0, cachedReadTokens: 0, thoughtTokens: 0, totalTokens: 0, costUsd: 0 },
-      codex: { turns: 0, inputTokens: 0, outputTokens: 0, cachedReadTokens: 0, thoughtTokens: 0, totalTokens: 0, costUsd: 0 },
-      agy: { turns: 0, inputTokens: 0, outputTokens: 0, cachedReadTokens: 0, thoughtTokens: 0, totalTokens: 0, costUsd: 0 },
-    },
+    byAgent: {},
     recentTurns: [],
   };
 
+  const allTelemetryAgents = [...new Set([...baseAgentList, ...Object.keys(telemetry.byAgent || {})])];
   const totals = telemetry.totals;
   const cacheBase = totals.inputTokens + totals.cachedReadTokens;
   const cacheRate = cacheBase > 0 ? Math.round((totals.cachedReadTokens / cacheBase) * 100) : 0;
 
-  const agentCards = ["claude", "codex", "agy"]
+  const agentCards = allTelemetryAgents
     .map((ag) => {
       const t = telemetry.byAgent?.[ag] || { turns: 0, inputTokens: 0, outputTokens: 0, cachedReadTokens: 0, thoughtTokens: 0, totalTokens: 0, costUsd: 0 };
       const aCacheBase = t.inputTokens + t.cachedReadTokens;
       const aCachePct = aCacheBase > 0 ? Math.round((t.cachedReadTokens / aCacheBase) * 100) : 0;
-      const costText = t.costUsd > 0 ? ` · \$${t.costUsd.toFixed(4)}` : "";
+      const costText = t.costUsd > 0 ? ` · $${t.costUsd.toFixed(4)}` : "";
+      const tagHtml = app.agentTagHtml ? app.agentTagHtml(ag) : `<span class="agent-tag" data-agent="${esc(ag)}">${esc(ag)}</span>`;
       return `
         <div class="stat-card">
           <div class="stat-card-label">
-            <span class="agent-tag" data-agent="${ag}">${ag}</span>
+            ${tagHtml}
             <span>${t.turns} 轮${t.modelId ? ` · ${esc(t.modelId)}` : ""}${costText}</span>
           </div>
           <div class="stat-card-value">${fmtTok(t.totalTokens)}</div>

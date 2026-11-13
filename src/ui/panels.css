@@ -80,13 +80,21 @@
 main.stage[data-view="resources"] #chatStageHeader,
 main.stage[data-view="resources"] #sessionTabs,
 main.stage[data-view="resources"] #permBanner,
+main.stage[data-view="resources"] #questionBanner,
 main.stage[data-view="resources"] #messages,
 main.stage[data-view="resources"] #chatComposerWrap,
 main.stage[data-view="telemetry"] #chatStageHeader,
 main.stage[data-view="telemetry"] #sessionTabs,
 main.stage[data-view="telemetry"] #permBanner,
+main.stage[data-view="telemetry"] #questionBanner,
 main.stage[data-view="telemetry"] #messages,
-main.stage[data-view="telemetry"] #chatComposerWrap {
+main.stage[data-view="telemetry"] #chatComposerWrap,
+main.stage[data-view="agents"] #chatStageHeader,
+main.stage[data-view="agents"] #sessionTabs,
+main.stage[data-view="agents"] #permBanner,
+main.stage[data-view="agents"] #questionBanner,
+main.stage[data-view="agents"] #messages,
+main.stage[data-view="agents"] #chatComposerWrap {
   display: none !important;
 }
 
@@ -535,4 +543,279 @@ main.stage[data-view="telemetry"] #chatComposerWrap {
 .telemetry-table td.num-col,
 .telemetry-table th.num-col {
   text-align: right;
+}
+
+/* Interactive Artifacts (Sandboxed HTML/SVG Cards) */
+.artifact-card {
+  margin-top: 10px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+.artifact-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-panel);
+  border-bottom: 1px dashed var(--line);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.artifact-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--ink);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-kind {
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  color: var(--accent);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.artifact-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.artifact-frame {
+  width: 100%;
+  min-height: 160px;
+  border: 0;
+  border-top: 1px solid var(--line-soft);
+  background: var(--bg);
+  display: block;
+}
+
+.inline-preview-box {
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.inline-preview-box[hidden] {
+  display: none;
+}
+
+.md-code-wrap pre[hidden] {
+  display: none;
+}
+
+.inline-preview-toggle.active {
+  background: var(--accent);
+  color: var(--on-ink);
+  border-color: var(--accent);
+}
+
+/* Interactive User Question Cards */
+.question-banner {
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--accent);
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.question-card {
+  border: 1px solid var(--line);
+  background: var(--bg-elevated);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.question-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px dashed var(--line);
+  padding-bottom: 8px;
+}
+
+.question-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.question-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.question-prompt {
+  font-size: 12.5px;
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.question-opt-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.question-opt {
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.14s var(--ease);
+}
+
+.question-opt:hover {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.question-opt.selected {
+  background: var(--ink);
+  color: var(--on-ink);
+  border-color: var(--ink);
+}
+
+.question-text-input {
+  width: 100%;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 12.5px;
+  font-family: inherit;
+  outline: none;
+}
+
+.question-text-input:focus {
+  border-color: var(--accent);
+}
+
+.question-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* 04 / Agent Registry View */
+.agents-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: 10px;
+}
+
+.agent-cfg-card {
+  border: 1px solid var(--line);
+  background: var(--bg-elevated);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-cfg-card.disabled {
+  opacity: 0.62;
+}
+
+.agent-cfg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-cfg-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.agent-origin-badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.agent-cmd-line {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--soft);
+  padding: 4px 7px;
+  border: 1px solid var(--line-soft);
+  word-break: break-all;
+}
+
+.agent-probe-status {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  min-height: 16px;
+}
+
+.agent-probe-status.ok {
+  color: var(--accent);
+}
+
+.agent-probe-status.err {
+  color: var(--err);
+}
+
+.agent-cfg-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line-soft);
+}
+
+.agent-template-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.agent-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.agent-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-form-field label {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
 }

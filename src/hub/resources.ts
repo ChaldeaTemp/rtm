@@ -11,6 +11,7 @@ import {
   type ResourceScope,
   type SharedResourceItem,
 } from "../types.js";
+import type { AgentRegistry } from "./agent-registry.js";
 
 const MANAGED_START = "<!-- agent-hub:shared:start -->";
 const MANAGED_END = "<!-- agent-hub:shared:end -->";
@@ -196,9 +197,15 @@ function listSkillFiles(rootDir: string): string[] {
   return results;
 }
 
-function mergeAgents(a: AgentId[], b: AgentId[]): AgentId[] {
+function mergeAgents(a: AgentId[], b: AgentId[], activeAgents: readonly AgentId[]): AgentId[] {
   const set = new Set<AgentId>([...a, ...b]);
-  return ALL_AGENTS.filter((agent) => set.has(agent));
+  const ordered = activeAgents.filter((agent) => set.has(agent));
+  for (const agent of set) {
+    if (!ordered.includes(agent)) {
+      ordered.push(agent);
+    }
+  }
+  return ordered;
 }
 
 function sha16(text: string): string {
@@ -212,6 +219,7 @@ export class SharedResourceManager {
   private readonly projectRulesDir: string;
   private readonly globalRulesDir: string;
   private readonly configFile: string;
+  private registry?: AgentRegistry;
 
   constructor(baseCwd: string, homeDir = os.homedir()) {
     this.baseCwd = path.resolve(baseCwd);
@@ -220,6 +228,14 @@ export class SharedResourceManager {
     this.projectRulesDir = path.join(this.projectHubDir, "resources", "rules");
     this.globalRulesDir = path.join(this.homeDir, ".agent-hub", "resources", "rules");
     this.configFile = path.join(this.projectHubDir, "resources", "config.json");
+  }
+
+  setAgentRegistry(registry: AgentRegistry): void {
+    this.registry = registry;
+  }
+
+  private getActiveAgentIds(): AgentId[] {
+    return this.registry ? this.registry.listEnabledIds() : [...ALL_AGENTS];
   }
 
   private loadDisabledSet(): Set<string> {
@@ -347,8 +363,8 @@ export class SharedResourceManager {
     for (const f of listMarkdownFiles(this.globalRulesDir)) {
       pushRule(f, "global", "hub-global", []);
     }
-    pushRule(path.join(cwd, "AGENTS.md"), "project", "project", ["codex", "agy"]);
-    pushRule(path.join(cwd, "CLAUDE.md"), "project", "project", ["claude"]);
+    pushRule(path.join(cwd, "AGENTS.md"), "project", "project", ["codex", "agy", "opencode", "kimi"]);
+    pushRule(path.join(cwd, "CLAUDE.md"), "project", "project", ["claude", "opencode"]);
     pushRule(path.join(cwd, "GEMINI.md"), "project", "project", ["agy"]);
     for (const f of listMarkdownFiles(path.join(cwd, ".agents", "rules"))) {
       pushRule(f, "project", "project-agy", ["agy"]);
@@ -414,12 +430,16 @@ export class SharedResourceManager {
     for (const f of listSkillFiles(path.join(this.homeDir, ".claude", "skills"))) {
       pushSkill(f, "global", "claude-global", ["claude"]);
     }
+    for (const f of listSkillFiles(path.join(this.homeDir, ".config", "opencode", "skills"))) {
+      pushSkill(f, "global", "opencode-global", ["opencode"]);
+    }
 
     return candidates;
   }
 
   private discoverInternal(cwd = this.baseCwd): Array<SharedResourceItem & { _rawContent: string }> {
     const resolvedCwd = path.resolve(cwd);
+    const activeAgents = this.getActiveAgentIds();
     const disabled = this.loadDisabledSet();
     const candidates = this.collectRawCandidates(resolvedCwd);
     const mergedMap = new Map<string, { item: SharedResourceItem & { _rawContent: string } }>();
@@ -427,8 +447,8 @@ export class SharedResourceManager {
     for (const c of candidates) {
       const existing = mergedMap.get(c.dedupKey);
       if (!existing) {
-        const nativeAgents = ALL_AGENTS.filter((a) => c.nativeAgents.includes(a));
-        const bridgedAgents = ALL_AGENTS.filter((a) => !nativeAgents.includes(a));
+        const nativeAgents = activeAgents.filter((a) => c.nativeAgents.includes(a));
+        const bridgedAgents = activeAgents.filter((a) => !nativeAgents.includes(a));
         const id = c.dedupKey;
         const indexLine =
           c.kind === "skill"
@@ -458,8 +478,8 @@ export class SharedResourceManager {
         if (!it.sources.includes(c.filePath)) {
           it.sources.push(c.filePath);
         }
-        it.nativeAgents = mergeAgents(it.nativeAgents, c.nativeAgents);
-        it.bridgedAgents = ALL_AGENTS.filter((a) => !it.nativeAgents.includes(a));
+        it.nativeAgents = mergeAgents(it.nativeAgents, c.nativeAgents, activeAgents);
+        it.bridgedAgents = activeAgents.filter((a) => !it.nativeAgents.includes(a));
         it.updatedAt = Math.max(it.updatedAt, c.updatedAt);
       }
     }
@@ -567,7 +587,7 @@ export class SharedResourceManager {
 
   getAgentBudgets(cwd = this.baseCwd): AgentResourceBudget[] {
     const items = this.discover(cwd).filter((i) => i.enabled);
-    return ALL_AGENTS.map((agent) => {
+    return this.getActiveAgentIds().map((agent) => {
       const inj = this.buildInjectionForAgent(agent, cwd);
       const bridgedRules = items.filter((i) => i.kind === "rule" && !i.nativeAgents.includes(agent)).length;
       const bridgedSkills = items.filter((i) => i.kind === "skill" && !i.nativeAgents.includes(agent)).length;

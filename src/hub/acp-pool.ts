@@ -19,6 +19,7 @@ import {
   resolveAdapterCommand,
   resolvePeerMcpLaunch,
 } from "./process-tree.js";
+import type { AgentRegistry } from "./agent-registry.js";
 import { estimateTokens, type SharedResourceManager } from "./resources.js";
 import { ensureSessionWorkspace } from "./worktree.js";
 
@@ -218,6 +219,7 @@ export class AcpPool extends EventEmitter {
   private permissionMode: PermissionMode = "approve-all";
   private hubUrl = "";
   private resourceManager?: SharedResourceManager;
+  private registry?: AgentRegistry;
 
   setHubUrl(url: string): void {
     this.hubUrl = url;
@@ -225,6 +227,10 @@ export class AcpPool extends EventEmitter {
 
   setResourceManager(rm: SharedResourceManager): void {
     this.resourceManager = rm;
+  }
+
+  setAgentRegistry(reg: AgentRegistry): void {
+    this.registry = reg;
   }
 
   getPermissionMode(): PermissionMode {
@@ -334,7 +340,9 @@ export class AcpPool extends EventEmitter {
       options.sessionName,
       options.isolateWorktree,
     );
-    const resolvedCmd = resolveAdapterCommand(options.agent);
+    const resolvedCmd = this.registry
+      ? this.registry.resolveCommand(options.agent)
+      : resolveAdapterCommand(options.agent);
     const now = Date.now();
     const record: SessionRecord = {
       sessionKey,
