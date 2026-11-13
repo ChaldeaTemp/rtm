@@ -83,6 +83,9 @@
       gap: 4px;
     }
     .lead-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
       border: none;
       background: transparent;
       color: var(--muted);
@@ -92,6 +95,15 @@
       font-weight: 500;
       transition: all 0.15s;
     }
+    .auth-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--amber);
+      display: inline-block;
+    }
+    .auth-dot.ready { background: var(--green); }
+    .auth-dot.down { background: var(--red); }
     .lead-btn:hover { color: var(--text); }
     .lead-btn.active {
       background: var(--accent);
@@ -307,9 +319,9 @@
       <div class="controls">
         <span style="color:var(--muted);font-size:12px;">主导 Agent:</span>
         <div class="lead-group" id="leadButtons">
-          <button class="lead-btn" data-agent="claude">Claude</button>
-          <button class="lead-btn" data-agent="codex">Codex</button>
-          <button class="lead-btn" data-agent="agy">Antigravity</button>
+          <button class="lead-btn" data-agent="claude"><span class="auth-dot" data-auth-dot="claude"></span>Claude</button>
+          <button class="lead-btn" data-agent="codex"><span class="auth-dot" data-auth-dot="codex"></span>Codex</button>
+          <button class="lead-btn" data-agent="agy"><span class="auth-dot" data-auth-dot="agy"></span>Antigravity</button>
         </div>
         <select id="permSelect" title="权限审批策略">
           <option value="approve-all">自动放行全部</option>
@@ -702,7 +714,33 @@
       };
     }
 
+    async function loadAdapterHealth() {
+      try {
+        const res = await fetch("/api/health");
+        const data = await res.json();
+        if (Array.isArray(data.adapters)) {
+          for (const item of data.adapters) {
+            const btn = document.querySelector(`.lead-btn[data-agent="${item.agent}"]`);
+            const dot = document.querySelector(`[data-auth-dot="${item.agent}"]`);
+            if (dot) {
+              dot.classList.remove("ready", "down");
+              if (!item.available) dot.classList.add("down");
+              else if (item.authReady) dot.classList.add("ready");
+            }
+            if (btn) {
+              btn.title = item.authReady
+                ? `${item.agent}: 已就绪`
+                : (item.authHint || item.reason || `${item.agent}: 未就绪`);
+            }
+          }
+        }
+      } catch {
+        // ignore transient health fetch error
+      }
+    }
+
     connectWs();
+    loadAdapterHealth();
   </script>
 </body>
 </html>

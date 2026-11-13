@@ -1,13 +1,13 @@
 import path from "node:path";
 import type { AgentId, PermissionMode } from "./types.js";
-import { checkAdaptersHealth } from "./hub/process-tree.js";
+import { checkAdaptersHealth, pickDefaultLead } from "./hub/process-tree.js";
 import { AgentHubServer, readRuntimeFile } from "./hub/server.js";
 import { runRepl } from "./cli/repl.js";
 import { openInteractiveWindow } from "./ui/launcher.js";
 
 function parseCliFlags(argv: string[]): {
   command?: string;
-  lead: AgentId;
+  lead?: AgentId;
   cwd: string;
   port: number;
   openUi: boolean;
@@ -15,7 +15,7 @@ function parseCliFlags(argv: string[]): {
   positionals: string[];
 } {
   let command: string | undefined;
-  let lead: AgentId = "claude";
+  let lead: AgentId | undefined;
   let cwd = process.cwd();
   let port = 4317;
   let openUi = false;
@@ -73,10 +73,12 @@ async function main(): Promise<void> {
     return;
   }
 
+  const defaultLead = pickDefaultLead(opts.lead);
+
   const hub = new AgentHubServer({
     baseCwd: opts.cwd,
     port: opts.port,
-    defaultLead: opts.lead,
+    defaultLead,
     permissionMode: opts.permissionMode,
   });
 
@@ -99,7 +101,7 @@ async function main(): Promise<void> {
       if (!prompt) {
         throw new Error("Usage: agent-hub exec [--lead claude|codex|agy] \"<prompt>\"");
       }
-      const res = await hub.runLeadChat({ prompt, leadAgent: opts.lead });
+      const res = await hub.runLeadChat({ prompt, leadAgent: defaultLead });
       console.log(res.outputText);
       return;
     }

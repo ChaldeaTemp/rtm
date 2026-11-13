@@ -124,7 +124,14 @@ class AntigravityAcpAgent:
             api_key=os.environ.get("GEMINI_API_KEY") or None,
         )
         agent = agy.Agent(config)
-        await agent.__aenter__()
+        try:
+            await agent.__aenter__()
+        except Exception as exc:
+            try:
+                await agent.__aexit__(type(exc), exc, exc.__traceback__)
+            except Exception:
+                pass
+            raise acp.RequestError(-32000, str(exc)) from exc
         session_id = str(uuid.uuid4())
         self._sessions[session_id] = SessionState(
             session_id=session_id,

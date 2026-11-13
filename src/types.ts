@@ -11,6 +11,8 @@ export type TaskStatus = "queued" | "running" | "completed" | "failed" | "cancel
 export interface AdapterHealth {
   agent: AgentId;
   available: boolean;
+  authReady: boolean;
+  authHint?: string;
   command: string[];
   reason?: string;
 }

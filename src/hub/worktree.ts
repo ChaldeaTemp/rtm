@@ -112,7 +112,9 @@ export function removeSessionWorktree(baseCwd: string, worktreePath: string): vo
   const repoRoot = runGit(path.resolve(baseCwd), ["rev-parse", "--show-toplevel"]);
   const resolvedTarget = path.resolve(worktreePath);
   const expectedParent = path.resolve(repoRoot, ".agent-hub-worktrees");
-  if (!resolvedTarget.startsWith(expectedParent + path.sep)) {
+  const normTarget = process.platform === "win32" ? resolvedTarget.toLowerCase() : resolvedTarget;
+  const normParent = process.platform === "win32" ? expectedParent.toLowerCase() : expectedParent;
+  if (!normTarget.startsWith(normParent + path.sep)) {
     throw new Error(`Refusing to remove worktree outside ${expectedParent}: ${resolvedTarget}`);
   }
   runGit(repoRoot, ["worktree", "remove", "--force", resolvedTarget]);
