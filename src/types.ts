@@ -468,6 +468,8 @@ export interface ProjectInfo {
 export interface HubSettings {
   /** After a task's first turn, ask the lead agent for a short title. */
   autoTitle: boolean;
+  /** How many workflow steps may run at the same time (1-8). Each one is a set of agent processes. */
+  workflowParallel?: number;
   /** Directories used recently, newest first; offered when creating a task. */
   recentProjects?: Array<{ path: string; lastUsedAt: number }>;
 }

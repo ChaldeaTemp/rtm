@@ -51,17 +51,25 @@ const TRANSIENT_EVENT_TYPES = new Set(["agent_chunk", "tool_event", "snapshot", 
 /** Session-name suffix of the throwaway session that names a task; never shown in the UI. */
 const TITLE_SESSION_SUFFIX = "__title";
 
+const DEFAULT_WORKFLOW_PARALLEL = 3;
+
+function clampWorkflowParallel(value: unknown): number {
+  const n = Math.floor(Number(value));
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, 8) : DEFAULT_WORKFLOW_PARALLEL;
+}
+
 function loadHubSettings(): HubSettings {
   try {
     const parsed = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")) as Partial<HubSettings>;
     return {
       autoTitle: parsed.autoTitle === true,
+      workflowParallel: clampWorkflowParallel(parsed.workflowParallel),
       recentProjects: Array.isArray(parsed.recentProjects)
         ? parsed.recentProjects.filter((p) => p && typeof p.path === "string").slice(0, 20)
         : [],
     };
   } catch {
-    return { autoTitle: false };
+    return { autoTitle: false, workflowParallel: DEFAULT_WORKFLOW_PARALLEL };
   }
 }
 
@@ -657,6 +665,7 @@ export class AgentHubServer {
         { sections: contextRefs, results: upstreamStepIds },
       );
     },
+    maxParallel: () => clampWorkflowParallel(this.settings.workflowParallel),
     missingContext: (groupId, keys) => this.taskContext.missingSections(groupId, keys),
     saveResult: (groupId, step, output) => this.taskContext.setResult(groupId, step, output),
     clearResults: (groupId) => this.taskContext.clearResults(groupId),
@@ -927,6 +936,9 @@ export class AgentHubServer {
   updateSettings(patch: Partial<HubSettings>): HubSettings {
     if (typeof patch.autoTitle === "boolean") {
       this.settings.autoTitle = patch.autoTitle;
+    }
+    if (patch.workflowParallel !== undefined) {
+      this.settings.workflowParallel = clampWorkflowParallel(patch.workflowParallel);
     }
     try {
       fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
@@ -3636,6 +3648,12 @@ export class AgentHubServer {
         return;
       }
 
+      if (method === "POST" && pathname === "/api/workflows/resume") {
+        const body = WorkflowGroupSchema.parse(await readJsonBody(req));
+        sendJson(res, 200, { ok: true, workflow: this.workflows.resume(body.groupId) });
+        return;
+      }
+
       if (method === "POST" && pathname === "/api/workflows/cancel") {
         const body = WorkflowGroupSchema.parse(await readJsonBody(req));
         sendJson(res, 200, { ok: true, workflow: this.workflows.cancel(body.groupId) });
@@ -3648,7 +3666,9 @@ export class AgentHubServer {
       }
 
       if (method === "POST" && pathname === "/api/settings") {
-        const input = z.object({ autoTitle: z.boolean().optional() }).parse(await readJsonBody(req));
+        const input = z
+          .object({ autoTitle: z.boolean().optional(), workflowParallel: z.number().optional() })
+          .parse(await readJsonBody(req));
         sendJson(res, 200, { ok: true, settings: this.updateSettings(input) });
         return;
       }
@@ -3865,6 +3885,11 @@ export class AgentHubServer {
     }
 
     return this.url;
+  }
+
+  /** Writes pending state to disk now. For the moments when a normal stop() is not possible. */
+  flushState(): void {
+    this.stateStore?.flush();
   }
 
   async stop(): Promise<void> {

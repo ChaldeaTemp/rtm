@@ -735,6 +735,8 @@ function applyHubSettings(settings) {
   STATE.settings = { ...STATE.settings, ...settings };
   const toggle = document.getElementById("autoTitleToggle");
   if (toggle) toggle.checked = Boolean(STATE.settings.autoTitle);
+  const parallel = document.getElementById("workflowParallelSelect");
+  if (parallel && STATE.settings.workflowParallel) parallel.value = String(STATE.settings.workflowParallel);
 }
 
 async function saveHubSettings(patch) {
@@ -795,6 +797,8 @@ function initSettingsDialog() {
   });
   const toggle = document.getElementById("autoTitleToggle");
   if (toggle) toggle.onchange = () => void saveHubSettings({ autoTitle: toggle.checked });
+  const parallel = document.getElementById("workflowParallelSelect");
+  if (parallel) parallel.onchange = () => void saveHubSettings({ workflowParallel: Number(parallel.value) });
 }
 
 function applyTheme(dark) {
@@ -3185,18 +3189,56 @@ async function loadAdapterHealth() {
   }
 }
 
+// 与后端断开时：只记一条日志，超过几秒还没连上就在页面顶部明说，连上后自动消失。
+// 后端崩溃由守护进程自动重启，页面这边只管不停重试。
+const CONN = { lostAt: 0, bannerTimer: null };
+
+function renderConnBanner() {
+  let banner = document.getElementById("connBanner");
+  if (!CONN.lostAt) {
+    if (banner) banner.remove();
+    return;
+  }
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = "connBanner";
+    banner.className = "conn-banner";
+    banner.setAttribute("role", "status");
+    document.body.appendChild(banner);
+  }
+  const secs = Math.round((Date.now() - CONN.lostAt) / 1000);
+  banner.textContent =
+    secs < 60
+      ? `与后端的连接断开了，正在重连（${secs} 秒）。后端如果是意外退出，会自动重启并恢复任务记录。`
+      : `已经 ${Math.floor(secs / 60)} 分钟连不上后端。请重新启动 RoundTable Meeting，任务记录会保留；原因可查看数据目录下的 crash.log。`;
+}
+
 function connectWs() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/ws`);
   ws.onopen = () => {
     els.wsDot.classList.add("ok");
     els.wsText.textContent = "live";
-    appendLog("WebSocket 已连接");
+    if (CONN.lostAt) {
+      appendLog(`已重新连接后端（中断 ${Math.round((Date.now() - CONN.lostAt) / 1000)} 秒）`);
+    } else {
+      appendLog("WebSocket 已连接");
+    }
+    CONN.lostAt = 0;
+    clearInterval(CONN.bannerTimer);
+    CONN.bannerTimer = null;
+    renderConnBanner();
   };
   ws.onclose = () => {
     els.wsDot.classList.remove("ok");
     els.wsText.textContent = "retrying";
-    appendLog("WebSocket 断开，正在重连...");
+    if (!CONN.lostAt) {
+      CONN.lostAt = Date.now();
+      appendLog("与后端的连接断开，正在重连...");
+      CONN.bannerTimer = setInterval(() => {
+        if (Date.now() - CONN.lostAt >= 4000) renderConnBanner();
+      }, 1000);
+    }
     setTimeout(connectWs, 1500);
   };
   ws.onmessage = (evt) => {

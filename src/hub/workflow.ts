@@ -15,6 +15,8 @@ export interface WorkflowDeps {
     contextRefs: string[];
     upstreamStepIds: string[];
   }): TaskRecord;
+  /** How many steps may run at once; the rest wait even when their dependencies are done. */
+  maxParallel?(): number;
   /** Sections a step refers to that do not exist; publishing is refused while there are any. */
   missingContext(groupId: string, keys: string[]): string[];
   /** A step finished: keep its output where later steps can get it. */
@@ -141,6 +143,34 @@ export class WorkflowManager {
     return this.clone(workflow)!;
   }
 
+  /**
+   * Continues a workflow that stopped part-way (a failed step, a stop, a hub restart): finished
+   * steps and their results are kept, everything else is queued again.
+   */
+  resume(groupId: string): WorkflowRecord {
+    const workflow = this.workflows.get(groupId);
+    if (!workflow || workflow.steps.length === 0) {
+      throw new Error("工作流还没有步骤");
+    }
+    if (workflow.status === "running") {
+      throw new Error("工作流已经在运行");
+    }
+    const unfinished = workflow.steps.filter((s) => s.status !== "completed");
+    if (workflow.status === "draft" || unfinished.length === 0) {
+      throw new Error("没有可以继续的步骤");
+    }
+    for (const step of unfinished) {
+      step.status = "pending";
+      step.taskId = undefined;
+      step.sessionKey = undefined;
+      step.error = undefined;
+      step.output = undefined;
+    }
+    workflow.status = "running";
+    this.advance(workflow);
+    return this.clone(workflow)!;
+  }
+
   /** Stops running steps and drops the ones that have not started. */
   cancel(groupId: string): WorkflowRecord {
     const workflow = this.workflows.get(groupId);
@@ -211,6 +241,7 @@ export class WorkflowManager {
 
   private advance(workflow: WorkflowRecord): void {
     const byId = new Map(workflow.steps.map((s) => [s.id, s]));
+    const limit = Math.max(1, Math.floor(this.deps.maxParallel?.() ?? Number.POSITIVE_INFINITY));
     let progressed = true;
     while (progressed) {
       progressed = false;
@@ -223,6 +254,8 @@ export class WorkflowManager {
           continue;
         }
         if (!deps.every((d) => d.status === "completed")) continue;
+        // Ready, but every running step is a set of agent processes: wait for a free slot.
+        if (workflow.steps.filter((s) => s.status === "running").length >= limit) continue;
         try {
           const task = this.deps.dispatch({
             groupId: workflow.groupId,

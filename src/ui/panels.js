@@ -749,7 +749,8 @@ async function wfRunAction(groupId, action) {
     else if (action === "run") {
       await wfSave(groupId);
       await wfPost("/api/workflows/run", { groupId });
-    } else if (action === "cancel") await wfPost("/api/workflows/cancel", { groupId });
+    } else if (action === "resume") await wfPost("/api/workflows/resume", { groupId });
+    else if (action === "cancel") await wfPost("/api/workflows/cancel", { groupId });
   } catch (err) {
     await app.showConfirmModal({ title: "工作流没有执行", message: err.message, confirmText: "知道了" });
   }
@@ -1024,6 +1025,10 @@ function renderWorkflowPanel() {
   const groupId = group.groupId;
   const server = wfServerWorkflow(groupId);
   const running = server.status === "running";
+  // 中途停下的工作流（某步失败、手动停止、后端重启）可以保留已完成的步骤接着跑
+  const serverSteps = server.steps || [];
+  const unfinishedCount = serverSteps.filter((s) => s.status !== "completed").length;
+  const canResume = server.status === "failed" && unfinishedCount > 0 && unfinishedCount < serverSteps.length;
   const draft = wfDraft(groupId);
   const agents = app.getEnabledAgents();
 
@@ -1175,7 +1180,12 @@ function renderWorkflowPanel() {
           running
             ? `<button type="button" class="alma-btn alma-btn-danger alma-btn-sm" id="wfCancelBtn">停止</button>`
             : `<button type="button" class="alma-btn alma-btn-sm" id="wfSaveBtn" ${steps.length === 0 ? "disabled" : ""}>保存草稿</button>
-               <button type="button" class="alma-btn alma-btn-primary alma-btn-sm" id="wfRunBtn" ${steps.length === 0 ? "disabled" : ""}>发布</button>`
+               ${
+                 canResume
+                   ? `<button type="button" class="alma-btn alma-btn-outline alma-btn-sm" id="wfRunBtn" title="所有步骤从头再跑一遍，已完成的结果会丢弃">全部重跑</button>
+                      <button type="button" class="alma-btn alma-btn-primary alma-btn-sm" id="wfResumeBtn" title="保留已完成的步骤和结果，只跑没完成的">继续未完成的 ${unfinishedCount} 步</button>`
+                   : `<button type="button" class="alma-btn alma-btn-primary alma-btn-sm" id="wfRunBtn" ${steps.length === 0 ? "disabled" : ""}>发布</button>`
+               }`
         }
       </div>
     </div>
@@ -1303,6 +1313,10 @@ function renderWorkflowPanel() {
   bind("wfRunBtn", () => {
     wfClosePopover();
     void wfRunAction(groupId, "run");
+  });
+  bind("wfResumeBtn", () => {
+    wfClosePopover();
+    void wfRunAction(groupId, "resume");
   });
   bind("wfCancelBtn", () => void wfRunAction(groupId, "cancel"));
 
