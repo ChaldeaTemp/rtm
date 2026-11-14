@@ -1708,3 +1708,65 @@ main.stage[data-view="agents"] #chatComposerWrap {
   justify-content: space-between;
   gap: 8px;
 }
+
+/* Shared task context editor on the workflow panel */
+.wf-context {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+}
+
+.wf-context > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.wf-context > summary::-webkit-details-marker {
+  display: none;
+}
+
+.wf-context > summary .ctx-faint {
+  font-weight: 400;
+}
+
+.wf-context-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 14px 14px;
+}
+
+.wf-context-body textarea {
+  min-height: 88px;
+}
+
+.wf-ctx-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.wf-ctx-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wf-ctx-section-head .text-input:first-child {
+  flex: 0 0 170px;
+  font-family: var(--mono);
+}
+
+.wf-ctx-section-head .text-input:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+}

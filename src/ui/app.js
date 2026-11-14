@@ -21,6 +21,7 @@ const STATE = {
   settings: { autoTitle: false },
   workflows: new Map(),
   progress: new Map(),
+  contexts: new Map(),
   projects: [],
   collapsedProjects: new Set(),
   settingsTab: "general",
@@ -3047,6 +3048,7 @@ function connectWs() {
       STATE.workflows = new Map((msg.workflows || []).map((w) => [w.groupId, w]));
       STATE.progress = new Map((msg.progress || []).map((p) => [p.groupId, p]));
       applyProjects(msg.projects);
+      STATE.contexts = new Map((msg.contexts || []).map((c) => [c.groupId, c]));
       STATE.defaultGroupId = msg.defaultGroupId || "grp-default";
       STATE.baseCwd = msg.baseCwd || "";
       STATE.desktopMode = Boolean(msg.desktopMode);
@@ -3105,6 +3107,9 @@ function connectWs() {
         renderStageHeaderAndTabs();
         window.HUB_INTERACTIVE?.onAgentsUpdated?.();
       }
+    } else if (msg.type === "context_updated") {
+      STATE.contexts.set(msg.context.groupId, msg.context);
+      window.HUB_APP?.onStateChange?.();
     } else if (msg.type === "projects_updated") {
       applyProjects(msg.projects);
     } else if (msg.type === "progress_updated") {

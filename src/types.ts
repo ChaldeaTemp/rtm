@@ -389,6 +389,25 @@ export interface SessionPlanEntry {
   priority?: "high" | "medium" | "low";
 }
 
+export interface TaskContextSection {
+  /** "common", a section name, or "result:<stepId>". */
+  key: string;
+  kind: "common" | "section" | "result";
+  /** One line saying what the section holds; shown in the index sub-sessions get. */
+  summary?: string;
+  content: string;
+  /** The content was longer than the limit and has been shortened. */
+  truncated?: boolean;
+  updatedBy?: AgentId | "user";
+  updatedAt: number;
+}
+
+/** A task's shared context: background written once and handed to sub-sessions in parts. */
+export interface TaskContext {
+  groupId: string;
+  sections: TaskContextSection[];
+}
+
 export type WorkflowStepStatus =
   | "draft"
   | "pending"
@@ -406,6 +425,8 @@ export interface WorkflowStepInput {
   prompt: string;
   dependsOn?: string[];
   isolateWorktree?: boolean;
+  /** Context sections this step needs besides the common one. */
+  contextRefs?: string[];
 }
 
 export interface WorkflowStep {
@@ -416,6 +437,8 @@ export interface WorkflowStep {
   /** Ids of the steps that must finish first; their output is appended to this step's prompt. */
   dependsOn: string[];
   isolateWorktree?: boolean;
+  /** Context sections this step needs besides the common one. */
+  contextRefs?: string[];
   status: WorkflowStepStatus;
   taskId?: string;
   sessionKey?: string;
@@ -456,6 +479,7 @@ export type HubEvent =
       settings?: HubSettings;
       workflows?: WorkflowRecord[];
       progress?: TaskProgress[];
+      contexts?: TaskContext[];
       projects?: ProjectInfo[];
       /** Lead used for new task groups (--lead, persisted setting, or first ready agent). */
       defaultLead?: AgentId;
@@ -478,6 +502,11 @@ export type HubEvent =
       modelCatalogs: Record<string, AgentModelCatalog>;
       desktopMode?: boolean;
       port?: number;
+    }
+  | {
+      type: "context_updated";
+      context: TaskContext;
+      timestamp: number;
     }
   | {
       type: "projects_updated";

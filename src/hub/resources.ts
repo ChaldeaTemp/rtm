@@ -43,10 +43,16 @@ export function buildHubWorkbenchGuide(role: "lead" | "sub" = "lead"): string {
   lines.push(
     "- Progress panel: the user follows long tasks on a Progress panel and should never have to ask where things stand. As soon as the work turns out to be multi-step, call `progress_update` with the goal and the steps. Call it again, without being asked and before you reply, whenever the goal changes, a step starts, finishes or gets blocked, or the plan itself changes. Keep step titles short; put details in `note`.",
   );
+  if (role === "sub") {
+    lines.push(
+      "- Shared task context: your prompt may start with a <task_context> block holding the task's background, the sections chosen for you, and results of earlier steps. It also lists other sections by name; call `context_get` with a section key only when you actually need one.",
+    );
+  }
   if (role === "lead") {
     lines.push(
       "- Peer agent collaboration: Call `peer_list_agents`, `peer_ask` (sync), or `peer_dispatch` + `peer_status` (parallel sub-sessions) when delegating subtasks.",
       "- Multi-step delegation with dependencies: Call `workflow_propose` to draft the steps; the user reviews and publishes the draft in the Workflow panel, so do not dispatch those steps yourself.",
+      "- Shared task context: sub-sessions do not see this conversation. Whatever several of them need (goal, conventions, constraints, where materials are) goes into the task's shared context once, via `shared_context`/`sections` of `workflow_propose` or `context_put`, and is delivered to them automatically. Keep delegation prompts to what is specific to that delegation; never paste the same background into each one.",
     );
   }
   lines.push("</agent_hub_workbench>", "", "");

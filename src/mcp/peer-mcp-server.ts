@@ -280,16 +280,35 @@ async function main(): Promise<void> {
     "workflow_propose",
     {
       description:
-        "Draft a multi-step workflow of sub-sessions for the current task. Nothing runs yet: the draft appears in the workbench's Workflow panel, where the user reviews, edits and publishes it. Use this instead of several peer_dispatch calls when the work splits into steps with dependencies. A step's output is appended to the prompt of every step that depends on it.",
+        "Draft a multi-step workflow of sub-sessions for the current task. Nothing runs yet: the draft appears in the workbench's Workflow panel, where the user reviews, edits and publishes it. Use this instead of several peer_dispatch calls when the work splits into steps with dependencies.\n\nWrite background ONCE, not per step. Every step's sub-session automatically receives `shared_context`, the sections the step lists in `context`, and the results of the steps it depends on. So: put what all steps must know (goal, target version, conventions, constraints, where the materials are) in `shared_context`; put material only some steps need in `sections` and reference it by key; keep each step's `prompt` to what is specific to that step. Do not repeat shared_context or section text inside prompts.",
       inputSchema: {
+        shared_context: z
+          .string()
+          .optional()
+          .describe("Background every step needs, written once. Keep it tight: it is sent with every step."),
+        sections: z
+          .array(
+            z.object({
+              key: z.string().describe("Short name: lowercase letters, digits, '-', '_', '.'"),
+              summary: z.string().optional().describe("One line saying what the section holds."),
+              content: z.string().min(1),
+            }),
+          )
+          .max(40)
+          .optional()
+          .describe("Material that only some steps need. Steps reference these by key in `context`."),
         steps: z
           .array(
             z.object({
               id: z.string().describe("Short unique id: lowercase letters, digits, '-' or '_'."),
               name: z.string().optional().describe("Human-readable step name."),
               agent: z.string().min(1).describe("Agent ID that runs this step (see peer_list_agents)."),
-              prompt: z.string().min(1).describe("Self-contained instruction for the step."),
+              prompt: z
+                .string()
+                .min(1)
+                .describe("What this step must do and deliver. Only what is specific to the step."),
               depends_on: z.array(z.string()).optional().describe("Ids of steps that must finish first."),
+              context: z.array(z.string()).optional().describe("Keys of the sections this step needs."),
               isolate_worktree: z.boolean().optional().describe("Run the step in its own git worktree."),
             }),
           )
@@ -297,7 +316,7 @@ async function main(): Promise<void> {
           .max(20),
       },
     },
-    async ({ steps }) => {
+    async ({ shared_context, sections, steps }) => {
       const res = await callHub<{ workflow: { steps: Array<{ id: string }> } }>(
         cfg.hubUrl,
         "/api/workflows/save",
@@ -306,12 +325,15 @@ async function main(): Promise<void> {
           body: {
             groupId: cfg.groupId,
             proposedBy: cfg.callerAgent,
+            sharedContext: shared_context,
+            sections,
             steps: steps.map((s) => ({
               id: s.id,
               name: s.name,
               agent: s.agent,
               prompt: s.prompt,
               dependsOn: s.depends_on,
+              contextRefs: s.context,
               isolateWorktree: s.isolate_worktree,
             })),
           },
@@ -324,6 +346,59 @@ async function main(): Promise<void> {
             text: `Workflow draft saved with ${res.workflow.steps.length} step(s): ${res.workflow.steps.map((s) => s.id).join(", ")}. It has NOT started. Tell the user to review and publish it in the Workflow panel.`,
           },
         ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "context_get",
+    {
+      description:
+        "Read the task's shared context. Without `section` it returns the index (section keys and one-line summaries). With `section` it returns that section's full text: \"common\", a named section, or \"result:<stepId>\" for a finished workflow step. Read only what you need.",
+      inputSchema: {
+        section: z.string().optional().describe("Section key. Omit to list what exists."),
+      },
+    },
+    async ({ section }) => {
+      const group = cfg.groupId ? `groupId=${encodeURIComponent(cfg.groupId)}` : "";
+      if (!section) {
+        const res = await callHub<{ context: { sections: Array<{ key: string; summary?: string; content: string }> } }>(
+          cfg.hubUrl,
+          `/api/context?${group}`,
+        );
+        const lines = res.context.sections.map(
+          (s) => `- ${s.key}${s.summary ? `: ${s.summary}` : ""} (${s.content.length} chars)`,
+        );
+        return {
+          content: [{ type: "text", text: lines.length > 0 ? lines.join("\n") : "This task has no shared context yet." }],
+        };
+      }
+      const res = await callHub<{ section: { key: string; content: string } }>(
+        cfg.hubUrl,
+        `/api/context?${group}&key=${encodeURIComponent(section)}`,
+      );
+      return { content: [{ type: "text", text: res.section.content }] };
+    },
+  );
+
+  server.registerTool(
+    "context_put",
+    {
+      description:
+        "Lead session only. Create or replace one section of the task's shared context, so sub-sessions get it without it being repeated in their prompts. Use \"common\" for what every step needs; any other key for material only some steps need. Empty content deletes the section. Sub-sessions already running do not see later changes unless they call context_get.",
+      inputSchema: {
+        section: z.string().min(1).describe("\"common\" or a short section name."),
+        content: z.string().describe("The section's full text. Empty to delete."),
+        summary: z.string().optional().describe("One line saying what the section holds."),
+      },
+    },
+    async ({ section, content, summary }) => {
+      const res = await callHub<{ context: { sections: Array<{ key: string }> } }>(cfg.hubUrl, "/api/context", {
+        method: "POST",
+        body: { groupId: cfg.groupId, key: section, content, summary, updatedBy: cfg.callerAgent, depth: cfg.depth },
+      });
+      return {
+        content: [{ type: "text", text: `Shared context now has: ${res.context.sections.map((s) => s.key).join(", ") || "(nothing)"}.` }],
       };
     },
   );

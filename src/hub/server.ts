@@ -35,8 +35,9 @@ import { ThreadLedger } from "./ledger.js";
 import { checkPortAvailable, findAvailablePort, pickNativeDirectory } from "./port-finder.js";
 import { PROJECT_ROOT } from "./process-tree.js";
 import { WorkflowManager } from "./workflow.js";
+import { TaskContextStore } from "./task-context.js";
 import { HubStateStore } from "./state-store.js";
-import { SharedResourceManager } from "./resources.js";
+import { SharedResourceManager, estimateTokens } from "./resources.js";
 import { summarizeWorkspaceChanges } from "./worktree.js";
 import { installDataDir } from "./data-dir.js";
 
@@ -202,9 +203,35 @@ const PeerCallBodySchema = z.object({
   depth: z.number().int().min(0).optional().default(0),
 });
 
+const ContextSectionSchema = z.object({
+  key: z.string().min(1),
+  summary: z.string().optional(),
+  content: z.string(),
+});
+
+const ContextPutSchema = z.object({
+  groupId: z.string().optional(),
+  key: z.string().min(1),
+  summary: z.string().optional(),
+  content: z.string(),
+  updatedBy: z.string().optional(),
+  depth: z.number().int().min(0).optional(),
+});
+
+const ContextReplaceSchema = z.object({
+  groupId: z.string().optional(),
+  common: z.string().optional(),
+  sections: z.array(ContextSectionSchema).max(40).optional(),
+  updatedBy: z.string().optional(),
+});
+
 const WorkflowSaveSchema = z.object({
   groupId: z.string().optional(),
   proposedBy: z.string().optional(),
+  /** Background shared by every step; replaces the task's common section when given. */
+  sharedContext: z.string().optional(),
+  /** Named context sections; replaces the task's hand-written sections when given. */
+  sections: z.array(ContextSectionSchema).max(40).optional(),
   steps: z
     .array(
       z.object({
@@ -214,6 +241,7 @@ const WorkflowSaveSchema = z.object({
         prompt: z.string().optional().default(""),
         dependsOn: z.array(z.string()).optional(),
         isolateWorktree: z.boolean().optional(),
+        contextRefs: z.array(z.string()).optional(),
       }),
     )
     .max(20),
@@ -577,21 +605,30 @@ export class AgentHubServer {
   private progressByGroup = new Map<string, TaskProgress>();
   /** Sessions from before a restart: not running, kept so their history stays reachable. */
   private archivedSessions = new Map<string, SessionRecord>();
+  private readonly taskContext = new TaskContextStore((context) =>
+    this.broadcast({ type: "context_updated", context, timestamp: Date.now() }),
+  );
   private readonly workflows = new WorkflowManager({
-    dispatch: ({ groupId, agent, prompt, session, isolateWorktree }) => {
+    dispatch: ({ groupId, agent, prompt, session, isolateWorktree, contextRefs, upstreamStepIds }) => {
       const group = this.groups.get(groupId);
       const lead = group?.leadAgent ?? this.getDefaultLead();
-      return this.dispatchPeerTask({
-        targetAgent: agent,
-        prompt,
-        groupId,
-        session,
-        isolateWorktree,
-        callerAgent: lead,
-        callerSession: buildSessionKey(lead, `${groupId}__lead`),
-        depth: 0,
-      });
+      return this.dispatchPeerTask(
+        {
+          targetAgent: agent,
+          prompt,
+          groupId,
+          session,
+          isolateWorktree,
+          callerAgent: lead,
+          callerSession: buildSessionKey(lead, `${groupId}__lead`),
+          depth: 0,
+        },
+        { sections: contextRefs, results: upstreamStepIds },
+      );
     },
+    missingContext: (groupId, keys) => this.taskContext.missingSections(groupId, keys),
+    saveResult: (groupId, step, output) => this.taskContext.setResult(groupId, step, output),
+    clearResults: (groupId) => this.taskContext.clearResults(groupId),
     cancel: (sessionKey) => void this.pool.cancelSession(sessionKey),
     isKnownAgent: (agent) => this.registry.isEnabledAgent(agent),
     onChange: (workflow) =>
@@ -732,6 +769,11 @@ export class AgentHubServer {
       }
       this.broadcast(event);
     });
+  }
+
+  private resolveGroupId(raw: string | null | undefined): string {
+    const id = raw?.trim();
+    return id && this.groups.has(id) ? id : this.defaultGroupId;
   }
 
   private requireDirectory(raw: string): string {
@@ -1232,6 +1274,7 @@ export class AgentHubServer {
     this.groups.delete(groupId);
     this.ledgers.delete(groupId);
     this.workflows.forget(groupId);
+    this.taskContext.forget(groupId);
     this.progressByGroup.delete(groupId);
     for (const [key, session] of this.archivedSessions) {
       if (session.groupId === groupId) this.archivedSessions.delete(key);
@@ -1466,6 +1509,7 @@ export class AgentHubServer {
       artifacts: [...this.artifacts.values()],
       workflows: this.workflows.list(),
       progress: [...this.progressByGroup.values()],
+      contexts: this.taskContext.list(),
       sessions: [...live, ...[...this.archivedSessions.values()].filter((s) => !liveKeys.has(s.sessionKey))],
       telemetry: {
         turnSeq: this.turnSeq,
@@ -1537,6 +1581,7 @@ export class AgentHubServer {
     for (const progress of state.progress ?? []) {
       if (this.groups.has(progress.groupId)) this.progressByGroup.set(progress.groupId, progress);
     }
+    this.taskContext.restore((state.contexts ?? []).filter((c) => this.groups.has(c.groupId)));
     for (const session of state.sessions ?? []) {
       if (!this.groups.has(session.groupId)) continue;
       this.archivedSessions.set(session.sessionKey, {
@@ -1860,6 +1905,7 @@ export class AgentHubServer {
       settings: this.getSettings(),
       workflows: this.workflows.list(),
       progress: [...this.progressByGroup.values()],
+      contexts: this.taskContext.list(),
       projects: this.listProjects(),
       defaultGroupId: this.defaultGroupId,
       defaultLead: this.getDefaultLead(),
@@ -2619,9 +2665,12 @@ export class AgentHubServer {
     };
   }
 
-  dispatchPeerTask(rawBody: unknown): TaskRecord {
+  dispatchPeerTask(rawBody: unknown, want?: { sections?: string[]; results?: string[] }): TaskRecord {
     const body = PeerCallBodySchema.parse(rawBody);
     const target = this.resolvePeerTarget(body);
+    // Every delegated session starts from the task's shared context: the common section,
+    // whatever this call asked for, and an index of the rest.
+    const contextPrefix = this.taskContext.buildPrefix(target.groupId, want);
     const group = this.groups.get(target.groupId)!;
     const taskId = `task-${randomUUID().slice(0, 8)}`;
     const now = Date.now();
@@ -2680,8 +2729,9 @@ export class AgentHubServer {
         agent: body.targetAgent,
         sessionName: target.targetSessionName,
         baseCwd: body.cwd ?? group.cwd,
-        prompt: body.prompt,
+        prompt: `${contextPrefix}${body.prompt}`,
         rawUserPrompt: body.prompt,
+        handoffTokens: contextPrefix ? estimateTokens(contextPrefix) : 0,
         injectSharedResources: true,
         isolateWorktree: body.isolateWorktree,
         callDepth: body.depth + 1,
@@ -3375,6 +3425,48 @@ export class AgentHubServer {
         return;
       }
 
+      if (method === "GET" && pathname === "/api/context") {
+        const groupId = this.resolveGroupId(reqUrl.searchParams.get("groupId"));
+        const key = reqUrl.searchParams.get("key");
+        if (key) {
+          const section = this.taskContext.getSection(groupId, key);
+          if (!section) {
+            const known = this.taskContext.get(groupId).sections.map((s) => s.key);
+            throw new Error(`没有名为「${key}」的分区。现有分区：${known.join("、") || "（无）"}`);
+          }
+          sendJson(res, 200, { ok: true, section });
+          return;
+        }
+        sendJson(res, 200, { ok: true, context: this.taskContext.get(groupId) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/context") {
+        const body = ContextPutSchema.parse(await readJsonBody(req));
+        // Sub-sessions only read: otherwise two of them could overwrite each other's context.
+        if ((body.depth ?? 0) > 0) {
+          throw new Error("只有主导会话可以修改任务的共享上下文");
+        }
+        const groupId = this.resolveGroupId(body.groupId);
+        const updatedBy = body.updatedBy && this.registry.isKnownAgent(body.updatedBy) ? body.updatedBy : "user";
+        sendJson(res, 200, {
+          ok: true,
+          context: this.taskContext.put(groupId, { key: body.key, content: body.content, summary: body.summary, updatedBy }),
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/context/replace") {
+        const body = ContextReplaceSchema.parse(await readJsonBody(req));
+        const groupId = this.resolveGroupId(body.groupId);
+        const updatedBy = body.updatedBy && this.registry.isKnownAgent(body.updatedBy) ? body.updatedBy : "user";
+        sendJson(res, 200, {
+          ok: true,
+          context: this.taskContext.replaceAuthored(groupId, { common: body.common, sections: body.sections, updatedBy }),
+        });
+        return;
+      }
+
       if (method === "GET" && pathname === "/api/projects") {
         sendJson(res, 200, { ok: true, projects: this.listProjects() });
         return;
@@ -3406,7 +3498,27 @@ export class AgentHubServer {
         }
         const proposedBy =
           body.proposedBy && this.registry.isKnownAgent(body.proposedBy) ? body.proposedBy : "user";
-        sendJson(res, 200, { ok: true, workflow: this.workflows.save(workflowGroupId, body.steps, proposedBy) });
+        // A draft that brings its own context replaces the hand-written sections with it.
+        if (body.sharedContext !== undefined || body.sections !== undefined) {
+          const current = this.taskContext.get(workflowGroupId);
+          this.taskContext.replaceAuthored(workflowGroupId, {
+            common:
+              body.sharedContext ?? current.sections.find((s) => s.kind === "common")?.content,
+            sections:
+              body.sections ??
+              current.sections.filter((s) => s.kind === "section").map((s) => ({
+                key: s.key,
+                summary: s.summary,
+                content: s.content,
+              })),
+            updatedBy: proposedBy,
+          });
+        }
+        sendJson(res, 200, {
+          ok: true,
+          workflow: this.workflows.save(workflowGroupId, body.steps, proposedBy),
+          context: this.taskContext.get(workflowGroupId),
+        });
         return;
       }
 

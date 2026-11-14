@@ -9,6 +9,7 @@ import type {
   TaskGroup,
   TaskRecord,
   TurnTelemetryRecord,
+  TaskContext,
   TaskProgress,
   WorkflowRecord,
 } from "../types.js";
@@ -32,6 +33,7 @@ export interface PersistedHubState {
   artifacts: ArtifactRecord[];
   workflows: WorkflowRecord[];
   progress?: TaskProgress[];
+  contexts?: TaskContext[];
   /** Sessions as last seen. They are not running after a restart; kept so history stays reachable. */
   sessions: SessionRecord[];
   telemetry: {

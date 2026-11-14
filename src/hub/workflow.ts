@@ -1,7 +1,6 @@
 import type { AgentId, TaskRecord, WorkflowRecord, WorkflowStep, WorkflowStepInput } from "../types.js";
 
 const MAX_STEPS = 20;
-const MAX_UPSTREAM_CHARS = 4000;
 const STEP_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 export interface WorkflowDeps {
@@ -12,7 +11,16 @@ export interface WorkflowDeps {
     prompt: string;
     session: string;
     isolateWorktree: boolean;
+    /** Context sections the step asked for, and the steps whose results it builds on. */
+    contextRefs: string[];
+    upstreamStepIds: string[];
   }): TaskRecord;
+  /** Sections a step refers to that do not exist; publishing is refused while there are any. */
+  missingContext(groupId: string, keys: string[]): string[];
+  /** A step finished: keep its output where later steps can get it. */
+  saveResult(groupId: string, step: WorkflowStep, output: string): void;
+  /** A new run begins: results of the previous one no longer apply. */
+  clearResults(groupId: string): void;
   /** Stops whatever is running in a sub-session. */
   cancel(sessionKey: string): void;
   isKnownAgent(agent: string): boolean;
@@ -79,6 +87,7 @@ export class WorkflowManager {
         agent,
         prompt,
         dependsOn: [...new Set((raw.dependsOn ?? []).map((d) => d.trim().toLowerCase()).filter(Boolean))],
+        contextRefs: [...new Set((raw.contextRefs ?? []).map((k) => k.trim().toLowerCase()).filter(Boolean))],
         isolateWorktree: Boolean(raw.isolateWorktree),
         status: "draft",
       });
@@ -112,6 +121,14 @@ export class WorkflowManager {
     if (empty.length > 0) {
       throw new Error(`这些步骤还没有写任务内容：${empty.map((s) => s.name).join("、")}`);
     }
+    const missing = new Set<string>();
+    for (const step of workflow.steps) {
+      for (const key of this.deps.missingContext(groupId, step.contextRefs ?? [])) missing.add(key);
+    }
+    if (missing.size > 0) {
+      throw new Error(`这些步骤引用的上下文分区不存在：${[...missing].join("、")}`);
+    }
+    this.deps.clearResults(groupId);
     for (const step of workflow.steps) {
       step.status = "pending";
       step.taskId = undefined;
@@ -154,6 +171,7 @@ export class WorkflowManager {
     if (task.status === "completed") {
       step.status = "completed";
       step.output = task.outputText;
+      this.deps.saveResult(workflow.groupId, step, task.outputText);
     } else if (task.status === "failed") {
       step.status = "failed";
       step.error = task.error;
@@ -209,9 +227,12 @@ export class WorkflowManager {
           const task = this.deps.dispatch({
             groupId: workflow.groupId,
             agent: step.agent,
-            prompt: this.buildStepPrompt(step, deps),
+            // Background and upstream results travel as context, not inside the step prompt.
+            prompt: step.prompt,
             session: `wf-${step.id}`,
             isolateWorktree: Boolean(step.isolateWorktree),
+            contextRefs: step.contextRefs ?? [],
+            upstreamStepIds: deps.map((d) => d.id),
           });
           step.status = "running";
           step.taskId = task.taskId;
@@ -232,22 +253,6 @@ export class WorkflowManager {
     this.deps.onChange(this.clone(workflow)!);
   }
 
-  private buildStepPrompt(step: WorkflowStep, deps: WorkflowStep[]): string {
-    const upstream = deps
-      .filter((d) => d.output?.trim())
-      .map((d) => {
-        const text = d.output!.trim();
-        const clipped =
-          text.length > MAX_UPSTREAM_CHARS
-            ? `${text.slice(0, MAX_UPSTREAM_CHARS * 0.6)}\n... [truncated] ...\n${text.slice(-MAX_UPSTREAM_CHARS * 0.4)}`
-            : text;
-        return `<upstream_step id="${d.id}" name="${d.name}" agent="${d.agent}">\n${clipped}\n</upstream_step>`;
-      });
-    return upstream.length > 0
-      ? `${step.prompt}\n\nResults of the steps this one depends on:\n\n${upstream.join("\n\n")}`
-      : step.prompt;
-  }
-
   private assertAcyclic(steps: WorkflowStep[]): void {
     const remaining = new Map(steps.map((s) => [s.id, new Set(s.dependsOn)]));
     while (remaining.size > 0) {
@@ -264,7 +269,14 @@ export class WorkflowManager {
 
   private clone(workflow: WorkflowRecord | undefined): WorkflowRecord | undefined {
     return workflow
-      ? { ...workflow, steps: workflow.steps.map((s) => ({ ...s, dependsOn: [...s.dependsOn] })) }
+      ? {
+          ...workflow,
+          steps: workflow.steps.map((s) => ({
+            ...s,
+            dependsOn: [...s.dependsOn],
+            contextRefs: [...(s.contextRefs ?? [])],
+          })),
+        }
       : undefined;
   }
 }

@@ -605,6 +605,8 @@ function renderTelemetryPanel() {
 // ---------------------------------------------------------------------------
 const WF_STATE = {
   drafts: new Map(), // groupId -> { steps, baseUpdatedAt, dirty, version }
+  ctxDrafts: new Map(), // groupId -> { common, sections, stamp, dirty, version }
+  ctxOpen: false, // 共享上下文区域是否展开
   lastSignature: "",
   selectedId: null, // 明细浮窗当前对着的步骤
 };
@@ -636,6 +638,7 @@ function wfDraft(groupId) {
         prompt: s.prompt,
         dependsOn: [...s.dependsOn],
         isolateWorktree: Boolean(s.isolateWorktree),
+        contextRefs: [...(s.contextRefs || [])],
       })),
       baseUpdatedAt: server.updatedAt,
       dirty: false,
@@ -683,7 +686,56 @@ async function wfPost(path, body) {
   return data.workflow;
 }
 
+function wfServerContext(groupId) {
+  return app.STATE.contexts?.get(groupId) || { groupId, sections: [] };
+}
+
+// 共享上下文的本地草稿：公共分区 + 手写的命名分区。步骤结果由系统写入，只读，不进草稿
+function wfContextDraft(groupId) {
+  const server = wfServerContext(groupId);
+  const stamp = server.sections.map((s) => `${s.key}:${s.updatedAt}`).join("|");
+  let draft = WF_STATE.ctxDrafts.get(groupId);
+  if (!draft || (!draft.dirty && draft.stamp !== stamp)) {
+    draft = {
+      common: server.sections.find((s) => s.kind === "common")?.content || "",
+      sections: server.sections
+        .filter((s) => s.kind === "section")
+        .map((s) => ({ key: s.key, summary: s.summary || "", content: s.content, saved: true })),
+      stamp,
+      dirty: false,
+      version: (draft?.version || 0) + 1,
+    };
+    WF_STATE.ctxDrafts.set(groupId, draft);
+  }
+  return draft;
+}
+
+async function wfSaveContext(groupId) {
+  const draft = wfContextDraft(groupId);
+  if (!draft.dirty) return;
+  const res = await fetch("/api/context/replace", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      groupId,
+      common: draft.common,
+      sections: draft.sections
+        .filter((s) => s.key.trim() && s.content.trim())
+        .map((s) => ({ key: s.key.trim(), summary: s.summary.trim() || undefined, content: s.content })),
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) {
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+  app.STATE.contexts.set(groupId, data.context);
+  draft.dirty = false;
+  draft.stamp = "";
+}
+
 async function wfSave(groupId) {
+  // 步骤引用的分区要先存在，所以先存上下文再存步骤
+  await wfSaveContext(groupId);
   const draft = wfDraft(groupId);
   const workflow = await wfPost("/api/workflows/save", { groupId, steps: draft.steps });
   draft.dirty = false;
@@ -776,6 +828,13 @@ function wfOpenPopover(ctx, stepId) {
   nodeEl.classList.add("selected");
 
   const live = server.steps.find((s) => s.id === stepId);
+  // 可选的分区：已保存的加上草稿里刚写的
+  const sectionKeys = [
+    ...new Set([
+      ...wfServerContext(group.groupId).sections.filter((s) => s.kind === "section").map((s) => s.key),
+      ...wfContextDraft(group.groupId).sections.map((s) => s.key.trim().toLowerCase()).filter(Boolean),
+    ]),
+  ];
   const status = running || showResults ? live?.status || "draft" : "draft";
   const readonly = running;
   const others = steps.filter((s) => s.id !== stepId);
@@ -818,6 +877,25 @@ function wfOpenPopover(ctx, stepId) {
                     .map(
                       (s) =>
                         `<button type="button" class="filter-pill${step.dependsOn.includes(s.id) ? " active" : ""}" data-wf-dep-id="${esc(s.id)}">${esc(s.name || s.id)}</button>`,
+                    )
+                    .join("")
+            }</div>
+          </div>`
+        : ""
+    }
+    ${
+      sectionKeys.length > 0
+        ? `<div class="wf-pop-block">
+            <label>${readonly ? "附带的上下文分区" : "附带这些上下文分区（公共部分总会带上）"}</label>
+            <div class="wf-deps">${
+              readonly
+                ? (step.contextRefs || []).length > 0
+                  ? step.contextRefs.map((k) => `<span class="origin-tag">${esc(k)}</span>`).join("")
+                  : '<span class="ctx-faint">只带公共部分</span>'
+                : sectionKeys
+                    .map(
+                      (k) =>
+                        `<button type="button" class="filter-pill${(step.contextRefs || []).includes(k) ? " active" : ""}" data-wf-ctx-key="${esc(k)}">${esc(k)}</button>`,
                     )
                     .join("")
             }</div>
@@ -875,6 +953,16 @@ function wfOpenPopover(ctx, stepId) {
         wfTouch(draft, true);
         rerenderKeepingOpen();
       }
+    };
+  });
+  pop.querySelectorAll("[data-wf-ctx-key]").forEach((btn) => {
+    btn.onclick = () => {
+      const target = draft.steps[index];
+      const key = btn.dataset.wfCtxKey;
+      const refs = target.contextRefs || [];
+      target.contextRefs = refs.includes(key) ? refs.filter((k) => k !== key) : [...refs, key];
+      wfTouch(draft, true);
+      rerenderKeepingOpen();
     };
   });
   pop.querySelectorAll("[data-wf-dep-id]").forEach((btn) => {
@@ -949,6 +1037,9 @@ function renderWorkflowPanel() {
     server.steps.map((s) => `${s.id}:${s.status}`).join(","),
     draft.version,
     agents.map((a) => a.agent).join(","),
+    wfServerContext(groupId).sections.map((s) => `${s.key}:${s.updatedAt}`).join(","),
+    wfContextDraft(groupId).version,
+    WF_STATE.ctxOpen,
   ].join("|");
   if (signature === WF_STATE.lastSignature && container.childElementCount > 0) return;
   WF_STATE.lastSignature = signature;
@@ -972,6 +1063,58 @@ function renderWorkflowPanel() {
           : server.proposedBy && server.proposedBy !== "user"
             ? `${server.proposedBy} 起草的草稿，确认后发布`
             : "草稿";
+
+  // 共享上下文：公共部分写一次，每一步都会带上；命名分区只给引用它的步骤
+  const ctxDraft = wfContextDraft(groupId);
+  const ctxResults = wfServerContext(groupId).sections.filter((sec) => sec.kind === "result");
+  const refCount = (key) => steps.filter((st) => (st.contextRefs || []).includes(key)).length;
+  const ctxSummary = [
+    ctxDraft.common.trim() ? `公共 ${ctxDraft.common.trim().length} 字` : "还没有公共内容",
+    ctxDraft.sections.length > 0 ? `${ctxDraft.sections.length} 个分区` : "",
+    ctxResults.length > 0 ? `${ctxResults.length} 个步骤结果` : "",
+    ctxDraft.dirty ? "未保存" : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const ctxHtml = `
+    <details class="wf-context" id="wfContextBox" ${WF_STATE.ctxOpen ? "open" : ""}>
+      <summary><span>共享上下文</span><span class="ctx-faint">${esc(ctxSummary)}</span></summary>
+      <div class="wf-context-body">
+        <div class="wf-pop-block">
+          <label>公共部分<span class="dirs-hint">每个子会话都会收到，写一次即可，不用在每一步里重复</span></label>
+          <textarea class="rule-editor-textarea" id="wfCtxCommon" ${running ? "readonly" : ""} placeholder="目标、版本、约定、禁止事项、材料在哪……">${esc(ctxDraft.common)}</textarea>
+        </div>
+        ${ctxDraft.sections
+          .map(
+            (sec, i) => `
+          <div class="wf-ctx-section">
+            <div class="wf-ctx-section-head">
+              <input class="text-input" data-ctx-field="key" data-ctx-index="${i}" value="${esc(sec.key)}" placeholder="分区名，如 user-mgmt" ${sec.saved || running ? "readonly" : ""} />
+              <input class="text-input" data-ctx-field="summary" data-ctx-index="${i}" value="${esc(sec.summary)}" placeholder="一句话说明里面是什么" ${running ? "readonly" : ""} />
+              <span class="ctx-faint">${refCount(sec.key.trim().toLowerCase())} 步引用</span>
+              ${running ? "" : `<button type="button" class="mini-icon-btn" data-ctx-remove="${i}" title="删除这个分区">×</button>`}
+            </div>
+            <textarea class="rule-editor-textarea" data-ctx-field="content" data-ctx-index="${i}" ${running ? "readonly" : ""} placeholder="只有部分步骤需要的内容">${esc(sec.content)}</textarea>
+          </div>`,
+          )
+          .join("")}
+        ${
+          ctxResults.length > 0
+            ? `<div class="wf-deps"><span class="wf-deps-label">步骤结果（自动保存，下游步骤会收到）</span>${ctxResults
+                .map((sec) => `<span class="origin-tag" title="${esc(sec.content.slice(0, 400))}">${esc(sec.summary || sec.key)}</span>`)
+                .join("")}</div>`
+            : ""
+        }
+        ${
+          running
+            ? ""
+            : `<div class="panel-toolbar">
+                 <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" id="wfCtxAddBtn">添加分区</button>
+                 <button type="button" class="alma-btn alma-btn-sm" id="wfCtxSaveBtn" ${ctxDraft.dirty ? "" : "disabled"}>保存上下文</button>
+               </div>`
+        }
+      </div>
+    </details>`;
 
   const layout = wfLayout(steps);
   const edges = [];
@@ -1036,6 +1179,7 @@ function renderWorkflowPanel() {
         }
       </div>
     </div>
+    ${ctxHtml}
     ${
       steps.length === 0
         ? `<div class="empty-note">还没有步骤。添加几步交给子会话的任务，设好先后顺序，再点「发布」；或者让 ${esc(group.leadAgent)} 先起草。<br />没有依赖关系的步骤会同时开始，后一步能拿到它所依赖步骤的结果。</div>`
@@ -1061,6 +1205,74 @@ function renderWorkflowPanel() {
     wrap.scrollTop = prevScroll.top;
   }
 
+  const ctxBox = document.getElementById("wfContextBox");
+  if (ctxBox) {
+    ctxBox.ontoggle = () => {
+      WF_STATE.ctxOpen = ctxBox.open;
+    };
+  }
+  const markCtxDirty = (structural) => {
+    ctxDraft.dirty = true;
+    if (structural) {
+      ctxDraft.version += 1;
+      renderWorkflowPanel();
+    } else {
+      const saveBtn = document.getElementById("wfCtxSaveBtn");
+      if (saveBtn) saveBtn.disabled = false;
+    }
+  };
+  const commonEl = document.getElementById("wfCtxCommon");
+  if (commonEl) {
+    commonEl.oninput = () => {
+      ctxDraft.common = commonEl.value;
+      markCtxDirty(false);
+    };
+  }
+  container.querySelectorAll("[data-ctx-field]").forEach((el) => {
+    el.oninput = () => {
+      const sec = ctxDraft.sections[Number(el.dataset.ctxIndex)];
+      if (!sec) return;
+      sec[el.dataset.ctxField] = el.value;
+      markCtxDirty(false);
+    };
+  });
+  container.querySelectorAll("[data-ctx-remove]").forEach((btn) => {
+    btn.onclick = () => {
+      const [removed] = ctxDraft.sections.splice(Number(btn.dataset.ctxRemove), 1);
+      // 分区没了，引用它的步骤也不再引用
+      if (removed) {
+        const key = removed.key.trim().toLowerCase();
+        for (const st of draft.steps) {
+          if ((st.contextRefs || []).includes(key)) {
+            st.contextRefs = st.contextRefs.filter((k) => k !== key);
+            wfTouch(draft, false);
+          }
+        }
+      }
+      markCtxDirty(true);
+    };
+  });
+  const ctxAddBtn = document.getElementById("wfCtxAddBtn");
+  if (ctxAddBtn) {
+    ctxAddBtn.onclick = () => {
+      ctxDraft.sections.push({ key: "", summary: "", content: "", saved: false });
+      WF_STATE.ctxOpen = true;
+      markCtxDirty(true);
+    };
+  }
+  const ctxSaveBtn = document.getElementById("wfCtxSaveBtn");
+  if (ctxSaveBtn) {
+    ctxSaveBtn.onclick = async () => {
+      try {
+        await wfSaveContext(groupId);
+      } catch (err) {
+        await app.showConfirmModal({ title: "上下文没有保存", message: err.message, confirmText: "知道了" });
+      }
+      WF_STATE.lastSignature = "";
+      renderWorkflowPanel();
+    };
+  }
+
   const ctx = { group, draft, server, running, showResults, agents, steps };
   const bind = (id, fn) => {
     const el = document.getElementById(id);
@@ -1079,6 +1291,7 @@ function renderWorkflowPanel() {
       prompt: "",
       dependsOn: after,
       isolateWorktree: false,
+      contextRefs: [],
     });
     wfTouch(draft, true);
     WF_STATE.selectedId = `step${n}`;
