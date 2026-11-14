@@ -221,6 +221,42 @@ export interface PendingUserQuestion {
   createdAt: number;
 }
 
+export type BoardStatus = "queued" | "running" | "delivered" | "done" | "failed";
+
+export type BoardWaitingReason = "question" | "permission" | "interrupted" | "stalled";
+
+export interface BoardDeliverable {
+  kind: "file" | "text" | "link";
+  path?: string;
+  note?: string;
+}
+
+export interface TaskBoardInfo {
+  status: BoardStatus;
+  brief: string;
+  queuedAt: number;
+  startedAt?: number;
+  deliveredAt?: number;
+  closedAt?: number;
+  summary?: string;
+  deliverables?: BoardDeliverable[];
+  failReason?: string;
+  rejectCount: number;
+  rejectNote?: string;
+  interrupted?: boolean;
+  stalled?: boolean;
+}
+
+export interface BoardCard {
+  groupId: string;
+  title: string;
+  leadAgent: AgentId;
+  cwd: string;
+  board: TaskBoardInfo;
+  waiting: boolean;
+  waitingReason?: BoardWaitingReason;
+}
+
 export interface TaskGroup {
   /** Default title number, or null once a title has been assigned. Older tasks omit this. */
   defaultTitleNumber?: number | null;
@@ -234,6 +270,7 @@ export interface TaskGroup {
   cwd: string;
   /** Other directories the task works in, besides cwd. */
   extraDirs?: string[];
+  board?: TaskBoardInfo;
   archived?: boolean;
   archivedAt?: number;
   createdAt: number;
@@ -526,6 +563,10 @@ export interface HubSettings {
   workflowParallel?: number;
   /** Minutes a sub-session may sit idle before its agent processes are released; 0 = never. */
   idleSubSessionMinutes?: number;
+  /** How many board tasks may run at the same time (1-8, default 2). */
+  boardParallel?: number;
+  /** Minutes a lead session may sit idle before its agent processes are released; 0 = never (default 0). */
+  idleLeadMinutes?: number;
   /** Directories used recently, newest first; offered when creating a task. */
   recentProjects?: Array<{ path: string; lastUsedAt: number }>;
 }
@@ -624,6 +665,11 @@ export type HubEvent =
   | {
       type: "group_updated";
       group: TaskGroup;
+      timestamp: number;
+    }
+  | {
+      type: "board_updated";
+      cards: BoardCard[];
       timestamp: number;
     }
   | {

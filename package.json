@@ -26,7 +26,8 @@
     "verify:phase8": "tsx scripts/verify-phase8.ts",
     "verify:walkthrough": "tsx scripts/verify-walkthrough.ts",
     "verify:robustness": "tsx scripts/verify-robustness.ts",
-    "verify:mock": "tsc --noEmit && tsx scripts/verify-walkthrough.ts && tsx scripts/verify-robustness.ts"
+    "verify:board": "tsx scripts/verify-board.ts",
+    "verify:mock": "tsc --noEmit && tsx scripts/verify-walkthrough.ts && tsx scripts/verify-robustness.ts && tsx scripts/verify-board.ts"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "^0.106.0",
