@@ -1,6 +1,6 @@
 # RTM User Guide
 
-[简体中文](README.md) · English · [Project home](../README.en.md)
+[简体中文](README.md) · English · [Project home](../README.md)
 
 This guide uses a CSV export task to show how to connect agents, delegate work, review results, and resume work in RTM. Screenshots use demo data.
 
