@@ -3332,3 +3332,22 @@ body[data-skin="roundtable"] .brand-title {
   line-height: 1.5;
   box-shadow: var(--shadow-sm);
 }
+
+/* 可用内存紧张时显示在标题行 */
+.mem-chip {
+  margin-left: auto;
+  margin-right: 6px;
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  font-family: var(--ui);
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: help;
+  color: var(--ink);
+  background: var(--soft);
+}
+
+.mem-chip.critical {
+  border-color: #b42318;
+  color: #b42318;
+}

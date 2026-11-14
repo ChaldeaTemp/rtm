@@ -729,6 +729,32 @@ function applySkin(skin) {
   }
 }
 
+// 可用内存紧张时在标题旁提示：此时后端只让工作流一步一步跑，并提前让空闲子会话休眠
+function applyMemoryStatus(memory) {
+  if (!memory) return;
+  STATE.memory = memory;
+  let chip = document.getElementById("memChip");
+  if (memory.level === "ok") {
+    if (chip) chip.remove();
+    return;
+  }
+  if (!chip) {
+    chip = document.createElement("span");
+    chip.id = "memChip";
+    const host = document.querySelector(".ws-status");
+    if (!host) return;
+    host.before(chip);
+  }
+  const gb = memory.availableMB !== undefined ? (memory.availableMB / 1024).toFixed(1) : "?";
+  chip.className = `mem-chip ${memory.level}`;
+  chip.textContent = memory.level === "critical" ? "内存告急" : "内存紧张";
+  chip.title = `系统可用内存只剩约 ${gb} GB。工作流已改为一次只跑一步，空闲的子会话会提前休眠。建议关掉不用的程序，否则后端可能被系统终止。`;
+}
+
+function getMemoryStatus() {
+  return STATE.memory || { level: "ok" };
+}
+
 // 设置项存在 hub 端（对所有窗口生效）；这里只负责读写和同步勾选状态
 function applyHubSettings(settings) {
   if (!settings) return;
@@ -737,6 +763,8 @@ function applyHubSettings(settings) {
   if (toggle) toggle.checked = Boolean(STATE.settings.autoTitle);
   const parallel = document.getElementById("workflowParallelSelect");
   if (parallel && STATE.settings.workflowParallel) parallel.value = String(STATE.settings.workflowParallel);
+  const idle = document.getElementById("idleSubSessionSelect");
+  if (idle && STATE.settings.idleSubSessionMinutes !== undefined) idle.value = String(STATE.settings.idleSubSessionMinutes);
 }
 
 async function saveHubSettings(patch) {
@@ -799,6 +827,8 @@ function initSettingsDialog() {
   if (toggle) toggle.onchange = () => void saveHubSettings({ autoTitle: toggle.checked });
   const parallel = document.getElementById("workflowParallelSelect");
   if (parallel) parallel.onchange = () => void saveHubSettings({ workflowParallel: Number(parallel.value) });
+  const idle = document.getElementById("idleSubSessionSelect");
+  if (idle) idle.onchange = () => void saveHubSettings({ idleSubSessionMinutes: Number(idle.value) });
 }
 
 function applyTheme(dark) {
@@ -2501,7 +2531,7 @@ function renderInspector() {
   els.inspHead.innerHTML = `
     ${agentTagHtml(active?.agent || group.leadAgent)}
     <span class="insp-head-name">${escapeHtml(subMode ? active?.label || active?.name || "子会话" : "主导会话")}</span>
-    <span class="insp-head-status">${active ? escapeHtml(isSessionRunning(activeKey) ? "进行中" : SESSION_STATUS_TEXT[active.status] || active.status) : "未启动"}</span>
+    <span class="insp-head-status">${active ? escapeHtml(isSessionRunning(activeKey) ? "进行中" : sessionStatusText(active)) : "未启动"}</span>
   `;
 
   renderInspectorProgress(group, active);
@@ -2581,7 +2611,7 @@ function renderInspector() {
           <span class="dot ${running ? "busy" : escapeHtml(sub.status)}"></span>
           ${agentTagHtml(sub.agent)}
           <span class="insp-agent-name">${escapeHtml(sub.label || sub.name)}</span>
-          <span class="insp-agent-status">${escapeHtml(running ? "进行中" : SESSION_STATUS_TEXT[sub.status] || sub.status)}${tasks.length > 1 ? ` · ${tasks.length} 次` : ""}</span>
+          <span class="insp-agent-status">${escapeHtml(running ? "进行中" : sessionStatusText(sub))}${tasks.length > 1 ? ` · ${tasks.length} 次` : ""}</span>
         </div>
         ${last?.prompt ? `<div class="insp-agent-prompt">${escapeHtml(last.prompt)}</div>` : ""}
       `;
@@ -2653,6 +2683,12 @@ function renderInspector() {
 }
 
 const SESSION_STATUS_TEXT = { starting: "启动中", idle: "空闲", busy: "进行中", error: "出错", closed: "已关闭" };
+
+// 空闲太久被后端释放进程的子会话显示为「已休眠」：再发消息会自动唤醒并带回之前的对话
+function sessionStatusText(session) {
+  if (session.status === "closed" && session.closedReason === "idle") return "已休眠";
+  return SESSION_STATUS_TEXT[session.status] || session.status;
+}
 
 function renderDesktopControls() {
   const activeCwd = getActiveGroup()?.cwd || STATE.baseCwd || "";
@@ -3243,7 +3279,12 @@ function connectWs() {
   };
   ws.onmessage = (evt) => {
     const msg = JSON.parse(evt.data);
+    if (msg.type === "memory_status") {
+      applyMemoryStatus(msg.memory);
+      return;
+    }
     if (msg.type === "snapshot") {
+      applyMemoryStatus(msg.memory);
       applyDefaultLead(msg);
       applyHubSettings(msg.settings);
       STATE.workflows = new Map((msg.workflows || []).map((w) => [w.groupId, w]));
@@ -4190,6 +4231,7 @@ window.HUB_APP = {
   refreshHeaderMetrics,
   getEnabledAgents,
   agentTagHtml,
+  getMemoryStatus,
   getAgentColorStyle,
   renderAgentControls,
   ensureAgentModelsLoaded,

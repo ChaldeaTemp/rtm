@@ -311,6 +311,19 @@
               <option value="8">8</option>
             </select>
           </label>
+          <label class="settings-row">
+            <div>
+              <div class="settings-label">空闲子会话自动休眠</div>
+              <div class="settings-note">子会话空闲超过这个时间就释放它的 Agent 进程（每个占几百 MB）。再发消息会自动唤醒，并带回之前的对话。主导会话不受影响。</div>
+            </div>
+            <select id="idleSubSessionSelect" class="perm-select">
+              <option value="0">从不</option>
+              <option value="5">5 分钟</option>
+              <option value="15">15 分钟</option>
+              <option value="30">30 分钟</option>
+              <option value="60">1 小时</option>
+            </select>
+          </label>
         </section>
         <section class="settings-pane" data-settings-pane="agents" hidden>
           <h2>Agent</h2>

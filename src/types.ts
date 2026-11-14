@@ -246,6 +246,8 @@ export interface SessionRecord {
   branch?: string;
   acpSessionId?: string;
   status: SessionStatus;
+  /** Why a closed session is closed: "idle" = put to sleep by the hub, wakes on the next message. */
+  closedReason?: "idle";
   pid?: number;
   lastError?: string;
   createdAt: number;
@@ -470,13 +472,27 @@ export interface HubSettings {
   autoTitle: boolean;
   /** How many workflow steps may run at the same time (1-8). Each one is a set of agent processes. */
   workflowParallel?: number;
+  /** Minutes a sub-session may sit idle before its agent processes are released; 0 = never. */
+  idleSubSessionMinutes?: number;
   /** Directories used recently, newest first; offered when creating a task. */
   recentProjects?: Array<{ path: string; lastUsedAt: number }>;
 }
 
+export type MemoryLevel = "ok" | "low" | "critical";
+
+export interface MemoryStatus {
+  level: MemoryLevel;
+  /** Memory that can still be committed, in MB; undefined where it is not measured. */
+  availableMB?: number;
+  totalMB?: number;
+  sampledAt: number;
+}
+
 export type HubEvent =
+  | { type: "memory_status"; memory: MemoryStatus; timestamp: number }
   | {
       type: "snapshot";
+      memory?: MemoryStatus;
       defaultGroupId: string;
       settings?: HubSettings;
       workflows?: WorkflowRecord[];

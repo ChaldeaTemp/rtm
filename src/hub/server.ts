@@ -32,6 +32,7 @@ import { openInteractiveWindow } from "../ui/launcher.js";
 import { AcpPool, buildSessionKey, type WarmSessionOptions } from "./acp-pool.js";
 import { AgentRegistry } from "./agent-registry.js";
 import { ThreadLedger } from "./ledger.js";
+import { MemoryMonitor, type MemoryStatus } from "./memory.js";
 import { checkPortAvailable, findAvailablePort, pickNativeDirectory } from "./port-finder.js";
 import { PROJECT_ROOT } from "./process-tree.js";
 import { WorkflowManager } from "./workflow.js";
@@ -52,6 +53,17 @@ const TRANSIENT_EVENT_TYPES = new Set(["agent_chunk", "tool_event", "snapshot", 
 const TITLE_SESSION_SUFFIX = "__title";
 
 const DEFAULT_WORKFLOW_PARALLEL = 3;
+const DEFAULT_IDLE_SUB_MINUTES = 15;
+/** Under memory pressure an idle sub-session is released after this long, whatever the setting. */
+const PRESSURE_IDLE_MS = 60_000;
+const SUB_RECAP_MAX_CHARS = 8000;
+const SUB_RECAP_MESSAGE_CHARS = 2000;
+
+function clampIdleSubMinutes(value: unknown): number {
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_IDLE_SUB_MINUTES;
+  return Math.min(n, 240);
+}
 
 function clampWorkflowParallel(value: unknown): number {
   const n = Math.floor(Number(value));
@@ -64,12 +76,17 @@ function loadHubSettings(): HubSettings {
     return {
       autoTitle: parsed.autoTitle === true,
       workflowParallel: clampWorkflowParallel(parsed.workflowParallel),
+      idleSubSessionMinutes: clampIdleSubMinutes(parsed.idleSubSessionMinutes),
       recentProjects: Array.isArray(parsed.recentProjects)
         ? parsed.recentProjects.filter((p) => p && typeof p.path === "string").slice(0, 20)
         : [],
     };
   } catch {
-    return { autoTitle: false, workflowParallel: DEFAULT_WORKFLOW_PARALLEL };
+    return {
+      autoTitle: false,
+      workflowParallel: DEFAULT_WORKFLOW_PARALLEL,
+      idleSubSessionMinutes: DEFAULT_IDLE_SUB_MINUTES,
+    };
   }
 }
 
@@ -640,6 +657,11 @@ export class AgentHubServer {
   private readonly lastCostBySession = new Map<string, number>();
   private stateStore?: HubStateStore;
   private progressByGroup = new Map<string, TaskProgress>();
+  private readonly memory = new MemoryMonitor((status) => {
+    this.broadcast({ type: "memory_status", memory: status, timestamp: Date.now() });
+    if (status.level !== "ok") this.sweepIdleSubSessions();
+  });
+  private idleSweepTimer?: ReturnType<typeof setInterval>;
   /** Handoffs the current lead asked for; carried out when its turn ends. */
   private pendingHandoffs = new Map<string, { from: AgentId; to: AgentId; brief: string }>();
   /** Sessions from before a restart: not running, kept so their history stays reachable. */
@@ -665,7 +687,9 @@ export class AgentHubServer {
         { sections: contextRefs, results: upstreamStepIds },
       );
     },
-    maxParallel: () => clampWorkflowParallel(this.settings.workflowParallel),
+    // Short on memory: finish what is running before starting anything else.
+    maxParallel: () =>
+      this.memory.get().level === "ok" ? clampWorkflowParallel(this.settings.workflowParallel) : 1,
     missingContext: (groupId, keys) => this.taskContext.missingSections(groupId, keys),
     saveResult: (groupId, step, output) => this.taskContext.setResult(groupId, step, output),
     clearResults: (groupId) => this.taskContext.clearResults(groupId),
@@ -839,6 +863,79 @@ export class AgentHubServer {
     return out;
   }
 
+  getMemoryStatus(): MemoryStatus {
+    return this.memory.get();
+  }
+
+  /**
+   * Releases the agent processes of sub-sessions nobody has used for a while. Each one holds a
+   * few hundred MB whether or not it is doing anything. The session stays in the list as
+   * asleep; the next message starts it again and gives it back what was said in it.
+   * Lead sessions are never touched: they hold the task's main context.
+   */
+  sweepIdleSubSessions(now = Date.now()): string[] {
+    const underPressure = this.memory.get().level !== "ok";
+    const minutes = clampIdleSubMinutes(this.settings.idleSubSessionMinutes);
+    if (!underPressure && minutes === 0) return [];
+    const idleMs = underPressure ? Math.min(PRESSURE_IDLE_MS, minutes > 0 ? minutes * 60_000 : PRESSURE_IDLE_MS) : minutes * 60_000;
+    const waiting = new Set(this.pool.getPendingPermissions().map((p) => p.sessionKey));
+    const released: string[] = [];
+    for (const session of this.pool.listSessions()) {
+      if (session.role !== "sub" || session.status !== "idle") continue;
+      if (now - session.updatedAt < idleMs) continue;
+      if (waiting.has(session.sessionKey) || this.activeAssistantBySession.has(session.sessionKey)) continue;
+      const asleep: SessionRecord = { ...session, status: "closed", closedReason: "idle", pid: undefined, updatedAt: now };
+      this.archivedSessions.set(session.sessionKey, asleep);
+      released.push(session.sessionKey);
+      void this.pool.closeSession(session.sessionKey).then(() => {
+        // The pool's own close event does not carry the reason.
+        this.broadcast({ type: "session_updated", session: { ...asleep }, timestamp: Date.now() });
+      });
+    }
+    return released;
+  }
+
+  /**
+   * What was said before in a sub-session that has no running agent any more (put to sleep, or
+   * the hub restarted). The agent that answers next is a fresh process and gets this instead
+   * of starting blank. Empty while the session is alive or has no history.
+   */
+  private buildSubSessionRecap(sessionKey: string): string {
+    const live = this.pool.getSession(sessionKey);
+    if (live && live.status !== "closed" && live.status !== "error") return "";
+    const history = this.getMessages({ streamKey: `sub:${sessionKey}` }).filter(
+      (m) => m.role !== "system" && m.status !== "streaming" && m.text.trim(),
+    );
+    if (history.length === 0) return "";
+    const lines: string[] = [];
+    let used = 0;
+    let omitted = 0;
+    for (let i = history.length - 1; i >= 0; i--) {
+      const m = history[i]!;
+      const text = m.text.trim();
+      const clipped =
+        text.length > SUB_RECAP_MESSAGE_CHARS
+          ? `${text.slice(0, SUB_RECAP_MESSAGE_CHARS * 0.6)}\n[... ${text.length - SUB_RECAP_MESSAGE_CHARS} characters omitted ...]\n${text.slice(-SUB_RECAP_MESSAGE_CHARS * 0.4)}`
+          : text;
+      const line = `[${m.role === "assistant" ? "Your reply" : "Request"}]\n${clipped}`;
+      if (used + line.length > SUB_RECAP_MAX_CHARS && lines.length > 0) {
+        omitted = i + 1;
+        break;
+      }
+      lines.unshift(line);
+      used += line.length;
+    }
+    return [
+      "<previous_session>",
+      "This sub-session was closed while it was not in use and has just been started again, so you have no memory of it. Here is what was said in it before, oldest first. Files you changed then are still on disk.",
+      ...(omitted > 0 ? [`[${omitted} earlier message(s) omitted]`] : []),
+      lines.join("\n\n"),
+      "</previous_session>",
+      "",
+      "",
+    ].join("\n");
+  }
+
   /** Closes every live session of a task group (their records stay, marked closed). */
   private closeGroupSessions(groupId: string): void {
     for (const session of this.pool.listSessions()) {
@@ -939,6 +1036,9 @@ export class AgentHubServer {
     }
     if (patch.workflowParallel !== undefined) {
       this.settings.workflowParallel = clampWorkflowParallel(patch.workflowParallel);
+    }
+    if (patch.idleSubSessionMinutes !== undefined) {
+      this.settings.idleSubSessionMinutes = clampIdleSubMinutes(patch.idleSubSessionMinutes);
     }
     try {
       fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
@@ -2014,6 +2114,7 @@ export class AgentHubServer {
       tasks: [...this.tasks.values()],
       pendingPermissions: this.pool.getPendingPermissions(),
       pendingQuestions: this.listPendingQuestions(),
+      memory: this.memory.get(),
       ledger,
       messages: this.getMessages(),
       artifacts: this.listArtifacts(),
@@ -2624,7 +2725,9 @@ export class AgentHubServer {
     if (!effectiveUserPrompt) {
       throw new Error("请输入消息内容，或至少附带一张图片或一个文件");
     }
-    const promptForAgent = `${input.steer ? STEER_PREFIX : ""}${effectiveUserPrompt}${buildAttachedFilesBlock(savedFiles)}`;
+    // Built before this turn's messages are stored, so it holds only what came earlier.
+    const recap = this.buildSubSessionRecap(session.sessionKey);
+    const promptForAgent = `${recap}${input.steer ? STEER_PREFIX : ""}${effectiveUserPrompt}${buildAttachedFilesBlock(savedFiles)}`;
 
     const streamKey = `sub:${session.sessionKey}`;
     const now = Date.now();
@@ -2675,6 +2778,7 @@ export class AgentHubServer {
           localPath,
         })),
         rawUserPrompt: effectiveUserPrompt,
+        handoffTokens: recap ? estimateTokens(recap) : 0,
         injectSharedResources: true,
         isolateWorktree: session.isWorktree,
         callDepth: 1,
@@ -2701,7 +2805,7 @@ export class AgentHubServer {
         sessionKey: result.sessionKey,
         role: session.role,
         agent: session.agent,
-        handoffTokens: 0,
+        handoffTokens: recap ? estimateTokens(recap) : 0,
         injectedTokens: result.injectedTokens,
         usage: result.usage,
       });
@@ -2784,7 +2888,8 @@ export class AgentHubServer {
     const target = this.resolvePeerTarget(body);
     // Every delegated session starts from the task's shared context: the common section,
     // whatever this call asked for, and an index of the rest.
-    const contextPrefix = this.taskContext.buildPrefix(target.groupId, want);
+    const contextPrefix =
+      this.buildSubSessionRecap(target.targetSessionKey) + this.taskContext.buildPrefix(target.groupId, want);
     const group = this.groups.get(target.groupId)!;
     const taskId = `task-${randomUUID().slice(0, 8)}`;
     const now = Date.now();
@@ -3180,6 +3285,7 @@ export class AgentHubServer {
           url: this.url,
           port: this.port,
           desktopMode: this.desktopMode,
+          memory: this.memory.get(),
           baseCwd: this.baseCwd,
           defaultGroupId: this.defaultGroupId,
           leadAgent: this.getLeadAgent(groupId),
@@ -3667,7 +3773,11 @@ export class AgentHubServer {
 
       if (method === "POST" && pathname === "/api/settings") {
         const input = z
-          .object({ autoTitle: z.boolean().optional(), workflowParallel: z.number().optional() })
+          .object({
+            autoTitle: z.boolean().optional(),
+            workflowParallel: z.number().optional(),
+            idleSubSessionMinutes: z.number().optional(),
+          })
           .parse(await readJsonBody(req));
         sendJson(res, 200, { ok: true, settings: this.updateSettings(input) });
         return;
@@ -3871,6 +3981,9 @@ export class AgentHubServer {
     this.port = boundPort;
     this.url = `http://127.0.0.1:${boundPort}`;
     this.pool.setHubUrl(this.url);
+    this.memory.start();
+    this.idleSweepTimer = setInterval(() => this.sweepIdleSubSessions(), 60_000);
+    this.idleSweepTimer.unref();
 
     if (this.writeRuntimeFile) {
       fs.mkdirSync(path.dirname(RUNTIME_FILE), { recursive: true });
@@ -3893,6 +4006,11 @@ export class AgentHubServer {
   }
 
   async stop(): Promise<void> {
+    this.memory.stop();
+    if (this.idleSweepTimer) {
+      clearInterval(this.idleSweepTimer);
+      this.idleSweepTimer = undefined;
+    }
     if (this.autoExitTimer) {
       clearTimeout(this.autoExitTimer);
       this.autoExitTimer = undefined;

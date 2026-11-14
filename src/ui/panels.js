@@ -743,9 +743,23 @@ async function wfSave(groupId) {
   return workflow;
 }
 
+// 内存紧张时发布工作流要先问一句：这正是把后端拖垮的场景
+async function wfConfirmMemory() {
+  const mem = app.getMemoryStatus ? app.getMemoryStatus() : { level: "ok" };
+  if (mem.level === "ok") return true;
+  const gb = mem.availableMB !== undefined ? (mem.availableMB / 1024).toFixed(1) : "?";
+  return app.showConfirmModal({
+    title: "可用内存不多了",
+    message: `系统可用内存只剩约 ${gb} GB。每个运行中的步骤都要启动一组 Agent 进程，内存耗尽时后端可能被系统终止。现在发布的话，步骤会一次只跑一个。建议先关掉不用的程序。`,
+    confirmText: "仍然发布",
+    cancelText: "先不发布",
+  });
+}
+
 async function wfRunAction(groupId, action) {
   try {
     if (action === "save") await wfSave(groupId);
+    else if ((action === "run" || action === "resume") && !(await wfConfirmMemory())) return;
     else if (action === "run") {
       await wfSave(groupId);
       await wfPost("/api/workflows/run", { groupId });
