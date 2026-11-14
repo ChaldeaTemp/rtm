@@ -10,16 +10,37 @@ const PANEL_STATE = {
   previewCache: new Map(),
   loadingResources: false,
   syncNotice: "",
+  resourcesCwd: "",
+  resourcesGroupId: "",
 };
+
+function getResourceScope() {
+  const groupId = app?.STATE?.activeGroupId || "";
+  const cwd = (groupId ? app?.STATE?.taskGroups?.get(groupId)?.cwd : "") || "";
+  return { groupId, cwd };
+}
+
+function buildResourceQuery(extra = {}) {
+  const { groupId, cwd } = getResourceScope();
+  const params = new URLSearchParams();
+  if (cwd) params.set("cwd", cwd);
+  if (groupId) params.set("groupId", groupId);
+  for (const [k, v] of Object.entries(extra)) {
+    if (v !== undefined && v !== null && v !== "") params.set(k, String(v));
+  }
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
+}
 
 async function fetchResources() {
   if (PANEL_STATE.loadingResources) return;
   PANEL_STATE.loadingResources = true;
   try {
-    // 规则和技能按目录不同而不同：看的是当前任务所在的项目
-    const activeCwd = app.STATE.taskGroups.get(app.STATE.activeGroupId)?.cwd || "";
-    PANEL_STATE.resourcesCwd = activeCwd;
-    const res = await fetch(`/api/resources${activeCwd ? `?cwd=${encodeURIComponent(activeCwd)}` : ""}`);
+    // 规则和技能按项目目录隔离，带上当前任务的 cwd 与 groupId
+    const { groupId, cwd } = getResourceScope();
+    PANEL_STATE.resourcesCwd = cwd;
+    PANEL_STATE.resourcesGroupId = groupId;
+    const res = await fetch(`/api/resources${buildResourceQuery()}`);
     const data = await res.json();
     if (data.ok) {
       app.STATE.resourcesList = data.resources || [];
@@ -38,10 +59,16 @@ async function fetchResources() {
 
 async function toggleResource(id, enabled) {
   try {
+    const { groupId, cwd } = getResourceScope();
     const res = await fetch("/api/resources/toggle", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, enabled }),
+      body: JSON.stringify({
+        id,
+        enabled,
+        cwd: cwd || undefined,
+        groupId: groupId || undefined,
+      }),
     });
     const data = await res.json();
     if (data.ok) {
@@ -57,10 +84,17 @@ async function toggleResource(id, enabled) {
 
 async function saveCustomRule(name, scope, content) {
   try {
+    const { groupId, cwd } = getResourceScope();
     const res = await fetch("/api/resources/rules", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, scope, content }),
+      body: JSON.stringify({
+        name,
+        scope,
+        content,
+        cwd: cwd || undefined,
+        groupId: groupId || undefined,
+      }),
     });
     const data = await res.json();
     if (data.ok) {
@@ -80,10 +114,15 @@ async function saveCustomRule(name, scope, content) {
 
 async function deleteCustomRule(id) {
   try {
+    const { groupId, cwd } = getResourceScope();
     const res = await fetch("/api/resources/rules/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
+      body: JSON.stringify({
+        id,
+        cwd: cwd || undefined,
+        groupId: groupId || undefined,
+      }),
     });
     const data = await res.json();
     if (data.ok) {
@@ -100,7 +139,15 @@ async function deleteCustomRule(id) {
 
 async function syncProjectRuleFiles() {
   try {
-    const res = await fetch("/api/resources/sync-project", { method: "POST" });
+    const { groupId, cwd } = getResourceScope();
+    const res = await fetch("/api/resources/sync-project", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cwd: cwd || undefined,
+        groupId: groupId || undefined,
+      }),
+    });
     const data = await res.json();
     if (data.ok) {
       const names = (data.updatedFiles || []).map((p) => p.split(/[\\/]/).pop()).join(", ");
@@ -120,15 +167,17 @@ async function togglePreviewResource(id) {
     return;
   }
   PANEL_STATE.expandedId = id;
-  if (!PANEL_STATE.previewCache.has(id)) {
+  const { cwd } = getResourceScope();
+  const cacheKey = `${cwd}::${id}`;
+  if (!PANEL_STATE.previewCache.has(cacheKey)) {
     try {
-      const res = await fetch(`/api/resources/content?id=${encodeURIComponent(id)}`);
+      const res = await fetch(`/api/resources/content${buildResourceQuery({ id })}`);
       const data = await res.json();
       if (data.ok) {
-        PANEL_STATE.previewCache.set(id, data.content || "");
+        PANEL_STATE.previewCache.set(cacheKey, data.content || "");
       }
     } catch {
-      PANEL_STATE.previewCache.set(id, "(读取内容失败)");
+      PANEL_STATE.previewCache.set(cacheKey, "(读取内容失败)");
     }
   }
   renderResourcesPanel();
@@ -203,13 +252,16 @@ function renderResourcesPanel() {
       </form>`
     : "";
 
+  const { cwd: previewCwd } = getResourceScope();
   const rowsHtml =
     filtered.length === 0
       ? `<div class="empty-note">当前筛选条件下没有匹配的规则或技能。</div>`
       : filtered
           .map((item) => {
             const isExpanded = PANEL_STATE.expandedId === item.id;
-            const previewText = isExpanded ? PANEL_STATE.previewCache.get(item.id) || "加载中..." : "";
+            const previewText = isExpanded
+              ? PANEL_STATE.previewCache.get(`${previewCwd}::${item.id}`) || "加载中..."
+              : "";
             const canDelete = item.origin === "hub-project" || item.origin === "hub-global";
             const covHtml = covAgents
               .map((ag) => {
@@ -607,9 +659,92 @@ const WF_STATE = {
   drafts: new Map(), // groupId -> { steps, baseUpdatedAt, dirty, version }
   ctxDrafts: new Map(), // groupId -> { common, sections, stamp, dirty, version }
   ctxOpen: false, // 共享上下文区域是否展开
+  zoom: 1, // 流程画布缩放比例 (0.6 - 1.6)
   lastSignature: "",
   selectedId: null, // 明细浮窗当前对着的步骤
 };
+
+function buildWorkflowTemplateSteps(templateKey, agents, leadAgent) {
+  const pool = (Array.isArray(agents) ? agents : []).filter((a) => a.available !== false);
+  const all = pool.length > 0 ? pool : agents || [];
+  const primary = all[0]?.agent || leadAgent || "claude";
+  const secondary = all.find((a) => a.agent !== primary)?.agent || primary;
+  const third = all.find((a) => a.agent !== primary && a.agent !== secondary)?.agent || leadAgent || primary;
+
+  if (templateKey === "impl-review") {
+    return [
+      {
+        id: "step1",
+        name: "方案设计与实现",
+        agent: primary,
+        prompt: "阅读需求与现有代码结构，完成核心实现改动并自行运行基础检查。",
+        dependsOn: [],
+        isolateWorktree: false,
+        contextRefs: [],
+      },
+      {
+        id: "step2",
+        name: "代码审查与测试补充",
+        agent: secondary,
+        prompt: "基于前一步改动结果审查边界条件、错误处理与回归风险，并补充或运行验证测试。",
+        dependsOn: ["step1"],
+        isolateWorktree: false,
+        contextRefs: [],
+      },
+    ];
+  }
+  if (templateKey === "parallel-research") {
+    return [
+      {
+        id: "step1",
+        name: "代码现状调研",
+        agent: primary,
+        prompt: "梳理相关模块现有实现、调用链路及历史约束，输出带文件路径与行号的调研结论。",
+        dependsOn: [],
+        isolateWorktree: false,
+        contextRefs: [],
+      },
+      {
+        id: "step2",
+        name: "方案与风险评估",
+        agent: secondary,
+        prompt: "从性能、兼容性与可测试性维度分析可选改造路径并指出潜在风险点。",
+        dependsOn: [],
+        isolateWorktree: false,
+        contextRefs: [],
+      },
+      {
+        id: "step3",
+        name: "汇总结论与行动清单",
+        agent: third,
+        prompt: "结合前两步的调研与评估结果，给出可执行的设计方案和分步实施清单。",
+        dependsOn: ["step1", "step2"],
+        isolateWorktree: false,
+        contextRefs: [],
+      },
+    ];
+  }
+  return [
+    {
+      id: "step1",
+      name: "Worktree 隔离改动",
+      agent: primary,
+      prompt: "在独立 git worktree 中完成代码修改并提交本地检查结果。",
+      dependsOn: [],
+      isolateWorktree: true,
+      contextRefs: [],
+    },
+    {
+      id: "step2",
+      name: "回归测试与验收",
+      agent: secondary,
+      prompt: "核对工作区变更摘要并执行全量构建、类型检查与关键回归测试。",
+      dependsOn: ["step1"],
+      isolateWorktree: false,
+      contextRefs: [],
+    },
+  ];
+}
 
 const WF_STEP_STATUS_TEXT = {
   draft: "草稿",
@@ -763,8 +898,14 @@ async function wfRunAction(groupId, action) {
     else if (action === "run") {
       await wfSave(groupId);
       await wfPost("/api/workflows/run", { groupId });
-    } else if (action === "resume") await wfPost("/api/workflows/resume", { groupId });
-    else if (action === "cancel") await wfPost("/api/workflows/cancel", { groupId });
+    } else if (action === "retry") {
+      await wfSaveContext(groupId);
+      const curDraft = wfDraft(groupId);
+      if (curDraft.dirty) await wfSave(groupId);
+      await wfPost("/api/workflows/retry", { groupId });
+    } else if (action === "resume") {
+      await wfPost("/api/workflows/resume", { groupId });
+    } else if (action === "cancel") await wfPost("/api/workflows/cancel", { groupId });
   } catch (err) {
     await app.showConfirmModal({ title: "工作流没有执行", message: err.message, confirmText: "知道了" });
   }
@@ -792,11 +933,28 @@ async function wfAskLeadToDraft(group) {
 }
 
 // 流程图布局：按「离起点有几层依赖」分列，从左到右；同一列里自上而下排
-const WF_NODE_W = 208;
-const WF_NODE_H = 58;
+const WF_NODE_W = 228;
+const WF_NODE_H = 72;
 const WF_COL_GAP = 64;
-const WF_ROW_GAP = 14;
-const WF_PAD = 16;
+const WF_ROW_GAP = 16;
+const WF_PAD = 18;
+
+function wfGetStepOutputPreview(groupId, stepId, sessionKey) {
+  const resultSec = wfServerContext(groupId).sections.find(
+    (s) => s.kind === "result" && s.key === `result:${stepId}`,
+  );
+  if (resultSec && resultSec.content && resultSec.content.trim()) {
+    return resultSec.content.trim();
+  }
+  if (!sessionKey) return "";
+  const stream = app.STATE.messagesByStream?.get(`sub:${sessionKey}`) || [];
+  for (let i = stream.length - 1; i >= 0; i--) {
+    if (stream[i].role === "assistant" && stream[i].text && stream[i].text.trim()) {
+      return stream[i].text.trim();
+    }
+  }
+  return "";
+}
 
 function wfLayout(steps) {
   const depths = wfDepths(steps);
@@ -931,6 +1089,13 @@ function wfOpenPopover(ctx, stepId) {
         : `<label class="wf-check"><input type="checkbox" data-wf-field="isolateWorktree" ${step.isolateWorktree ? "checked" : ""} />在独立的 git worktree 里改动</label>`
     }
     ${live?.error && (running || showResults) ? `<div class="wf-error">${esc(live.error)}</div>` : ""}
+    ${(() => {
+      if (!(running || showResults) || !live?.sessionKey) return "";
+      const outText = wfGetStepOutputPreview(group.groupId, step.id, live.sessionKey);
+      if (!outText) return "";
+      const clipped = outText.length > 1600 ? `${outText.slice(0, 1600)}\n...(更多内容请点「查看会话」)` : outText;
+      return `<details class="wf-pop-result"><summary>步骤输出预览（${outText.length} 字）</summary><pre class="wf-pop-result-pre">${esc(clipped)}</pre></details>`;
+    })()}
     <div class="wf-pop-foot">
       ${readonly ? "<span></span>" : '<button type="button" class="alma-btn alma-btn-danger alma-btn-sm" id="wfPopRemove">删除这一步</button>'}
       ${live?.sessionKey && (running || showResults) ? '<button type="button" class="alma-btn alma-btn-outline alma-btn-sm" id="wfPopOpen">查看会话</button>' : ""}
@@ -1061,12 +1226,16 @@ function renderWorkflowPanel() {
     WF_STATE.ctxOpen,
   ].join("|");
   if (signature === WF_STATE.lastSignature && container.childElementCount > 0) return;
+  // 流程图：按当前缩放比例和步骤依赖重算节点与连线
   WF_STATE.lastSignature = signature;
 
   const steps = running ? server.steps : draft.steps;
   const serverById = new Map(server.steps.map((s) => [s.id, s]));
   const showResults = !running && !draft.dirty && (server.status === "completed" || server.status === "failed");
   const statusOf = (step) => (running || showResults ? serverById.get(step.id)?.status || "draft" : "draft");
+  const hasRetryableSteps =
+    !running &&
+    server.steps.some((s) => s.status === "failed" || s.status === "cancelled" || s.status === "skipped");
 
   const doneCount = server.steps.filter((s) => s.status === "completed").length;
   const statusLine = running
@@ -1139,6 +1308,7 @@ function renderWorkflowPanel() {
   const edges = [];
   for (const step of steps) {
     const to = layout.pos.get(step.id);
+    const toStatus = statusOf(step);
     for (const dep of step.dependsOn) {
       const from = layout.pos.get(dep);
       if (!from || !to) continue;
@@ -1147,9 +1317,12 @@ function renderWorkflowPanel() {
       const x2 = to.x;
       const y2 = to.y + WF_NODE_H / 2;
       const mid = (x1 + x2) / 2;
-      const done = statusOf(steps.find((s) => s.id === dep)) === "completed";
+      const depStatus = statusOf(steps.find((s) => s.id === dep));
+      const isDone = depStatus === "completed";
+      const isActive = isDone && toStatus === "running";
+      const edgeCls = isActive ? "wf-edge active" : isDone ? "wf-edge done" : "wf-edge";
       edges.push(
-        `<path class="wf-edge${done ? " done" : ""}" d="M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}" marker-end="url(#wfArrow)" />`,
+        `<path class="${edgeCls}" d="M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}" marker-end="url(#wfArrow)" />`,
       );
     }
   }
@@ -1166,12 +1339,16 @@ function renderWorkflowPanel() {
           </span>
           <span class="wf-node-bottom">
             ${app.agentTagHtml ? app.agentTagHtml(step.agent) : esc(step.agent)}
-            <span class="wf-node-status">${running || showResults ? esc(WF_STEP_STATUS_TEXT[status] || status) : step.prompt.trim() ? "" : "还没写任务"}</span>
+            <span class="wf-node-status">${running || showResults ? esc(WF_STEP_STATUS_TEXT[status] || status) : step.prompt.trim() ? (step.isolateWorktree ? "worktree" : "") : "还没写任务"}</span>
           </span>
         </button>`;
     })
     .join("");
 
+  const zoom = Math.min(1.6, Math.max(0.6, Number(WF_STATE.zoom) || 1));
+  const zoomPct = Math.round(zoom * 100);
+  const scaledW = Math.round(layout.width * zoom);
+  const scaledH = Math.round(layout.height * zoom);
   const scrollPrev = container.querySelector(".wf-canvas-wrap");
   const prevScroll = scrollPrev ? { left: scrollPrev.scrollLeft, top: scrollPrev.scrollTop } : null;
 
@@ -1189,7 +1366,7 @@ function renderWorkflowPanel() {
                <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" id="wfAskLeadBtn" title="主导把目标拆成几步并存成草稿，不会直接执行">让 ${esc(group.leadAgent)} 起草</button>`
         }
       </div>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${
           running
             ? `<button type="button" class="alma-btn alma-btn-danger alma-btn-sm" id="wfCancelBtn">停止</button>`
@@ -1198,7 +1375,8 @@ function renderWorkflowPanel() {
                  canResume
                    ? `<button type="button" class="alma-btn alma-btn-outline alma-btn-sm" id="wfRunBtn" title="所有步骤从头再跑一遍，已完成的结果会丢弃">全部重跑</button>
                       <button type="button" class="alma-btn alma-btn-primary alma-btn-sm" id="wfResumeBtn" title="保留已完成的步骤和结果，只跑没完成的">继续未完成的 ${unfinishedCount} 步</button>`
-                   : `<button type="button" class="alma-btn alma-btn-primary alma-btn-sm" id="wfRunBtn" ${steps.length === 0 ? "disabled" : ""}>发布</button>`
+                   : `${hasRetryableSteps ? '<button type="button" class="alma-btn alma-btn-outline alma-btn-sm" id="wfRetryBtn" title="保留已完成步骤的结果，重跑失败或未完成步骤">重试未完成步骤</button>' : ""}
+                      <button type="button" class="alma-btn alma-btn-primary alma-btn-sm" id="wfRunBtn" ${steps.length === 0 ? "disabled" : ""}>发布</button>`
                }`
         }
       </div>
@@ -1206,18 +1384,44 @@ function renderWorkflowPanel() {
     ${ctxHtml}
     ${
       steps.length === 0
-        ? `<div class="empty-note">还没有步骤。添加几步交给子会话的任务，设好先后顺序，再点「发布」；或者让 ${esc(group.leadAgent)} 先起草。<br />没有依赖关系的步骤会同时开始，后一步能拿到它所依赖步骤的结果。</div>`
-        : `<div class="wf-canvas-wrap">
-             <div class="wf-canvas" style="width:${layout.width}px;height:${layout.height}px">
-               <svg class="wf-edges" width="${layout.width}" height="${layout.height}">
-                 <defs>
-                   <marker id="wfArrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
-                     <path d="M0,0 L8,4 L0,8 z" class="wf-arrow" />
-                   </marker>
-                 </defs>
-                 ${edges.join("")}
-               </svg>
-               ${nodes}
+        ? `<div class="empty-note">还没有步骤。添加几步交给子会话的任务，或点下方模板快速起步；也可以让 ${esc(group.leadAgent)} 先起草。
+            <div class="wf-templates">
+              <button type="button" class="wf-tpl-card" data-wf-tpl="impl-review">
+                <span class="wf-tpl-title">代码实现 + 审查</span>
+                <span class="wf-tpl-desc">Agent A 实现功能与基础检查，Agent B 接力审查边界与补充测试</span>
+              </button>
+              <button type="button" class="wf-tpl-card" data-wf-tpl="parallel-research">
+                <span class="wf-tpl-title">并行调研汇总</span>
+                <span class="wf-tpl-desc">两位 Agent 并行做现状调研与风险评估，最后汇聚输出结论</span>
+              </button>
+              <button type="button" class="wf-tpl-card" data-wf-tpl="worktree-verify">
+                <span class="wf-tpl-title">隔离修改 + 验证</span>
+                <span class="wf-tpl-desc">在独立 git worktree 中改动代码，完成后由另一步做回归验证</span>
+              </button>
+            </div>
+          </div>`
+        : `<div class="wf-canvas-shell">
+             <div class="wf-zoom-bar">
+               <button type="button" class="wf-zoom-btn" data-wf-zoom="out" title="缩小">-</button>
+               <span class="wf-zoom-label" id="wfZoomLabel">${zoomPct}%</span>
+               <button type="button" class="wf-zoom-btn" data-wf-zoom="in" title="放大">+</button>
+               <button type="button" class="wf-zoom-btn" data-wf-zoom="reset" title="恢复 100%">100%</button>
+               <button type="button" class="wf-zoom-btn" data-wf-zoom="fit" title="适应画布宽度">适应</button>
+             </div>
+             <div class="wf-canvas-wrap">
+               <div class="wf-canvas-sizer" style="width:${scaledW}px;height:${scaledH}px">
+                 <div class="wf-canvas" style="width:${layout.width}px;height:${layout.height}px;transform:scale(${zoom})">
+                   <svg class="wf-edges" width="${layout.width}" height="${layout.height}">
+                     <defs>
+                       <marker id="wfArrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+                         <path d="M0,0 L8,4 L0,8 z" class="wf-arrow" />
+                       </marker>
+                     </defs>
+                     ${edges.join("")}
+                   </svg>
+                   ${nodes}
+                 </div>
+               </div>
              </div>
            </div>
            <div class="ctx-faint">从左到右执行，同一列的步骤同时进行。点一个步骤看明细${running ? "" : "或修改"}。</div>`
@@ -1328,11 +1532,44 @@ function renderWorkflowPanel() {
     wfClosePopover();
     void wfRunAction(groupId, "run");
   });
+  bind("wfRetryBtn", () => {
+    wfClosePopover();
+    void wfRunAction(groupId, "retry");
+  });
   bind("wfResumeBtn", () => {
     wfClosePopover();
     void wfRunAction(groupId, "resume");
   });
   bind("wfCancelBtn", () => void wfRunAction(groupId, "cancel"));
+
+  container.querySelectorAll("[data-wf-tpl]").forEach((btn) => {
+    btn.onclick = () => {
+      draft.steps = buildWorkflowTemplateSteps(btn.dataset.wfTpl, agents, group.leadAgent);
+      wfTouch(draft, true);
+      WF_STATE.selectedId = draft.steps[0]?.id || null;
+      WF_STATE.lastSignature = "";
+      renderWorkflowPanel();
+    };
+  });
+
+  container.querySelectorAll("[data-wf-zoom]").forEach((btn) => {
+    btn.onclick = () => {
+      const mode = btn.dataset.wfZoom;
+      const cur = Number(WF_STATE.zoom) || 1;
+      if (mode === "in") {
+        WF_STATE.zoom = Math.min(1.6, Number((cur + 0.15).toFixed(2)));
+      } else if (mode === "out") {
+        WF_STATE.zoom = Math.max(0.6, Number((cur - 0.15).toFixed(2)));
+      } else if (mode === "fit" && wrap) {
+        const avail = Math.max(240, wrap.clientWidth - 16);
+        WF_STATE.zoom = Math.min(1, Math.max(0.6, Number((avail / Math.max(1, layout.width)).toFixed(2))));
+      } else {
+        WF_STATE.zoom = 1;
+      }
+      WF_STATE.lastSignature = "";
+      renderWorkflowPanel();
+    };
+  });
 
   container.querySelectorAll("[data-wf-node]").forEach((node) => {
     node.onclick = (e) => {
@@ -1367,14 +1604,22 @@ document.addEventListener("keydown", (e) => {
 
 if (app) {
   app.onStateChange = () => {
-    if (app.STATE.stageView === "resources") {
-      const activeCwd = app.STATE.taskGroups.get(app.STATE.activeGroupId)?.cwd || "";
-      if (app.STATE.resourcesList.length === 0 || PANEL_STATE.resourcesCwd !== activeCwd) {
+    const activeGroup = app.STATE.taskGroups.get(app.STATE.activeGroupId);
+    const activeGroupId = activeGroup?.groupId || "";
+    const activeCwd = activeGroup?.cwd || "";
+    const scopeChanged =
+      PANEL_STATE.resourcesGroupId !== activeGroupId || PANEL_STATE.resourcesCwd !== activeCwd;
+
+    if (scopeChanged) {
+      void fetchResources();
+    } else if (app.STATE.stageView === "resources") {
+      if (app.STATE.resourcesList.length === 0) {
         void fetchResources();
       } else {
         renderResourcesPanel();
       }
-    } else if (app.STATE.stageView === "telemetry") {
+    }
+    if (app.STATE.stageView === "telemetry") {
       renderTelemetryPanel();
     } else if (app.STATE.stageView === "workflow") {
       renderWorkflowPanel();

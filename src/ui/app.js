@@ -1,3 +1,15 @@
+import {
+  renderMarkdown,
+  highlightCode,
+  renderUnifiedDiff,
+  computeDiffStats,
+  buildInlinePreviewSrcdoc,
+  decodeUtf8Base64,
+  partitionMessagesForDisplay,
+  isFailedAssistantMsg,
+  isPureErrorAssistantMsg,
+} from "./markdown.js";
+
 const STATE = {
   defaultGroupId: "grp-default",
   baseCwd: "",
@@ -53,13 +65,12 @@ const BUILTIN_FALLBACK_AGENTS = [
 const els = {
   appFavicon: document.getElementById("appFavicon"),
   workbench: document.getElementById("workbench"),
+  inspectorBackdrop: document.getElementById("inspectorBackdrop"),
   wsDot: document.getElementById("wsDot"),
-  wsText: document.getElementById("wsText"),
   portBadge: document.getElementById("portBadge"),
   cwdPill: document.getElementById("cwdPill"),
   pickCwdBtn: document.getElementById("pickCwdBtn"),
   toggleNewTaskBtn: document.getElementById("toggleNewTaskBtn"),
-  quickLaunchRow: document.getElementById("quickLaunchRow"),
   newTaskPopover: document.getElementById("newTaskPopover"),
   newTaskTitleInput: document.getElementById("newTaskTitleInput"),
   newTaskCwdInput: document.getElementById("newTaskCwdInput"),
@@ -70,7 +81,6 @@ const els = {
   groupSearchInput: document.getElementById("groupSearchInput"),
   toggleArchivedBtn: document.getElementById("toggleArchivedBtn"),
   groupList: document.getElementById("groupList"),
-  adapterPills: document.getElementById("adapterPills"),
   themeToggleBtn: document.getElementById("themeToggleBtn"),
   quitHubBtn: document.getElementById("quitHubBtn"),
   navResBadge: document.getElementById("navResBadge"),
@@ -95,6 +105,7 @@ const els = {
   messages: document.getElementById("messages"),
   composerBox: document.querySelector(".composer-box"),
   composerLabel: document.getElementById("composerLabel"),
+  composerSuggest: document.getElementById("composerSuggest"),
   composerAttachments: document.getElementById("composerAttachments"),
   promptInput: document.getElementById("promptInput"),
   modelSelect: document.getElementById("modelSelect"),
@@ -102,7 +113,6 @@ const els = {
   refreshModelsBtn: document.getElementById("refreshModelsBtn"),
   imageFileInput: document.getElementById("imageFileInput"),
   attachImageBtn: document.getElementById("attachImageBtn"),
-  composerHint: document.getElementById("composerHint"),
   stopSessionBtn: document.getElementById("stopSessionBtn"),
   steerBtn: document.getElementById("steerBtn"),
   composerQueue: document.getElementById("composerQueue"),
@@ -290,23 +300,6 @@ function renderAgentControls() {
     els.navAgentsBadge.textContent = String(enabled.length);
   }
 
-  if (els.quickLaunchRow) {
-    els.quickLaunchRow.innerHTML = "";
-    for (const item of enabled) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "quick-btn";
-      btn.dataset.quickLead = item.agent;
-      applyAgentColorVar(btn, item.agent);
-      btn.textContent = `+ ${item.label || item.agent}`;
-      btn.title = `以 ${item.label || item.agent} 为主导，新建一个并行任务`;
-      btn.onclick = () => {
-        void createTaskGroup({ leadAgent: item.agent });
-      };
-      els.quickLaunchRow.appendChild(btn);
-    }
-  }
-
   if (els.newTaskAgents) {
     els.newTaskAgents.innerHTML = "";
     for (const item of enabled) {
@@ -327,27 +320,6 @@ function renderAgentControls() {
   }
 
   renderLeadBadge(getActiveGroup());
-
-  if (els.adapterPills) {
-    els.adapterPills.innerHTML = "";
-    for (const item of enabled) {
-      const pill = document.createElement("span");
-      pill.className = "adapter-pill";
-      pill.dataset.adapter = item.agent;
-      applyAgentColorVar(pill, item.agent);
-      pill.title = item.authReady
-        ? `${item.agent}: 已就绪`
-        : item.authHint || item.reason || `${item.agent}: 未就绪`;
-      const dot = document.createElement("span");
-      dot.className = "dot";
-      dot.dataset.authDot = item.agent;
-      if (!item.available) dot.classList.add("down");
-      else if (item.authReady) dot.classList.add("ready");
-      pill.appendChild(dot);
-      pill.appendChild(document.createTextNode(item.agent));
-      els.adapterPills.appendChild(pill);
-    }
-  }
 }
 
 function setStageView(view) {
@@ -384,131 +356,6 @@ function setStageView(view) {
 function shouldShowSessionTabs() {
   const group = getActiveGroup();
   return Boolean(group && getGroupSubSessions(group.groupId).length > 0);
-}
-
-function renderInlineMarkdown(escapedText) {
-  let s = escapedText;
-  const codeSpans = [];
-  s = s.replace(/`([^`]+)`/g, (_m, code) => {
-    const idx = codeSpans.length;
-    codeSpans.push(`<code>${code}</code>`);
-    return `@@CSPAN${idx}@@`;
-  });
-  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  s = s.replace(/__([^_]+)__/g, "<strong>$1</strong>");
-  s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
-  s = s.replace(
-    /\[([^\]]+)\]\((https?:\/\/[^\s)]+|file:\/\/\/[^\s)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
-  );
-  s = s.replace(/@@CSPAN(\d+)@@/g, (_m, idx) => codeSpans[Number(idx)] || "");
-  return s;
-}
-
-function buildInlinePreviewSrcdoc(lang, rawCode) {
-  if (lang === "mermaid") {
-    // 预览在沙箱 iframe 里，脚本要用完整地址从 hub 自己取，不走外网
-    const escaped = rawCode.replace(/&/g, "&amp;").replace(/</g, "&lt;");
-    return `<!doctype html><html><head><meta charset="utf-8" /><style>body{margin:0;padding:12px;background:#fff;font-family:"Microsoft YaHei",system-ui,sans-serif;font-size:13px}#o{text-align:center;overflow:auto}#o svg{max-width:100%;height:auto}.e{color:#b42318}</style></head><body><div id="o"></div><pre id="s" hidden>${escaped}</pre><script src="${location.origin}/ui/vendor/mermaid.min.js"></scr` + `ipt><script>(async function(){var s=document.getElementById("s"),o=document.getElementById("o");try{mermaid.initialize({startOnLoad:false,securityLevel:"strict",theme:"neutral"});o.innerHTML=(await mermaid.render("g",s.textContent)).svg;}catch(e){o.innerHTML='<div class="e">这段 Mermaid 没能渲染：'+String(e&&e.message?e.message:e).replace(/</g,"&lt;")+'</div>';s.hidden=false;}})();</scr` + `ipt></body></html>`;
-  }
-  const isSvg = lang === "svg";
-  const body = isSvg
-    ? `<div style="display:flex;align-items:center;justify-content:center;min-height:180px;">${rawCode}</div>`
-    : rawCode;
-  if (!isSvg && /<html[\s>]/i.test(rawCode)) {
-    return rawCode;
-  }
-  return `<!doctype html><html><head><meta charset="utf-8" /><style>*{box-sizing:border-box}body{margin:0;padding:12px;background:#f3f2ec;color:#151514;font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;font-size:13px;line-height:1.5}</style></head><body>${body}</body></html>`;
-}
-
-function renderMarkdown(raw) {
-  const src = String(raw || "");
-  if (!src.trim()) return "";
-
-  const codeBlocks = [];
-  const withPlaceholders = src.replace(/```([a-zA-Z0-9_-]*)\r?\n([\s\S]*?)```/g, (_m, lang, code) => {
-    const idx = codeBlocks.length;
-    const lowerLang = (lang || "").trim().toLowerCase();
-    const cleanLang = escapeHtml(lang || "text");
-    const rawCode = code.replace(/\n$/, "");
-    const cleanCode = escapeHtml(rawCode);
-    const canPreview =
-      (lowerLang === "html" || lowerLang === "svg" || lowerLang === "mermaid") && rawCode.trim().length > 0;
-    if (canPreview) {
-      const srcdocAttr = escapeHtml(buildInlinePreviewSrcdoc(lowerLang, rawCode));
-      codeBlocks.push(
-        `<div class="md-code-wrap"><div class="md-code-head"><span>${cleanLang} · 交互预览</span><div style="display:flex;gap:6px"><button type="button" class="copy-code-btn inline-preview-toggle active" data-toggle-inline-preview="${idx}">源码/预览</button><button type="button" class="copy-code-btn" data-copy-code="${idx}">复制</button></div></div><div class="inline-preview-box" data-inline-preview="${idx}"><iframe class="artifact-frame" sandbox="allow-scripts" style="height:260px" srcdoc="${srcdocAttr}"></iframe></div><pre hidden><code data-raw-code="${idx}">${cleanCode}</code></pre></div>`,
-      );
-    } else {
-      codeBlocks.push(
-        `<div class="md-code-wrap"><div class="md-code-head"><span>${cleanLang}</span><button type="button" class="copy-code-btn" data-copy-code="${idx}">复制</button></div><pre><code data-raw-code="${idx}">${cleanCode}</code></pre></div>`,
-      );
-    }
-    return `\n@@CBLOCK${idx}@@\n`;
-  });
-
-  const blocks = withPlaceholders.split(/\r?\n\r?\n+/);
-  const htmlParts = [];
-
-  for (const block of blocks) {
-    const trimmed = block.trim();
-    if (!trimmed) continue;
-
-    const cblockMatch = trimmed.match(/^@@CBLOCK(\d+)@@$/);
-    if (cblockMatch) {
-      htmlParts.push(codeBlocks[Number(cblockMatch[1])] || "");
-      continue;
-    }
-
-    const lines = trimmed.split(/\r?\n/);
-    if (lines.every((l) => /^\s*[-*]\s+/.test(l))) {
-      const items = lines
-        .map((l) => `<li>${renderInlineMarkdown(escapeHtml(l.replace(/^\s*[-*]\s+/, "")))}</li>`)
-        .join("");
-      htmlParts.push(`<ul>${items}</ul>`);
-      continue;
-    }
-
-    if (lines.every((l) => /^\s*\d+\.\s+/.test(l))) {
-      const items = lines
-        .map((l) => `<li>${renderInlineMarkdown(escapeHtml(l.replace(/^\s*\d+\.\s+/, "")))}</li>`)
-        .join("");
-      htmlParts.push(`<ol>${items}</ol>`);
-      continue;
-    }
-
-    // GFM 表格：第二行是 |---|---| 分隔行
-    if (lines.length >= 2 && /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(lines[1]) && lines[0].includes("|")) {
-      const cells = (l) =>
-        l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => renderInlineMarkdown(escapeHtml(c.trim())));
-      const head = cells(lines[0]).map((c) => `<th>${c}</th>`).join("");
-      const body = lines
-        .slice(2)
-        .map((l) => `<tr>${cells(l).map((c) => `<td>${c}</td>`).join("")}</tr>`)
-        .join("");
-      htmlParts.push(`<div class="md-table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
-      continue;
-    }
-
-    const headingMatch = trimmed.match(/^(#{1,3})\s+(.+)$/);
-    if (headingMatch && lines.length === 1) {
-      const level = headingMatch[1].length;
-      htmlParts.push(`<h${level}>${renderInlineMarkdown(escapeHtml(headingMatch[2]))}</h${level}>`);
-      continue;
-    }
-
-    const inlineHtml = lines
-      .map((l) => {
-        const m = l.trim().match(/^@@CBLOCK(\d+)@@$/);
-        if (m) return codeBlocks[Number(m[1])] || "";
-        return renderInlineMarkdown(escapeHtml(l));
-      })
-      .join("<br />");
-
-    htmlParts.push(`<p>${inlineHtml}</p>`);
-  }
-
-  return htmlParts.join("");
 }
 
 function appendLog(line) {
@@ -714,14 +561,50 @@ function findMessageById(streamKey, messageId) {
 
 const SKINS = ["modern", "classic", "roundtable"];
 
+function currentThemeName() {
+  return document.body.classList.contains("dark") ? "dark" : "light";
+}
+
+function currentSkinName() {
+  return document.body.dataset.skin || "modern";
+}
+
+function buildArtifactUrl(artifactId) {
+  const theme = currentThemeName();
+  const skin = currentSkinName();
+  return `/artifacts/${encodeURIComponent(artifactId)}?theme=${encodeURIComponent(theme)}&skin=${encodeURIComponent(skin)}`;
+}
+
+function refreshThemeSensitiveFrames() {
+  const dark = currentThemeName() === "dark";
+  const skin = currentSkinName();
+  document.querySelectorAll("iframe.artifact-frame[data-artifact-frame]").forEach((frame) => {
+    const id = frame.dataset.artifactFrame;
+    if (!id) return;
+    const nextUrl = buildArtifactUrl(id);
+    if (frame.getAttribute("src") !== nextUrl) {
+      frame.setAttribute("src", nextUrl);
+    }
+  });
+  document.querySelectorAll(".md-code-block[data-code-b64]").forEach((block) => {
+    const frame = block.querySelector("iframe.md-preview-frame");
+    if (!frame) return;
+    const lang = block.dataset.codeLang || "html";
+    const code = decodeUtf8Base64(block.dataset.codeB64 || "");
+    frame.setAttribute("srcdoc", buildInlinePreviewSrcdoc(lang, code, { dark, skin }));
+  });
+}
+
 function applySkin(skin) {
   const next = SKINS.includes(skin) ? skin : "modern";
   // 默认皮肤不带属性，其余皮肤靠 body[data-skin] 套用各自的配色和装饰
   if (next === "modern") delete document.body.dataset.skin;
   else document.body.dataset.skin = next;
+  document.documentElement.dataset.skin = next;
   document.querySelectorAll("#skinSeg button").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.skin === next);
   });
+  refreshThemeSensitiveFrames();
   try {
     localStorage.setItem("agent-hub-skin", next);
   } catch {
@@ -833,7 +716,9 @@ function initSettingsDialog() {
 
 function applyTheme(dark) {
   document.body.classList.toggle("dark", dark);
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
   els.themeToggleBtn.textContent = dark ? "浅色" : "深色";
+  refreshThemeSensitiveFrames();
   try {
     localStorage.setItem("agent-hub-theme", dark ? "dark" : "light");
   } catch {
@@ -1576,8 +1461,7 @@ function renderStageHeaderAndTabs() {
     els.leadSwitcher.hidden = true;
     els.backToLeadBtn.hidden = false;
     els.composerLabel.textContent = `直连子会话 · ${agentName(subSession.agent)}:${subSession.label || subSession.name}`;
-    els.composerHint.textContent = "可直接向该子会话追加追问，不会污染任务主对话上下文";
-    els.promptInput.placeholder = `给子会话 ${agentName(subSession.agent)} 发消息`;
+    els.promptInput.placeholder = `给子会话 ${agentName(subSession.agent)} 发消息（输入 / 查命令，@ 引用文件）`;
   } else {
     // 主导是谁已由旁边的主导标记表明，这里不再重复
     els.streamBadge.textContent = "";
@@ -1585,8 +1469,7 @@ function renderStageHeaderAndTabs() {
     els.leadSwitcher.hidden = false;
     els.backToLeadBtn.hidden = true;
     els.composerLabel.textContent = `${group.title} · 主导 ${agentName(group.leadAgent)}`;
-    els.composerHint.textContent = `当前任务由 ${agentName(group.leadAgent)} 主导；要换人，直接让它交接给其他 Agent`;
-    els.promptInput.placeholder = `给 ${agentName(group.leadAgent)} 发消息`;
+    els.promptInput.placeholder = `给 ${agentName(group.leadAgent)} 发消息（输入 / 查命令，@ 引用文件）`;
   }
 
   renderLeadBadge(group);
@@ -1626,6 +1509,22 @@ function renderStageHeaderAndTabs() {
       tab.onclick = () => selectGroup(group.groupId, key);
       els.sessionTabs.appendChild(tab);
     }
+  }
+
+  const prevWtBar = document.getElementById("subWorktreeBar");
+  if (subMode && subSession && subSession.isWorktree) {
+    const nextBar = buildWorktreeBarElement(
+      subSession.sessionKey,
+      subSession.branch || subSession.effectiveCwd,
+    );
+    nextBar.id = "subWorktreeBar";
+    if (prevWtBar) {
+      prevWtBar.replaceWith(nextBar);
+    } else if (els.sessionTabs) {
+      els.sessionTabs.insertAdjacentElement("afterend", nextBar);
+    }
+  } else {
+    prevWtBar?.remove();
   }
 
   const activeKey = activeSessionKeyForCurrentView();
@@ -1958,7 +1857,7 @@ function buildArtifactCardElement(artifact) {
   const card = document.createElement("div");
   card.className = "artifact-card";
   card.dataset.artifactKey = artifactCardKey(artifact);
-  const url = `/artifacts/${encodeURIComponent(artifact.artifactId)}`;
+  const url = buildArtifactUrl(artifact.artifactId);
   const initialHeight = Math.max(160, Math.min(780, Number(artifact.height) || 320));
   card.innerHTML = `
     <div class="artifact-head">
@@ -1981,10 +1880,11 @@ function buildArtifactCardElement(artifact) {
   `;
   const frame = card.querySelector("iframe");
   card.querySelector("[data-art-reload]").onclick = () => {
-    if (frame) frame.src = `${url}?t=${Date.now()}`;
+    const freshUrl = buildArtifactUrl(artifact.artifactId);
+    if (frame) frame.src = `${freshUrl}&t=${Date.now()}`;
   };
   card.querySelector("[data-art-open]").onclick = () => {
-    window.open(url, "_blank", "noopener");
+    window.open(buildArtifactUrl(artifact.artifactId), "_blank", "noopener");
   };
   return card;
 }
@@ -2014,21 +1914,12 @@ function findPrecedingPromptForMessage(streamKey, messageId) {
     const candidate = list[i];
     const hasText = Boolean(candidate.text && candidate.text.trim());
     const hasImages = Array.isArray(candidate.images) && candidate.images.length > 0;
-    if ((candidate.role === "user" || candidate.role === "caller") && (hasText || hasImages)) {
+    const hasFiles = Array.isArray(candidate.files) && candidate.files.length > 0;
+    if ((candidate.role === "user" || candidate.role === "caller") && (hasText || hasImages || hasFiles)) {
       return candidate;
     }
   }
   return null;
-}
-
-function arrayBufferToBase64(buf) {
-  const bytes = new Uint8Array(buf);
-  let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
 }
 
 async function regenerateAssistantMessage(streamKey, messageId) {
@@ -2041,24 +1932,146 @@ async function regenerateAssistantMessage(streamKey, messageId) {
     appendLog("未找到该回复对应的用户指令，无法重新生成");
     return;
   }
-  const replayImages = [];
-  if (Array.isArray(sourcePrompt.images) && sourcePrompt.images.length > 0) {
-    for (const img of sourcePrompt.images) {
-      try {
-        const resp = await fetch(img.url);
-        if (!resp.ok) continue;
-        const buf = await resp.arrayBuffer();
-        replayImages.push({
-          name: img.name,
-          mimeType: img.mimeType,
-          base64: arrayBufferToBase64(buf),
-        });
-      } catch {
-        // ignore missing image asset during replay
+  await sendStreamPrompt((sourcePrompt.text || "").trim(), streamKey, [], {
+    reuseMessageId: sourcePrompt.messageId,
+    replaceAssistantMessageId: messageId,
+  });
+}
+
+function classifyToolSemantic(tool) {
+  const kind = String(tool?.kind || "").toLowerCase();
+  const title = String(tool?.title || "").toLowerCase();
+  if ((Array.isArray(tool?.diffs) && tool.diffs.length > 0) || /edit|write|create|delete|remove|move|rename|apply_patch|patch/.test(kind) || /\b(write|edit|patch|replace|delete)\b/.test(title)) {
+    return { badge: "修改", cls: "is-edit" };
+  }
+  if (/execute|bash|command|terminal|shell/.test(kind) || /\b(run_command|bash|sh|powershell|pwsh|cmd|exec)\b/.test(title)) {
+    return { badge: "命令", cls: "is-exec" };
+  }
+  if (/read/.test(kind) || /\b(read_file|view_file|read)\b/.test(title)) {
+    return { badge: "读取", cls: "is-read" };
+  }
+  if (/search|grep|glob|find/.test(kind) || /\b(grep|search|glob|find|rg|select-string)\b/.test(title)) {
+    return { badge: "搜索", cls: "is-search" };
+  }
+  if (/peer|subagent/.test(kind) || /\bpeer_|dispatch|subagent/.test(title)) {
+    return { badge: "子代理", cls: "is-peer" };
+  }
+  return { badge: "工具", cls: "is-other" };
+}
+
+function appendRenderedMarkdown(container, rawText) {
+  const html = renderMarkdown(rawText);
+  if (!html) return;
+  const tmp = document.createElement("div");
+  tmp.innerHTML = html;
+  const bodyNode = tmp.firstElementChild;
+  if (bodyNode && bodyNode.classList.contains("md-body")) {
+    container.appendChild(bodyNode);
+  } else {
+    const wrap = document.createElement("div");
+    wrap.className = "md-body";
+    wrap.innerHTML = html;
+    container.appendChild(wrap);
+  }
+}
+
+function buildToolGroupElement(tools, isMsgStreaming, groupKey) {
+  if (!Array.isArray(tools) || tools.length === 0) return null;
+  let totalAdded = 0;
+  let totalRemoved = 0;
+  let failedCount = 0;
+  const catCounts = new Map();
+  const running = isMsgStreaming
+    ? [...tools].reverse().find((t) => t.status !== "completed" && t.status !== "failed")
+    : null;
+
+  for (const tool of tools) {
+    if (tool.status === "failed") failedCount++;
+    const sem = classifyToolSemantic(tool);
+    catCounts.set(sem.badge, (catCounts.get(sem.badge) || 0) + 1);
+    if (Array.isArray(tool.diffs)) {
+      for (const d of tool.diffs) {
+        const st = computeDiffStats(d.oldText || "", d.newText || "");
+        totalAdded += st.added;
+        totalRemoved += st.removed;
       }
     }
   }
-  await sendStreamPrompt((sourcePrompt.text || "").trim(), streamKey, replayImages);
+
+  const groupEl = document.createElement("details");
+  groupEl.className = `tool-group-card${running ? " is-running" : ""}`;
+  groupEl.dataset.toolKey = groupKey;
+
+  const summary = document.createElement("summary");
+  const badgeSummary = [...catCounts.entries()].map(([k, n]) => `${k} ${n}`).join(" · ");
+  const summaryLabel = running
+    ? `正在执行 · ${running.title || "工具"}（第 ${tools.length} 步）`
+    : `${badgeSummary}${failedCount > 0 ? ` · ${failedCount} 失败` : ""}`;
+  const diffPill =
+    totalAdded > 0 || totalRemoved > 0
+      ? `<span class="tool-diff-stats"><span class="stat-add">+${totalAdded}</span><span class="stat-del">-${totalRemoved}</span></span>`
+      : "";
+  summary.innerHTML = `<span>${escapeHtml(summaryLabel)}</span>${diffPill}`;
+  groupEl.appendChild(summary);
+
+  const body = document.createElement("div");
+  body.className = "tool-group-body";
+  for (const tool of tools) {
+    const sem = classifyToolSemantic(tool);
+    const row = document.createElement("div");
+    row.className = `tool-item-row${tool.status === "failed" ? " failed" : ""}`;
+
+    let toolAdded = 0;
+    let toolRemoved = 0;
+    const diffs = Array.isArray(tool.diffs) ? tool.diffs : [];
+    const diffStatsList = diffs.map((d) => {
+      const st = computeDiffStats(d.oldText || "", d.newText || "");
+      toolAdded += st.added;
+      toolRemoved += st.removed;
+      return st;
+    });
+
+    const head = document.createElement("div");
+    head.className = "tool-item-head";
+    const locHint =
+      Array.isArray(tool.locations) && tool.locations.length > 0
+        ? ` · ${tool.locations[0].path}`
+        : "";
+    head.innerHTML = `
+      <span class="tool-sem-badge ${sem.cls}">${escapeHtml(sem.badge)}</span>
+      <span class="tool-row-title" title="${escapeHtml((tool.title || "") + locHint)}">${escapeHtml(tool.title || "")}</span>
+      ${toolAdded > 0 || toolRemoved > 0 ? `<span class="tool-diff-stats"><span class="stat-add">+${toolAdded}</span><span class="stat-del">-${toolRemoved}</span></span>` : ""}
+      <span class="tool-row-status">${escapeHtml(TOOL_STATUS_TEXT[tool.status] || tool.status || "")}</span>
+    `;
+    row.appendChild(head);
+
+    diffs.forEach((d, di) => {
+      const st = diffStatsList[di];
+      const diffDet = document.createElement("details");
+      diffDet.className = "tool-diff-details";
+      diffDet.dataset.toolKey = `${tool.toolCallId}:diff:${di}`;
+      diffDet.innerHTML = `
+        <summary>${escapeHtml(d.path || "文件变更")} (+${st.added} -${st.removed})${d.truncated ? " [截断]" : ""}</summary>
+        ${renderUnifiedDiff(d.oldText || "", d.newText || "", d.path || "")}
+      `;
+      row.appendChild(diffDet);
+    });
+
+    if (tool.outputText && String(tool.outputText).trim()) {
+      const outDet = document.createElement("details");
+      outDet.className = "tool-output-details";
+      outDet.dataset.toolKey = `${tool.toolCallId}:out`;
+      outDet.innerHTML = `
+        <summary>执行输出${tool.outputTruncated ? "（已截断）" : ""}</summary>
+        <pre class="tool-output-pre"><code>${escapeHtml(tool.outputText)}</code></pre>
+      `;
+      row.appendChild(outDet);
+    }
+
+    body.appendChild(row);
+  }
+  groupEl.appendChild(body);
+  return groupEl;
 }
 
 function buildMessageElement(msg, linkedTasks) {
@@ -2127,68 +2140,116 @@ function buildMessageElement(msg, linkedTasks) {
 
   const bubble = document.createElement("div");
   bubble.className = "msg-bubble";
-  let toolsEl = null;
   let delegEl = null;
 
   if (msg.role === "assistant") {
-    if (msg.thoughtText && msg.thoughtText.trim()) {
-      const details = document.createElement("details");
-      details.className = "thought-box";
-      details.innerHTML = `<summary>思考过程</summary><div class="thought-body">${escapeHtml(msg.thoughtText)}</div>`;
-      bubble.appendChild(details);
-    }
-
-    if (msg.toolCalls && msg.toolCalls.length > 0) {
-      // 工具调用不进气泡：收成一行摘要，点开才看明细
-      const tools = msg.toolCalls;
-      const failed = tools.filter((t) => t.status === "failed").length;
-      const running =
-        msg.status === "streaming"
-          ? [...tools].reverse().find((t) => t.status !== "completed" && t.status !== "failed")
-          : null;
-      toolsEl = document.createElement("details");
-      toolsEl.className = `tool-summary${running ? " is-running" : ""}`;
-      const summary = document.createElement("summary");
-      summary.textContent = running
-        ? `正在执行 ${running.title}（第 ${tools.length} 个工具）`
-        : `调用了 ${tools.length} 个工具${failed > 0 ? `，${failed} 个失败` : ""}`;
-      toolsEl.appendChild(summary);
-      const list = document.createElement("div");
-      list.className = "tool-list";
-      for (const tool of tools) {
-        const row = document.createElement("div");
-        row.className = `tool-row${tool.status === "failed" ? " failed" : ""}`;
-        const name = document.createElement("span");
-        name.className = "tool-row-title";
-        name.textContent = tool.title;
-        const st = document.createElement("span");
-        st.className = "tool-row-status";
-        st.textContent = TOOL_STATUS_TEXT[tool.status] || tool.status || "";
-        row.appendChild(name);
-        row.appendChild(st);
-        list.appendChild(row);
-      }
-      toolsEl.appendChild(list);
-    }
-
     const artifactList = Array.isArray(msg.artifactIds)
       ? msg.artifactIds.map((id) => STATE.artifacts.get(id)).filter(Boolean)
       : [];
+    const failed = isFailedAssistantMsg(msg);
+    const pureErr = isPureErrorAssistantMsg(msg);
+    let renderedBlocks = 0;
 
-    const body = document.createElement("div");
-    body.className = "md-body";
-    if (msg.text && msg.text.trim()) {
-      body.innerHTML = renderMarkdown(msg.text);
-      bubble.appendChild(body);
-    } else if (msg.status === "streaming") {
-      // 高思考强度下第一句话可能要等几分钟；显示已等多久，免得看起来像卡住
-      body.innerHTML = `<span class="msg-waiting is-thinking"><span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>思考中 <span class="msg-elapsed" data-since="${Number(msg.timestamp) || Date.now()}"></span></span>`;
-      bubble.appendChild(body);
-    } else if (artifactList.length === 0) {
-      body.innerHTML =
-        msg.status === "cancelled"
-          ? '<span class="msg-waiting">已停止，没有输出</span>'
-          : '<span class="msg-waiting">没有文字输出</span>';
+    if (Array.isArray(msg.parts) && msg.parts.length > 0) {
+      const toolById = new Map((msg.toolCalls || []).map((t) => [t.toolCallId, t]));
+      let toolBatch = [];
+      let thoughtIdx = 0;
+      let batchIdx = 0;
+
+      const flushTools = () => {
+        if (toolBatch.length === 0) return;
+        const firstId = toolBatch[0]?.toolCallId || String(batchIdx);
+        const tg = buildToolGroupElement(
+          toolBatch,
+          msg.status === "streaming",
+          `${msg.messageId}:tg:${firstId}`,
+        );
+        if (tg) {
+          bubble.appendChild(tg);
+          renderedBlocks++;
+        }
+        toolBatch = [];
+        batchIdx++;
+      };
+
+      for (const part of msg.parts) {
+        if (part.type === "tool") {
+          const tool = toolById.get(part.toolCallId);
+          if (tool) toolBatch.push(tool);
+          continue;
+        }
+        flushTools();
+        if (part.type === "thought" && part.text && part.text.trim()) {
+          const details = document.createElement("details");
+          details.className = "thought-box";
+          details.dataset.thoughtIdx = String(thoughtIdx++);
+          details.innerHTML = `<summary>思考过程</summary><div class="thought-body">${escapeHtml(part.text)}</div>`;
+          bubble.appendChild(details);
+          renderedBlocks++;
+        } else if (part.type === "text" && part.text && part.text.trim()) {
+          if (pureErr || (failed && /^\s*\[Error\]/i.test(part.text))) {
+            continue;
+          }
+          appendRenderedMarkdown(bubble, part.text);
+          renderedBlocks++;
+        }
+      }
+      flushTools();
+    } else {
+      if (msg.thoughtText && msg.thoughtText.trim()) {
+        const details = document.createElement("details");
+        details.className = "thought-box";
+        details.dataset.thoughtIdx = "0";
+        details.innerHTML = `<summary>思考过程</summary><div class="thought-body">${escapeHtml(msg.thoughtText)}</div>`;
+        bubble.appendChild(details);
+        renderedBlocks++;
+      }
+
+      if (msg.toolCalls && msg.toolCalls.length > 0) {
+        const tg = buildToolGroupElement(
+          msg.toolCalls,
+          msg.status === "streaming",
+          `${msg.messageId}:tg:0`,
+        );
+        if (tg) {
+          bubble.appendChild(tg);
+          renderedBlocks++;
+        }
+      }
+
+      if (msg.text && msg.text.trim() && !pureErr && !(failed && /^\s*\[Error\]/i.test(msg.text))) {
+        appendRenderedMarkdown(bubble, msg.text);
+        renderedBlocks++;
+      }
+    }
+
+    if (failed) {
+      const errCard = document.createElement("div");
+      errCard.className = "msg-error-card";
+      const errDisplayText = (msg.text || "").trim() || "会话执行失败";
+      errCard.innerHTML = `
+        <div class="msg-error-head">
+          <span>执行失败</span>
+          ${canRegen ? `<button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-regen-msg="${escapeHtml(msg.messageId)}">重试</button>` : ""}
+        </div>
+        <pre class="msg-error-text">${escapeHtml(errDisplayText)}</pre>
+      `;
+      bubble.appendChild(errCard);
+      renderedBlocks++;
+    }
+
+    if (renderedBlocks === 0 && artifactList.length === 0) {
+      const body = document.createElement("div");
+      body.className = "md-body";
+      if (msg.status === "streaming") {
+        // 高思考强度下第一句话可能要等几分钟；显示已等多久，免得看起来像卡住
+        body.innerHTML = `<span class="msg-waiting is-thinking"><span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>思考中 <span class="msg-elapsed" data-since="${Number(msg.timestamp) || Date.now()}"></span></span>`;
+      } else {
+        body.innerHTML =
+          msg.status === "cancelled"
+            ? '<span class="msg-waiting">已停止，没有输出</span>'
+            : '<span class="msg-waiting">没有文字输出</span>';
+      }
       bubble.appendChild(body);
     }
 
@@ -2241,6 +2302,11 @@ function buildMessageElement(msg, linkedTasks) {
         openBtn.onclick = () => selectGroup(latest.groupId, `sub:${sessionKey}`);
         delActions.appendChild(openBtn);
         row.appendChild(delActions);
+        if (subSess?.isWorktree) {
+          row.appendChild(
+            buildWorktreeBarElement(sessionKey, subSess.branch || subSess.effectiveCwd),
+          );
+        }
         delegEl.appendChild(row);
       }
     }
@@ -2286,7 +2352,6 @@ function buildMessageElement(msg, linkedTasks) {
   }
 
   entry.appendChild(meta);
-  if (toolsEl) entry.appendChild(toolsEl);
   entry.appendChild(bubble);
   if (delegEl) entry.appendChild(delegEl);
   const wfCard = buildWorkflowCardElement(msg);
@@ -2325,8 +2390,52 @@ function scrollMessagesToBottom() {
 
 function updateJumpLatestBtn() {
   if (!els.jumpLatestBtn) return;
-  const hasContent = els.messages.querySelector(".msg-entry") !== null;
+  const hasContent = els.messages.querySelector(".msg-entry, .retry-fold") !== null;
   els.jumpLatestBtn.hidden = !hasContent || isMessagesNearBottom();
+}
+
+function collectDetailsState(rootEl, thoughtStates, toolOpenStates) {
+  for (const box of rootEl.querySelectorAll("details.thought-box")) {
+    const id = box.closest("[data-message-id]")?.dataset.messageId;
+    if (!id) continue;
+    const tKey = `${id}:${box.dataset.thoughtIdx || "0"}`;
+    thoughtStates.set(tKey, {
+      open: box.open,
+      scrollTop: box.querySelector(".thought-body")?.scrollTop || 0,
+    });
+  }
+  for (const det of rootEl.querySelectorAll("details[data-tool-key]")) {
+    if (det.dataset.toolKey) {
+      toolOpenStates.set(det.dataset.toolKey, det.open);
+    }
+  }
+}
+
+function restoreDetailsStateInto(rootEl, messageId, thoughtStates, toolOpenStates) {
+  for (const box of rootEl.querySelectorAll("details.thought-box")) {
+    const tKey = `${messageId}:${box.dataset.thoughtIdx || "0"}`;
+    if (thoughtStates.get(tKey)?.open) {
+      box.open = true;
+    }
+  }
+  for (const det of rootEl.querySelectorAll("details[data-tool-key]")) {
+    if (toolOpenStates.get(det.dataset.toolKey)) {
+      det.open = true;
+    }
+  }
+}
+
+function restoreThoughtScrollPositions(thoughtStates) {
+  for (const [tKey, prev] of thoughtStates) {
+    if (!prev.open || !prev.scrollTop) continue;
+    const sep = tKey.lastIndexOf(":");
+    const id = sep >= 0 ? tKey.slice(0, sep) : tKey;
+    const idx = sep >= 0 ? tKey.slice(sep + 1) : "0";
+    const body = els.messages.querySelector(
+      `[data-message-id="${CSS.escape(id)}"] details.thought-box[data-thought-idx="${CSS.escape(idx)}"] .thought-body`,
+    );
+    if (body) body.scrollTop = prev.scrollTop;
+  }
 }
 
 function renderMessages() {
@@ -2357,39 +2466,57 @@ function renderMessages() {
     return;
   }
 
-  // 整体重建前记下各条消息思考框的展开状态和滚动位置（切换会话流时不需要）
+  // 整体重建前记下思考框、工具折叠、失败重试折叠的展开状态与滚动位置（切换会话流时不需要）
   const thoughtStates = new Map();
+  const toolOpenStates = new Map();
+  const retryFoldStates = new Map();
   if (!streamChanged) {
-    for (const box of els.messages.querySelectorAll(".msg-entry details.thought-box")) {
-      const id = box.closest(".msg-entry")?.dataset.messageId;
-      if (id) {
-        thoughtStates.set(id, {
-          open: box.open,
-          scrollTop: box.querySelector(".thought-body")?.scrollTop || 0,
-        });
+    collectDetailsState(els.messages, thoughtStates, toolOpenStates);
+    for (const fold of els.messages.querySelectorAll("details.retry-fold[data-fold-key]")) {
+      if (fold.dataset.foldKey) {
+        retryFoldStates.set(fold.dataset.foldKey, fold.open);
       }
     }
   }
 
+  const partitioned = partitionMessagesForDisplay(list);
   const fresh = [];
-  for (let i = 0; i < list.length; i++) {
-    const msg = list[i];
+  for (const item of partitioned) {
+    if (item.kind === "retry-fold") {
+      const foldEl = document.createElement("details");
+      foldEl.className = "retry-fold";
+      foldEl.dataset.foldKey = item.key;
+      if (retryFoldStates.get(item.key)) foldEl.open = true;
+      const agentsText = item.agents.length > 0 ? item.agents.map((a) => agentName(a)).join(" / ") : "会话";
+      const summaryEl = document.createElement("summary");
+      summaryEl.className = "retry-fold-summary";
+      summaryEl.innerHTML = `
+        <span class="retry-fold-badge">已自动折叠 ${item.attempts} 次失败重试</span>
+        <span class="retry-fold-meta">${escapeHtml(`${agentsText} · ${item.lastErrorSummary}`)}</span>
+      `;
+      const bodyEl = document.createElement("div");
+      bodyEl.className = "retry-fold-body";
+      for (const subMsg of item.messages) {
+        const subEl = buildMessageElement(subMsg, []);
+        restoreDetailsStateInto(subEl, subMsg.messageId, thoughtStates, toolOpenStates);
+        bodyEl.appendChild(subEl);
+      }
+      foldEl.appendChild(summaryEl);
+      foldEl.appendChild(bodyEl);
+      fresh.push(foldEl);
+      continue;
+    }
+
+    const msg = item.message;
+    const i = item.index;
     const nextAssistant = list.slice(i + 1).find((m) => m.role === "assistant");
     const linkedTasks = matchTasksForAssistantMessage(msg, nextAssistant?.timestamp);
     const el = buildMessageElement(msg, linkedTasks);
-    const prev = thoughtStates.get(msg.messageId);
-    const box = prev?.open ? el.querySelector("details.thought-box") : null;
-    if (box) box.open = true;
+    restoreDetailsStateInto(el, msg.messageId, thoughtStates, toolOpenStates);
     fresh.push(el);
   }
   replaceChildrenKeepingArtifacts(els.messages, fresh);
-  for (const [id, prev] of thoughtStates) {
-    if (!prev.open || !prev.scrollTop) continue;
-    const body = els.messages.querySelector(
-      `[data-message-id="${CSS.escape(id)}"] details.thought-box .thought-body`,
-    );
-    if (body) body.scrollTop = prev.scrollTop;
-  }
+  restoreThoughtScrollPositions(thoughtStates);
   if (stick) {
     scrollMessagesToBottom();
   } else {
@@ -2669,7 +2796,7 @@ function renderInspector() {
     for (const art of artifacts) {
       const link = document.createElement("a");
       link.className = "insp-file";
-      link.href = `/artifacts/${encodeURIComponent(art.artifactId)}`;
+      link.href = buildArtifactUrl(art.artifactId);
       link.target = "_blank";
       link.rel = "noopener";
       link.title = "在新窗口打开";
@@ -2845,18 +2972,10 @@ function updateStreamingMessageDom(msg) {
   const nextAssistant = idx >= 0 ? list.slice(idx + 1).find((m) => m.role === "assistant") : undefined;
   const linkedTasks = matchTasksForAssistantMessage(msg, nextAssistant?.timestamp);
   const fresh = buildMessageElement(msg, linkedTasks);
-  const prevThought = existing.querySelector("details.thought-box");
-  const nextThought = fresh.querySelector("details.thought-box");
-  const prevThoughtBody = prevThought?.querySelector(".thought-body");
-  const prevThoughtScroll = prevThoughtBody ? prevThoughtBody.scrollTop : 0;
-  if (prevThought && nextThought) {
-    nextThought.open = prevThought.open;
-  }
-  const prevTools = existing.querySelector("details.tool-summary");
-  const nextTools = fresh.querySelector("details.tool-summary");
-  if (prevTools && nextTools) {
-    nextTools.open = prevTools.open;
-  }
+  const thoughtStates = new Map();
+  const toolOpenStates = new Map();
+  collectDetailsState(existing, thoughtStates, toolOpenStates);
+  restoreDetailsStateInto(fresh, msg.messageId, thoughtStates, toolOpenStates);
   const stick = isMessagesNearBottom();
   if (findReusableChild(existing, fresh) === existing) {
     // 消息里有内容没变的交互组件：原地更新，避免 iframe 重新加载
@@ -2865,12 +2984,7 @@ function updateStreamingMessageDom(msg) {
   } else {
     existing.replaceWith(fresh);
   }
-  if (prevThought && nextThought && prevThoughtScroll > 0) {
-    const nextThoughtBody = els.messages.querySelector(
-      `[data-message-id="${CSS.escape(msg.messageId)}"] details.thought-box .thought-body`,
-    );
-    if (nextThoughtBody) nextThoughtBody.scrollTop = prevThoughtScroll;
-  }
+  restoreThoughtScrollPositions(thoughtStates);
   if (stick) {
     scrollMessagesToBottom();
   } else {
@@ -3023,7 +3137,13 @@ async function sendStreamPrompt(prompt, targetStreamKey, images = [], options = 
   const allAttachments = Array.isArray(images) ? images : [];
   const cleanImages = allAttachments.filter((a) => !a.isFile);
   const cleanFiles = allAttachments.filter((a) => a.isFile);
-  if ((!cleanPrompt && allAttachments.length === 0) || !targetStreamKey) return;
+  const reuseMessageId =
+    typeof options?.reuseMessageId === "string" && options.reuseMessageId ? options.reuseMessageId : undefined;
+  const replaceAssistantMessageId =
+    typeof options?.replaceAssistantMessageId === "string" && options.replaceAssistantMessageId
+      ? options.replaceAssistantMessageId
+      : undefined;
+  if ((!cleanPrompt && allAttachments.length === 0 && !reuseMessageId) || !targetStreamKey) return;
   if (STATE.sendingStreams.has(targetStreamKey)) {
     return;
   }
@@ -3048,6 +3168,12 @@ async function sendStreamPrompt(prompt, targetStreamKey, images = [], options = 
     const payload = subMode
       ? { sessionKey: targetSessionKey, prompt: cleanPrompt }
       : { groupId: targetGroupId, prompt: cleanPrompt };
+    if (reuseMessageId) {
+      payload.reuseMessageId = reuseMessageId;
+    }
+    if (replaceAssistantMessageId) {
+      payload.replaceAssistantMessageId = replaceAssistantMessageId;
+    }
     if (cleanImages.length > 0) {
       payload.images = cleanImages.map((img) => ({
         name: img.name,
@@ -3184,7 +3310,8 @@ async function sendPrompt(options = {}) {
   if ((!prompt && images.length === 0) || !group) return;
 
   els.promptInput.value = "";
-  els.promptInput.style.height = "auto";
+  els.promptInput.style.height = "52px";
+  closeComposerSuggest();
   STATE.draftsByStream.delete(targetStreamKey);
   STATE.imageDraftsByStream.delete(targetStreamKey);
   renderComposerAttachments();
@@ -3254,7 +3381,7 @@ function connectWs() {
   const ws = new WebSocket(`${proto}//${location.host}/ws`);
   ws.onopen = () => {
     els.wsDot.classList.add("ok");
-    els.wsText.textContent = "live";
+    els.wsDot.title = "WebSocket 已连接";
     if (CONN.lostAt) {
       appendLog(`已重新连接后端（中断 ${Math.round((Date.now() - CONN.lostAt) / 1000)} 秒）`);
     } else {
@@ -3267,7 +3394,7 @@ function connectWs() {
   };
   ws.onclose = () => {
     els.wsDot.classList.remove("ok");
-    els.wsText.textContent = "retrying";
+    els.wsDot.title = "WebSocket 断开，正在重连...";
     if (!CONN.lostAt) {
       CONN.lostAt = Date.now();
       appendLog("与后端的连接断开，正在重连...");
@@ -3465,9 +3592,29 @@ function connectWs() {
           renderMessages();
         }
       }
+    } else if (msg.type === "message_deleted") {
+      const streamList = STATE.messagesByStream.get(msg.streamKey);
+      if (Array.isArray(streamList)) {
+        const filtered = streamList.filter((m) => m.messageId !== msg.messageId);
+        if (filtered.length !== streamList.length) {
+          STATE.messagesByStream.set(msg.streamKey, filtered);
+          pendingStreamDomMap.delete(msg.messageId);
+          if (msg.streamKey === STATE.activeStreamKey) {
+            renderMessages();
+          }
+        }
+      }
     } else if (msg.type === "agent_chunk") {
       const rec = findMessageById(msg.streamKey, msg.messageId);
       if (rec) {
+        const partType = msg.channel === "thought" ? "thought" : "text";
+        if (!Array.isArray(rec.parts)) rec.parts = [];
+        const lastPart = rec.parts[rec.parts.length - 1];
+        if (lastPart && lastPart.type === partType) {
+          lastPart.text += msg.text;
+        } else {
+          rec.parts.push({ type: partType, text: msg.text });
+        }
         if (msg.channel === "message") rec.text += msg.text;
         else if (msg.channel === "thought") rec.thoughtText += msg.text;
         scheduleStreamingMessageDom(rec);
@@ -3476,6 +3623,10 @@ function connectWs() {
       appendLog(`[${msg.sessionKey}] tool ${msg.title} (${msg.status || "start"})`);
       const rec = findMessageById(msg.streamKey, msg.messageId);
       if (rec) {
+        if (!Array.isArray(rec.parts)) rec.parts = [];
+        if (!rec.parts.some((p) => p.type === "tool" && p.toolCallId === msg.toolCallId)) {
+          rec.parts.push({ type: "tool", toolCallId: msg.toolCallId });
+        }
         const existingTool = rec.toolCalls.find((t) => t.toolCallId === msg.toolCallId);
         if (existingTool) {
           existingTool.title = msg.title || existingTool.title;
@@ -3483,6 +3634,10 @@ function connectWs() {
           if (msg.kind) existingTool.kind = msg.kind;
           if (msg.rawInput !== undefined) existingTool.rawInput = msg.rawInput;
           if (Array.isArray(msg.locations) && msg.locations.length > 0) existingTool.locations = msg.locations;
+          if (msg.outputText !== undefined) existingTool.outputText = msg.outputText;
+          if (msg.outputTruncated !== undefined) existingTool.outputTruncated = msg.outputTruncated;
+          if (Array.isArray(msg.diffs)) existingTool.diffs = msg.diffs;
+          if (msg.completedAt !== undefined) existingTool.completedAt = msg.completedAt;
         } else {
           rec.toolCalls.push({
             toolCallId: msg.toolCallId,
@@ -3491,7 +3646,11 @@ function connectWs() {
             status: msg.status,
             rawInput: msg.rawInput,
             locations: msg.locations,
+            outputText: msg.outputText,
+            outputTruncated: msg.outputTruncated,
+            diffs: msg.diffs,
             timestamp: msg.timestamp,
+            completedAt: msg.completedAt,
           });
         }
         scheduleUiRender(UI_REGION.inspector);
@@ -3716,16 +3875,187 @@ if (els.refreshModelsBtn) {
   };
 }
 
-function setInspectorCollapsed(collapsed) {
+function getActiveStreamSession() {
+  if (!STATE.activeStreamKey) return null;
+  if (isSubStream(STATE.activeStreamKey)) {
+    return STATE.sessions.get(STATE.activeStreamKey.slice(4)) || null;
+  }
+  const group = getActiveGroup();
+  if (!group) return null;
+  for (const sess of STATE.sessions.values()) {
+    if (sess.groupId === group.groupId && sess.role === "lead" && sess.agent === group.leadAgent) {
+      return sess;
+    }
+  }
+  return null;
+}
+
+const SUGGEST_STATE = {
+  items: [],
+  index: 0,
+  replaceStart: 0,
+  replaceEnd: 0,
+  fileCache: new Map(),
+  debounceTimer: null,
+};
+
+function closeComposerSuggest() {
+  SUGGEST_STATE.items = [];
+  SUGGEST_STATE.index = 0;
+  if (els.composerSuggest) {
+    els.composerSuggest.hidden = true;
+    els.composerSuggest.innerHTML = "";
+  }
+}
+
+function renderComposerSuggestList() {
+  if (!els.composerSuggest) return;
+  if (SUGGEST_STATE.items.length === 0) {
+    closeComposerSuggest();
+    return;
+  }
+  els.composerSuggest.hidden = false;
+  els.composerSuggest.innerHTML = SUGGEST_STATE.items
+    .map((it, idx) => {
+      const activeCls = idx === SUGGEST_STATE.index ? " active" : "";
+      return `<button type="button" class="composer-suggest-item${activeCls}" data-suggest-idx="${idx}">
+        <span class="composer-suggest-main">${escapeHtml(it.label)}</span>
+        <span class="composer-suggest-desc">${escapeHtml(it.desc || "")}</span>
+      </button>`;
+    })
+    .join("");
+  els.composerSuggest.querySelectorAll("[data-suggest-idx]").forEach((btn) => {
+    btn.onmousedown = (e) => {
+      e.preventDefault();
+      applyComposerSuggestItem(Number(btn.dataset.suggestIdx));
+    };
+  });
+}
+
+function applyComposerSuggestItem(idx) {
+  const item = SUGGEST_STATE.items[idx];
+  if (!item || !els.promptInput) return;
+  const val = els.promptInput.value;
+  const before = val.slice(0, SUGGEST_STATE.replaceStart);
+  const after = val.slice(SUGGEST_STATE.replaceEnd);
+  const inserted = item.insertText;
+  els.promptInput.value = `${before}${inserted}${after}`;
+  const cursor = before.length + inserted.length;
+  els.promptInput.setSelectionRange(cursor, cursor);
+  els.promptInput.focus();
+  closeComposerSuggest();
+  resizePromptInput();
+}
+
+function resizePromptInput() {
+  if (!els.promptInput) return;
+  els.promptInput.style.height = "auto";
+  const nextH = Math.max(52, Math.min(els.promptInput.scrollHeight, 220));
+  els.promptInput.style.height = `${nextH}px`;
+}
+
+async function refreshWorkspaceFileSuggest(groupId, query, tokenStart, tokenEnd) {
+  const cwd = STATE.taskGroups.get(groupId)?.cwd || STATE.baseCwd || "";
+  const cacheKey = `${cwd}::${query}`;
+  let files = SUGGEST_STATE.fileCache.get(cacheKey);
+  if (!files) {
+    try {
+      const res = await fetch(
+        `/api/workspace/files?groupId=${encodeURIComponent(groupId)}&q=${encodeURIComponent(query)}`,
+      );
+      const data = await res.json();
+      files = Array.isArray(data.files) ? data.files : [];
+      SUGGEST_STATE.fileCache.set(cacheKey, files);
+      if (SUGGEST_STATE.fileCache.size > 40) {
+        const firstKey = SUGGEST_STATE.fileCache.keys().next().value;
+        if (firstKey !== undefined) SUGGEST_STATE.fileCache.delete(firstKey);
+      }
+    } catch {
+      files = [];
+    }
+  }
+  // Ignore stale async result if caret or text moved on.
+  const caret = els.promptInput?.selectionStart ?? 0;
+  if (caret !== tokenEnd) return;
+  SUGGEST_STATE.replaceStart = tokenStart;
+  SUGGEST_STATE.replaceEnd = tokenEnd;
+  SUGGEST_STATE.index = 0;
+  SUGGEST_STATE.items = files.slice(0, 12).map((f) => ({
+    label: `@${f}`,
+    desc: "工作区文件",
+    insertText: `@${f} `,
+  }));
+  renderComposerSuggestList();
+}
+
+function updateComposerSuggest() {
+  if (!els.promptInput) return;
+  const caret = els.promptInput.selectionStart ?? els.promptInput.value.length;
+  const prefix = els.promptInput.value.slice(0, caret);
+
+  if (SUGGEST_STATE.debounceTimer) {
+    clearTimeout(SUGGEST_STATE.debounceTimer);
+    SUGGEST_STATE.debounceTimer = null;
+  }
+
+  // "/" slash command at start of input
+  const slashMatch = prefix.match(/^\/([^\s]*)$/);
+  if (slashMatch) {
+    const q = slashMatch[1].toLowerCase();
+    const sess = getActiveStreamSession();
+    const cmds = Array.isArray(sess?.availableCommands) ? sess.availableCommands : [];
+    const matched = cmds
+      .filter((c) => !q || String(c.name || "").toLowerCase().includes(q))
+      .slice(0, 12);
+    SUGGEST_STATE.replaceStart = 0;
+    SUGGEST_STATE.replaceEnd = caret;
+    SUGGEST_STATE.index = 0;
+    SUGGEST_STATE.items = matched.map((c) => ({
+      label: `/${c.name}`,
+      desc: c.hint || c.description || "",
+      insertText: `/${c.name} `,
+    }));
+    renderComposerSuggestList();
+    return;
+  }
+
+  // "@" workspace file completion
+  const atMatch = prefix.match(/(?:^|\s)@([^\s]*)$/);
+  if (atMatch && STATE.activeGroupId) {
+    const query = atMatch[1];
+    const tokenStart = prefix.lastIndexOf("@");
+    const groupId = STATE.activeGroupId;
+    SUGGEST_STATE.debounceTimer = setTimeout(() => {
+      void refreshWorkspaceFileSuggest(groupId, query, tokenStart, caret);
+    }, 120);
+    return;
+  }
+
+  closeComposerSuggest();
+}
+
+function isNarrowDrawerViewport() {
+  return window.innerWidth <= 1120;
+}
+
+function syncInspectorBackdrop() {
+  if (!els.inspectorBackdrop) return;
+  els.inspectorBackdrop.hidden = STATE.inspectorCollapsed || !isNarrowDrawerViewport();
+}
+
+function setInspectorCollapsed(collapsed, opts = {}) {
   STATE.inspectorCollapsed = collapsed;
   els.workbench.classList.toggle("inspector-collapsed", collapsed);
   els.toggleInspectorBtn.classList.toggle("is-on", !collapsed);
   els.toggleInspectorBtn.setAttribute("aria-pressed", String(!collapsed));
   els.toggleInspectorBtn.title = collapsed ? "展开右侧会话面板" : "收起右侧面板";
-  try {
-    localStorage.setItem("agent-hub-inspector", collapsed ? "collapsed" : "open");
-  } catch {
-    // ignore storage failures
+  syncInspectorBackdrop();
+  if (opts.persist !== false && !isNarrowDrawerViewport()) {
+    try {
+      localStorage.setItem("agent-hub-inspector", collapsed ? "collapsed" : "open");
+    } catch {
+      // ignore storage failures
+    }
   }
 }
 
@@ -3733,24 +4063,59 @@ els.toggleInspectorBtn.onclick = () => {
   setInspectorCollapsed(!STATE.inspectorCollapsed);
 };
 
+if (els.inspectorBackdrop) {
+  els.inspectorBackdrop.onclick = () => setInspectorCollapsed(true, { persist: false });
+}
+
+window.addEventListener("resize", () => syncInspectorBackdrop());
+
 els.themeToggleBtn.onclick = () => {
   applyTheme(!document.body.classList.contains("dark"));
   // 自定义 Agent 的徽章色区分深浅主题，切换后重绘一次
   if (STATE.taskGroups.size > 0) renderAll();
 };
 
-els.sendBtn.onclick = () => void sendPrompt();
+els.sendBtn.onclick = () => {
+  closeComposerSuggest();
+  void sendPrompt();
+};
 
 els.promptInput.addEventListener("input", () => {
   // 开始输入就预热主导会话；已预热或已有会话时 warmGroupSession 内部直接返回
   warmGroupSession(STATE.activeGroupId);
-  els.promptInput.style.height = "auto";
-  els.promptInput.style.height = `${Math.min(els.promptInput.scrollHeight, 200)}px`;
+  resizePromptInput();
+  updateComposerSuggest();
 });
 
 els.promptInput.addEventListener("keydown", (e) => {
   // 中文输入法选词时按 Enter 只是上屏，不能当成发送
   if (e.isComposing || e.keyCode === 229) return;
+  if (els.composerSuggest && !els.composerSuggest.hidden && SUGGEST_STATE.items.length > 0) {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      SUGGEST_STATE.index = (SUGGEST_STATE.index + 1) % SUGGEST_STATE.items.length;
+      renderComposerSuggestList();
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      SUGGEST_STATE.index =
+        (SUGGEST_STATE.index - 1 + SUGGEST_STATE.items.length) % SUGGEST_STATE.items.length;
+      renderComposerSuggestList();
+      return;
+    }
+    if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+      e.preventDefault();
+      applyComposerSuggestItem(SUGGEST_STATE.index);
+      return;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeComposerSuggest();
+      return;
+    }
+  }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     void sendPrompt({ steer: (e.ctrlKey || e.metaKey) && isStreamBusy(STATE.activeStreamKey) });
@@ -4178,31 +4543,198 @@ els.messages.addEventListener("click", (e) => {
     return;
   }
 
-  const toggleBtn = e.target.closest("[data-toggle-inline-preview]");
+  const toggleBtn = e.target.closest("[data-preview-toggle], [data-toggle-inline-preview]");
   if (toggleBtn) {
-    const wrap = toggleBtn.closest(".md-code-wrap");
-    const previewBox = wrap?.querySelector(".inline-preview-box");
+    const wrap = toggleBtn.closest(".md-code-block, .md-code-wrap");
+    const previewBox = wrap?.querySelector(".md-preview-box, .inline-preview-box");
     const preEl = wrap?.querySelector("pre");
     if (previewBox && preEl) {
       const showingPreview = !previewBox.hidden;
       previewBox.hidden = showingPreview;
       preEl.hidden = !showingPreview;
       toggleBtn.classList.toggle("active", !showingPreview);
+      if (toggleBtn.hasAttribute("data-preview-toggle")) {
+        toggleBtn.textContent = showingPreview ? "实时预览" : "查看源码";
+      }
     }
     return;
   }
 
   const btn = e.target.closest("[data-copy-code]");
   if (!btn) return;
-  const wrap = btn.closest(".md-code-wrap");
-  const codeEl = wrap?.querySelector("pre code");
-  if (!codeEl) return;
-  void navigator.clipboard?.writeText(codeEl.textContent || "");
+  const wrap = btn.closest(".md-code-block, .md-code-wrap");
+  const codeText = wrap?.dataset?.codeB64
+    ? decodeUtf8Base64(wrap.dataset.codeB64)
+    : wrap?.querySelector("pre code")?.textContent || "";
+  if (!codeText) return;
+  void navigator.clipboard?.writeText(codeText);
   const orig = btn.textContent;
-  btn.textContent = "已复制";
+  btn.textContent = "✓ 已复制";
   setTimeout(() => {
     btn.textContent = orig;
-  }, 1200);
+  }, 1400);
+});
+
+async function openWorktreeDiffModal(sessionKey) {
+  try {
+    const res = await fetch(`/api/worktrees/diff?sessionKey=${encodeURIComponent(sessionKey)}`);
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      await showConfirmModal({
+        title: "读取 Worktree 改动失败",
+        message: data.error || `HTTP ${res.status}`,
+        confirmText: "知道了",
+      });
+      return;
+    }
+    document.querySelector(".wt-diff-backdrop")?.remove();
+    const backdrop = document.createElement("div");
+    backdrop.className = "wt-diff-backdrop";
+    const statusText = Array.isArray(data.statusLines) && data.statusLines.length > 0
+      ? data.statusLines.join("\n")
+      : data.clean
+        ? "工作区干净，与基线分支相比暂无增量提交或未暂存改动。"
+        : "";
+    const diffHtml = data.diff && data.diff.trim()
+      ? `<div class="md-code-block"><div class="md-code-head"><span class="md-code-lang">diff${data.truncated ? " (已截断)" : ""}</span></div><pre class="md-code-pre"><code>${highlightCode("diff", data.diff)}</code></pre></div>`
+      : `<div class="empty-note">暂无文本 Diff（可能是新增空目录或无实质改动）。</div>`;
+    backdrop.innerHTML = `
+      <div class="wt-diff-dialog" role="dialog" aria-modal="true">
+        <div class="wt-diff-head">
+          <div>
+            <strong>Worktree 改动对比</strong>
+            <span class="worktree-branch" style="margin-left:8px">${escapeHtml(data.branch || sessionKey)}</span>
+          </div>
+          <button type="button" class="mini-icon-btn" data-wt-modal-close title="关闭">×</button>
+        </div>
+        <div class="wt-diff-body">
+          <div class="mono" style="font-size:12px;color:var(--muted)">基线目录: ${escapeHtml(data.baseCwd || "-")}</div>
+          ${data.diffStat ? `<pre class="tool-output-pre">${escapeHtml(data.diffStat)}</pre>` : ""}
+          ${statusText ? `<pre class="tool-output-pre">${escapeHtml(statusText)}</pre>` : ""}
+          ${diffHtml}
+        </div>
+        <div class="wt-diff-foot">
+          <div style="display:flex;gap:8px">
+            <button type="button" class="alma-btn alma-btn-danger alma-btn-sm" data-wt-modal-discard>丢弃 Worktree</button>
+            <button type="button" class="alma-btn alma-btn-primary alma-btn-sm" data-wt-modal-merge>合入主工作区</button>
+          </div>
+          <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-wt-modal-close>关闭</button>
+        </div>
+      </div>
+    `;
+    const closeModal = () => {
+      document.removeEventListener("keydown", onEsc);
+      backdrop.remove();
+    };
+    const onEsc = (ev) => {
+      if (ev.key === "Escape") closeModal();
+    };
+    document.addEventListener("keydown", onEsc);
+    backdrop.addEventListener("mousedown", (ev) => {
+      if (ev.target === backdrop) closeModal();
+    });
+    backdrop.querySelectorAll("[data-wt-modal-close]").forEach((b) => (b.onclick = closeModal));
+    backdrop.querySelector("[data-wt-modal-merge]").onclick = () => {
+      closeModal();
+      void mergeWorktreeSession(sessionKey);
+    };
+    backdrop.querySelector("[data-wt-modal-discard]").onclick = () => {
+      closeModal();
+      void discardWorktreeSession(sessionKey);
+    };
+    document.body.appendChild(backdrop);
+  } catch (err) {
+    appendLog(`读取 Worktree 改动异常: ${err.message}`);
+  }
+}
+
+async function mergeWorktreeSession(sessionKey) {
+  const ok = await showConfirmModal({
+    title: "合入主工作区",
+    message: `确认将子会话 worktree (${sessionKey}) 的改动快照并合入主工作区？合并成功后会自动移除临时 worktree。`,
+    confirmText: "确认合入",
+  });
+  if (!ok) return;
+  try {
+    const res = await fetch("/api/worktrees/merge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionKey, cleanup: true }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      await showConfirmModal({
+        title: "合入主工作区失败",
+        message: data.error || `HTTP ${res.status}`,
+        confirmText: "知道了",
+      });
+      return;
+    }
+    appendLog(`Worktree 已合入主工作区 (${data.branch || sessionKey}): ${data.summary || "done"}`);
+  } catch (err) {
+    appendLog(`合入 Worktree 异常: ${err.message}`);
+  }
+}
+
+async function discardWorktreeSession(sessionKey) {
+  const ok = await showConfirmModal({
+    title: "丢弃 Worktree",
+    message: `确认丢弃子会话 worktree (${sessionKey}) 及其未合入改动？此操作不可撤销。`,
+    confirmText: "确认丢弃",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const res = await fetch("/api/worktrees/discard", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionKey }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      await showConfirmModal({
+        title: "丢弃 Worktree 失败",
+        message: data.error || `HTTP ${res.status}`,
+        confirmText: "知道了",
+      });
+      return;
+    }
+    appendLog(`已丢弃 Worktree: ${sessionKey}`);
+  } catch (err) {
+    appendLog(`丢弃 Worktree 异常: ${err.message}`);
+  }
+}
+
+function buildWorktreeBarElement(sessionKey, branchLabel) {
+  const bar = document.createElement("div");
+  bar.className = "worktree-bar";
+  bar.innerHTML = `
+    <span class="wt-pill">worktree</span>
+    <span class="worktree-branch">${escapeHtml(branchLabel || sessionKey)}</span>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-left:auto">
+      <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-wt-diff="${escapeHtml(sessionKey)}">查看改动 Diff</button>
+      <button type="button" class="alma-btn alma-btn-primary alma-btn-sm" data-wt-merge="${escapeHtml(sessionKey)}">合入主工作区</button>
+      <button type="button" class="alma-btn alma-btn-danger alma-btn-sm" data-wt-discard="${escapeHtml(sessionKey)}">丢弃 Worktree</button>
+    </div>
+  `;
+  return bar;
+}
+
+document.addEventListener("click", (e) => {
+  const diffBtn = e.target.closest("[data-wt-diff]");
+  if (diffBtn) {
+    void openWorktreeDiffModal(diffBtn.dataset.wtDiff);
+    return;
+  }
+  const mergeBtn = e.target.closest("[data-wt-merge]");
+  if (mergeBtn) {
+    void mergeWorktreeSession(mergeBtn.dataset.wtMerge);
+    return;
+  }
+  const discardBtn = e.target.closest("[data-wt-discard]");
+  if (discardBtn) {
+    void discardWorktreeSession(discardBtn.dataset.wtDiscard);
+  }
 });
 
 document.querySelectorAll(".mode-tab[data-stage-view]").forEach((btn) => {
@@ -4254,9 +4786,10 @@ try {
   applyTheme(false);
 }
 try {
-  setInspectorCollapsed(localStorage.getItem("agent-hub-inspector") === "collapsed");
+  const savedInspectorCollapsed = localStorage.getItem("agent-hub-inspector") === "collapsed";
+  setInspectorCollapsed(isNarrowDrawerViewport() ? true : savedInspectorCollapsed, { persist: false });
 } catch {
-  setInspectorCollapsed(false);
+  setInspectorCollapsed(isNarrowDrawerViewport(), { persist: false });
 }
 try {
   applySkin(localStorage.getItem("agent-hub-skin") || "modern");

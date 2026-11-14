@@ -13,6 +13,8 @@ import type {
   PermissionMode,
   SessionContextBreakdown,
   SessionRecord,
+  SessionSlashCommand,
+  SessionToolDiff,
   SessionUsageTotals,
   TurnUsage,
 } from "../types.js";
@@ -34,6 +36,96 @@ import {
 import { ensureSessionWorkspace } from "./worktree.js";
 
 const READ_ONLY_KINDS = new Set(["read", "search", "think"]);
+const MAX_TOOL_DIFF_CHARS = 24_000;
+const MAX_TOOL_OUTPUT_CHARS = 16_000;
+
+function clipToolString(text: string, limit: number): { value: string; truncated: boolean } {
+  if (text.length <= limit) {
+    return { value: text, truncated: false };
+  }
+  return {
+    value: `${text.slice(0, limit)}\n... [已截断，原长 ${text.length} 字符]`,
+    truncated: true,
+  };
+}
+
+function extractRawOutputText(rawOutput: unknown): string | undefined {
+  if (rawOutput === undefined || rawOutput === null) return undefined;
+  if (typeof rawOutput === "string") {
+    return rawOutput.trim() ? rawOutput : undefined;
+  }
+  if (typeof rawOutput !== "object") return undefined;
+  const obj = rawOutput as Record<string, unknown>;
+  const parts: string[] = [];
+  for (const key of ["stdout", "stderr", "output", "text", "content", "message"]) {
+    const val = obj[key];
+    if (typeof val === "string" && val.trim()) {
+      parts.push(key === "stderr" ? `[stderr]\n${val}` : val);
+    }
+  }
+  if (parts.length > 0) {
+    return parts.join("\n");
+  }
+  try {
+    const serialized = JSON.stringify(rawOutput, null, 2);
+    return serialized && serialized !== "{}" ? serialized : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractToolOutputs(
+  content: unknown,
+  rawOutput: unknown,
+): { diffs?: SessionToolDiff[]; outputText?: string; outputTruncated?: boolean } {
+  const diffs: SessionToolDiff[] = [];
+  const textChunks: string[] = [];
+
+  if (Array.isArray(content)) {
+    for (const item of content) {
+      if (!item || typeof item !== "object") continue;
+      const entry = item as {
+        type?: unknown;
+        path?: unknown;
+        oldText?: unknown;
+        newText?: unknown;
+        content?: { type?: unknown; text?: unknown };
+      };
+      if (entry.type === "diff" && typeof entry.path === "string" && typeof entry.newText === "string") {
+        if (diffs.length < 8) {
+          const oldClipped =
+            typeof entry.oldText === "string" ? clipToolString(entry.oldText, MAX_TOOL_DIFF_CHARS) : undefined;
+          const newClipped = clipToolString(entry.newText, MAX_TOOL_DIFF_CHARS);
+          diffs.push({
+            path: entry.path,
+            oldText: oldClipped?.value,
+            newText: newClipped.value,
+            truncated: Boolean(oldClipped?.truncated || newClipped.truncated),
+          });
+        }
+      } else if (entry.type === "content" && entry.content?.type === "text" && typeof entry.content.text === "string") {
+        if (entry.content.text.trim()) {
+          textChunks.push(entry.content.text);
+        }
+      }
+    }
+  }
+
+  let rawText = textChunks.length > 0 ? textChunks.join("\n") : extractRawOutputText(rawOutput);
+  let outputText: string | undefined;
+  let outputTruncated = false;
+  if (rawText) {
+    const clipped = clipToolString(rawText, MAX_TOOL_OUTPUT_CHARS);
+    outputText = clipped.value;
+    outputTruncated = clipped.truncated;
+  }
+
+  return {
+    diffs: diffs.length > 0 ? diffs : undefined,
+    outputText,
+    outputTruncated: outputTruncated || undefined,
+  };
+}
 
 function createEmptyContextBreakdown(): SessionContextBreakdown {
   return {
@@ -656,6 +748,9 @@ export class AcpPool extends EventEmitter {
       }
       return existing;
     }
+    if (existing) {
+      await this.closeSession(sessionKey);
+    }
 
     const inflight = this.startingSessions.get(sessionKey);
     if (inflight) {
@@ -1210,6 +1305,10 @@ export class AcpPool extends EventEmitter {
             if (title.includes("peer_") || (update.name && update.name.includes("peer_"))) {
               peerToolsCalled.push(update.name || title);
             }
+            const extracted = extractToolOutputs(
+              (update as { content?: unknown }).content,
+              (update as { rawOutput?: unknown }).rawOutput,
+            );
             this.emitEvent({
               type: "tool_event",
               sessionKey: managed.record.sessionKey,
@@ -1221,9 +1320,16 @@ export class AcpPool extends EventEmitter {
               status: update.status,
               rawInput: update.rawInput,
               locations: update.locations ?? undefined,
+              outputText: extracted.outputText,
+              outputTruncated: extracted.outputTruncated,
+              diffs: extracted.diffs,
               timestamp: Date.now(),
             });
           } else if (update.sessionUpdate === "tool_call_update") {
+            const extracted = extractToolOutputs(
+              (update as { content?: unknown }).content,
+              (update as { rawOutput?: unknown }).rawOutput,
+            );
             this.emitEvent({
               type: "tool_event",
               sessionKey: managed.record.sessionKey,
@@ -1235,8 +1341,42 @@ export class AcpPool extends EventEmitter {
               status: update.status ?? undefined,
               rawInput: update.rawInput,
               locations: update.locations ?? undefined,
+              outputText: extracted.outputText,
+              outputTruncated: extracted.outputTruncated,
+              diffs: extracted.diffs,
               timestamp: Date.now(),
             });
+          } else if ((update as { sessionUpdate?: string }).sessionUpdate === "available_commands_update") {
+            const rawCmds = (
+              update as {
+                availableCommands?: Array<{
+                  name?: unknown;
+                  description?: unknown;
+                  input?: { hint?: unknown } | null;
+                }>;
+              }
+            ).availableCommands;
+            if (Array.isArray(rawCmds)) {
+              const parsedCommands: SessionSlashCommand[] = [];
+              for (const cmd of rawCmds) {
+                if (typeof cmd?.name !== "string") continue;
+                const cleanName = cmd.name.trim().replace(/^\/+/, "");
+                if (!cleanName) continue;
+                parsedCommands.push({
+                  name: cleanName,
+                  description: typeof cmd.description === "string" ? cmd.description.trim() : "",
+                  hint: typeof cmd.input?.hint === "string" && cmd.input.hint.trim() ? cmd.input.hint.trim() : undefined,
+                });
+                if (parsedCommands.length >= 80) break;
+              }
+              managed.record.availableCommands = parsedCommands;
+              managed.record.updatedAt = Date.now();
+              this.emitEvent({
+                type: "session_updated",
+                session: { ...managed.record },
+                timestamp: managed.record.updatedAt,
+              });
+            }
           } else if (update.sessionUpdate === "plan") {
             // The agent's own plan (TodoWrite, codex plan). Each update carries the full list.
             managed.record.plan = (update.entries ?? []).map((entry) => ({
