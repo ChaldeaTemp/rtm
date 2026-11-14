@@ -49,6 +49,7 @@ const STATE = {
   showArchivedGroups: false,
   draftsByStream: new Map(),
   imageDraftsByStream: new Map(),
+  queuedByStream: new Map(),
   qsItems: [],
   qsActiveIndex: 0,
 };
@@ -113,6 +114,8 @@ const els = {
   imageFileInput: document.getElementById("imageFileInput"),
   attachImageBtn: document.getElementById("attachImageBtn"),
   stopSessionBtn: document.getElementById("stopSessionBtn"),
+  steerBtn: document.getElementById("steerBtn"),
+  composerQueue: document.getElementById("composerQueue"),
   sendBtn: document.getElementById("sendBtn"),
   inspSessionCount: document.getElementById("inspSessionCount"),
   inspSessions: document.getElementById("inspSessions"),
@@ -239,8 +242,22 @@ function applyAgentColorVar(el, agentId) {
   if (color) el.style.setProperty("--agent-color", color);
 }
 
+// 界面上一律显示 Agent 的名称；id 只用于内部标识
+function agentName(agentId) {
+  if (!agentId) return "";
+  const list = STATE.agents && STATE.agents.length > 0 ? STATE.agents : BUILTIN_FALLBACK_AGENTS;
+  return list.find((a) => a.agent === agentId)?.label || agentId;
+}
+
+// 服务端给的发送者标签以 id 开头（如 "codex 委派"），显示时换成名称
+function senderLabelText(msg) {
+  const label = msg.senderLabel || "";
+  if (msg.agent && label.startsWith(msg.agent)) return agentName(msg.agent) + label.slice(msg.agent.length);
+  return label;
+}
+
 function agentTagHtml(agentId, text) {
-  const label = text ?? agentId;
+  const label = text ?? agentName(agentId);
   return `<span class="agent-tag" data-agent="${escapeHtml(agentId)}"${getAgentColorStyle(agentId)}>${escapeHtml(label)}</span>`;
 }
 
@@ -253,6 +270,21 @@ function applyDefaultLead(msg) {
   }
   STATE.defaultLead = next;
   STATE.configuredDefaultLead = msg.configuredDefaultLead || "";
+}
+
+// 主导在新建任务时指定，这里只显示。要换人，在对话里让当前主导交接（lead_handoff）。
+function renderLeadBadge(group) {
+  if (!els.leadSwitcher) return;
+  const lead = group?.leadAgent;
+  els.leadSwitcher.innerHTML = '<span class="lead-switch-label">主导</span>';
+  if (!lead) return;
+  const badge = document.createElement("span");
+  badge.className = "lead-pill active is-static";
+  badge.dataset.agent = lead;
+  applyAgentColorVar(badge, lead);
+  badge.textContent = agentName(lead);
+  els.leadSwitcher.appendChild(badge);
+  els.leadSwitcher.title = `这个任务由 ${agentName(lead)} 主导。要换人，直接在对话里让它交接给其他 Agent`;
 }
 
 function renderAgentControls() {
@@ -276,7 +308,7 @@ function renderAgentControls() {
       btn.className = `popover-agent-opt${item.agent === STATE.newTaskLead ? " active" : ""}`;
       btn.dataset.agent = item.agent;
       applyAgentColorVar(btn, item.agent);
-      btn.textContent = item.agent;
+      btn.textContent = item.label || item.agent;
       btn.onclick = () => {
         STATE.newTaskLead = item.agent;
         els.newTaskAgents
@@ -287,24 +319,7 @@ function renderAgentControls() {
     }
   }
 
-  if (els.leadSwitcher) {
-    const activeLead = getActiveGroup()?.leadAgent;
-    els.leadSwitcher.innerHTML = '<span class="lead-switch-label">主导</span>';
-    for (const item of enabled) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = `lead-pill${item.agent === activeLead ? " active" : ""}${item.available === false ? " is-unavailable" : ""}`;
-      btn.dataset.agent = item.agent;
-      applyAgentColorVar(btn, item.agent);
-      btn.textContent = item.agent;
-      btn.title = item.available ? `${item.label || item.agent} (就绪)` : `${item.label || item.agent}: ${item.reason || "未就绪"}`;
-      btn.onclick = () => {
-        const group = getActiveGroup();
-        if (group) void switchGroupLead(group.groupId, item.agent);
-      };
-      els.leadSwitcher.appendChild(btn);
-    }
-  }
+  renderLeadBadge(getActiveGroup());
 }
 
 function setStageView(view) {
@@ -603,6 +618,8 @@ function applyHubSettings(settings) {
   STATE.settings = { ...STATE.settings, ...settings };
   const toggle = document.getElementById("autoTitleToggle");
   if (toggle) toggle.checked = Boolean(STATE.settings.autoTitle);
+  const parallel = document.getElementById("workflowParallelSelect");
+  if (parallel && STATE.settings.workflowParallel) parallel.value = String(STATE.settings.workflowParallel);
 }
 
 async function saveHubSettings(patch) {
@@ -663,6 +680,8 @@ function initSettingsDialog() {
   });
   const toggle = document.getElementById("autoTitleToggle");
   if (toggle) toggle.onchange = () => void saveHubSettings({ autoTitle: toggle.checked });
+  const parallel = document.getElementById("workflowParallelSelect");
+  if (parallel) parallel.onchange = () => void saveHubSettings({ workflowParallel: Number(parallel.value) });
 }
 
 function applyTheme(dark) {
@@ -829,14 +848,6 @@ async function deleteTaskGroup(group) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ groupId: group.groupId }),
-  });
-}
-
-async function switchGroupLead(groupId, agent) {
-  await fetch("/api/lead", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ groupId, agent }),
   });
 }
 
@@ -1172,7 +1183,7 @@ function renderSidebarGroups() {
     const meta = document.createElement("div");
     meta.className = "group-meta";
     meta.innerHTML = `
-      ${agentTagHtml(group.leadAgent, `★ ${group.leadAgent}`)}
+      ${agentTagHtml(group.leadAgent, `★ ${agentName(group.leadAgent)}`)}
       ${group.archived ? `<span class="archived-pill">归档于 ${escapeHtml(new Date(group.archivedAt || group.updatedAt).toLocaleDateString())}</span>` : ""}
       ${(group.extraDirs || []).length > 0 ? `<span class="archived-pill" title="${escapeHtml(group.extraDirs.join("\n"))}">+${group.extraDirs.length} 个目录</span>` : ""}
       ${activeModel ? `<span class="model-badge-pill" title="当前/预设模型">${escapeHtml(activeModel)}</span>` : ""}
@@ -1193,7 +1204,7 @@ function renderSidebarGroups() {
       leadNode.innerHTML = `
         <span class="tree-node-left">
           <span class="dot ${busy ? "busy" : "idle"}"></span>
-          <span class="tree-node-label">${escapeHtml(group.leadAgent)} · 主导</span>
+          <span class="tree-node-label">${escapeHtml(agentName(group.leadAgent))} · 主导</span>
         </span>
       `;
       leadNode.onclick = (e) => {
@@ -1211,7 +1222,7 @@ function renderSidebarGroups() {
         subNode.innerHTML = `
           <span class="tree-node-left">
             <span class="dot ${subRunning ? "busy" : escapeHtml(sub.status)}"></span>
-            <span class="tree-node-label">${escapeHtml(sub.agent)} · ${escapeHtml(sub.label || sub.name)}</span>
+            <span class="tree-node-label">${escapeHtml(agentName(sub.agent))} · ${escapeHtml(sub.label || sub.name)}</span>
           </span>
           ${sub.isWorktree ? '<span class="wt-pill">wt</span>' : ""}
         `;
@@ -1415,25 +1426,23 @@ function renderStageHeaderAndTabs() {
 
   els.stageTaskTitle.textContent = group.title;
   if (subMode && subSession) {
-    els.streamBadge.textContent = `子会话 · ${subSession.agent} (${subSession.label || subSession.name})`;
+    els.streamBadge.textContent = `子会话 · ${agentName(subSession.agent)} (${subSession.label || subSession.name})`;
     els.streamBadge.className = "stream-badge sub";
     els.leadSwitcher.hidden = true;
     els.backToLeadBtn.hidden = false;
-    els.composerLabel.textContent = `直连子会话 · ${subSession.agent}:${subSession.label || subSession.name}`;
-    els.promptInput.placeholder = `给子会话 ${subSession.agent} 发消息（输入 / 查命令，@ 引用文件）`;
+    els.composerLabel.textContent = `直连子会话 · ${agentName(subSession.agent)}:${subSession.label || subSession.name}`;
+    els.promptInput.placeholder = `给子会话 ${agentName(subSession.agent)} 发消息（输入 / 查命令，@ 引用文件）`;
   } else {
-    // 主导是谁已由旁边的主导切换条表明，这里不再重复
+    // 主导是谁已由旁边的主导标记表明，这里不再重复
     els.streamBadge.textContent = "";
     els.streamBadge.className = "stream-badge";
     els.leadSwitcher.hidden = false;
     els.backToLeadBtn.hidden = true;
-    els.composerLabel.textContent = `${group.title} · 主导 ${group.leadAgent}`;
-    els.promptInput.placeholder = `给 ${group.leadAgent} 发消息（输入 / 查命令，@ 引用文件）`;
+    els.composerLabel.textContent = `${group.title} · 主导 ${agentName(group.leadAgent)}`;
+    els.promptInput.placeholder = `给 ${agentName(group.leadAgent)} 发消息（输入 / 查命令，@ 引用文件）`;
   }
 
-  document.querySelectorAll("#leadSwitcher .lead-pill").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.agent === group.leadAgent);
-  });
+  renderLeadBadge(group);
 
   // 已归档的任务只读：输入框换成一条「恢复任务」
   const archivedBar = document.getElementById("archivedBar");
@@ -1455,7 +1464,7 @@ function renderStageHeaderAndTabs() {
     const leadTab = document.createElement("button");
     leadTab.type = "button";
     leadTab.className = `session-tab${STATE.activeStreamKey === leadStreamKey ? " active" : ""}`;
-    leadTab.innerHTML = `<span class="dot ${isGroupBusy(group.groupId) ? "busy" : "idle"}"></span>${escapeHtml(group.leadAgent)} · 主导`;
+    leadTab.innerHTML = `<span class="dot ${isGroupBusy(group.groupId) ? "busy" : "idle"}"></span>${escapeHtml(agentName(group.leadAgent))} · 主导`;
     leadTab.onclick = () => selectGroup(group.groupId, leadStreamKey);
     els.sessionTabs.appendChild(leadTab);
 
@@ -1466,7 +1475,7 @@ function renderStageHeaderAndTabs() {
       tab.type = "button";
       tab.className = `session-tab is-sub${STATE.activeStreamKey === key ? " active" : ""}`;
       tab.title = sub.sessionKey;
-      tab.innerHTML = `<span class="dot ${subRunning ? "busy" : escapeHtml(sub.status)}"></span>${escapeHtml(sub.agent)} · ${escapeHtml(sub.label || sub.name)}${sub.isWorktree ? " [wt]" : ""}`;
+      tab.innerHTML = `<span class="dot ${subRunning ? "busy" : escapeHtml(sub.status)}"></span>${escapeHtml(agentName(sub.agent))} · ${escapeHtml(sub.label || sub.name)}${sub.isWorktree ? " [wt]" : ""}`;
       tab.onclick = () => selectGroup(group.groupId, key);
       els.sessionTabs.appendChild(tab);
     }
@@ -1492,13 +1501,19 @@ function renderStageHeaderAndTabs() {
   const isBusy =
     STATE.sendingStreams.has(STATE.activeStreamKey) ||
     Boolean(activeKey && isSessionRunning(activeKey));
-  els.sendBtn.disabled = STATE.sendingStreams.has(STATE.activeStreamKey);
-  els.sendBtn.textContent = STATE.sendingStreams.has(STATE.activeStreamKey) ? "执行中" : "发送";
+  // 忙的时候仍然可以发：默认排队，等这一轮结束再送出；「引导」则打断当前这一轮
+  els.sendBtn.disabled = false;
+  els.sendBtn.textContent = isBusy ? "排队" : "发送";
+  els.sendBtn.title = isBusy ? "这一轮结束后自动发送（Enter）" : "";
   els.stopSessionBtn.hidden = !isBusy;
+  if (els.steerBtn) els.steerBtn.hidden = !isBusy;
+  // 页面级的「正在工作」提示：对话区顶部一条流动的细线
+  document.querySelector("main.stage")?.classList.toggle("is-busy", isBusy);
+  renderComposerQueue();
   renderModelSelectorBar();
 }
 
-const BASE_DOC_TITLE = "RTM";
+const BASE_DOC_TITLE = "RoundTable Meeting";
 // 图标地址带着服务端给的版本号（?v=…），这里沿用页面里的地址，换图标后不会被旧缓存挡住
 const DEFAULT_FAVICON_HREF = document.getElementById("appFavicon")?.getAttribute("href") || "/ui/icon-64.png";
 const ALERT_FAVICON_HREF = DEFAULT_FAVICON_HREF.replace("icon-64.png", "icon-alert.png");
@@ -1573,7 +1588,7 @@ function syncAttentionIndicators(notifyPayload = null) {
       playSoftAlertChime();
       if ("Notification" in window && Notification.permission === "granted") {
         try {
-          const n = new Notification("RTM 需要你的确认", {
+          const n = new Notification("RoundTable Meeting 需要你的确认", {
             body: notifyPayload.body,
             tag: "agent-hub-pending",
             renotify: true,
@@ -1664,7 +1679,7 @@ function renderEmptyStage(group) {
   box.className = "alma-box empty-stage";
   box.innerHTML = `
     <div class="empty-inner">
-      <h2>${escapeHtml(group?.leadAgent || "claude")} 已就绪</h2>
+      <h2>${escapeHtml(agentName(group?.leadAgent || "claude"))} 已就绪</h2>
       <p>直接发消息开始，或从下面选一个。</p>
       <div class="starter-list">
         <button type="button" class="starter-btn" data-starter="列出当前项目目录核心文件，并委派 codex 检查主要入口逻辑是否存在边界问题">
@@ -1686,6 +1701,52 @@ function renderEmptyStage(group) {
     };
   });
   return box;
+}
+
+const WORKFLOW_STATUS_TEXT = { draft: "草稿，待发布", running: "运行中", completed: "已完成", failed: "未全部完成" };
+
+// 主导调用 workflow_propose 之后，在那条回复下面放一张工作流预览；点一下去工作流页
+function buildWorkflowCardElement(msg) {
+  if (msg.role !== "assistant" || isSubStream(msg.streamKey)) return null;
+  if (!(msg.toolCalls || []).some((t) => String(t.title || "").includes("workflow_propose"))) return null;
+  const workflow = STATE.workflows.get(msg.groupId);
+  if (!workflow || workflow.steps.length === 0) return null;
+
+  const done = workflow.steps.filter((s) => s.status === "completed").length;
+  const statusText =
+    workflow.status === "running"
+      ? `运行中 ${done}/${workflow.steps.length}`
+      : WORKFLOW_STATUS_TEXT[workflow.status] || workflow.status;
+  const agents = [...new Set(workflow.steps.map((s) => s.agent))];
+  const shown = workflow.steps.slice(0, 5);
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = `wf-card status-${workflow.status}`;
+  card.title = "打开工作流";
+  card.innerHTML = `
+    <div class="wf-card-head">
+      <span class="wf-card-title">工作流 · ${workflow.steps.length} 步</span>
+      <span class="wf-card-status">${escapeHtml(statusText)}</span>
+    </div>
+    <div class="wf-card-steps">
+      ${shown
+        .map(
+          (s) => `<span class="wf-card-step status-${escapeHtml(s.status)}"><span class="dot ${s.status === "running" ? "busy" : s.status === "completed" ? "completed" : s.status === "failed" ? "failed" : "idle"}"></span>${escapeHtml(s.name)}</span>`,
+        )
+        .join('<span class="wf-card-arrow">›</span>')}
+      ${workflow.steps.length > shown.length ? `<span class="wf-card-more">还有 ${workflow.steps.length - shown.length} 步</span>` : ""}
+    </div>
+    <div class="wf-card-foot">
+      <span class="wf-card-agents">${agents.map((a) => agentTagHtml(a)).join("")}</span>
+      <span class="wf-card-open">查看并发布 ›</span>
+    </div>
+  `;
+  const groupId = msg.groupId;
+  card.onclick = () => {
+    if (STATE.activeGroupId !== groupId) selectGroup(groupId, `lead:${groupId}`);
+    setStageView("workflow");
+  };
+  return card;
 }
 
 const TOOL_STATUS_TEXT = { pending: "等待中", in_progress: "进行中", completed: "完成", failed: "失败" };
@@ -1985,7 +2046,7 @@ function buildToolGroupElement(tools, isMsgStreaming, groupKey) {
 
 function buildMessageElement(msg, linkedTasks) {
   const entry = document.createElement("div");
-  entry.className = `msg-entry role-${msg.role}`;
+  entry.className = `msg-entry role-${msg.role}${msg.status === "streaming" ? " is-streaming" : ""}`;
   entry.dataset.messageId = msg.messageId;
 
   if (msg.role === "system") {
@@ -2015,7 +2076,7 @@ function buildMessageElement(msg, linkedTasks) {
       const modelPart = msg.usage.modelId ? `${escapeHtml(msg.usage.modelId.split("/").pop())}　` : "";
       usageHtml = `<span class="msg-usage-pill" title="${escapeHtml(detail)}">${modelPart}${estMark}↑${formatTokens(msg.usage.inputTokens)} ↓${formatTokens(msg.usage.outputTokens)}</span>`;
     }
-    meta.innerHTML = `${agentTagHtml(msg.agent, msg.senderLabel)}<span>${formatTime(msg.timestamp)}</span>${usageHtml}`;
+    meta.innerHTML = `${agentTagHtml(msg.agent, senderLabelText(msg))}<span>${formatTime(msg.timestamp)}</span>${usageHtml}`;
   } else {
     meta.innerHTML = `<span>${escapeHtml(`${msg.senderLabel} · ${formatTime(msg.timestamp)}`)}</span>`;
   }
@@ -2152,7 +2213,7 @@ function buildMessageElement(msg, linkedTasks) {
       body.className = "md-body";
       if (msg.status === "streaming") {
         // 高思考强度下第一句话可能要等几分钟；显示已等多久，免得看起来像卡住
-        body.innerHTML = `<span class="msg-waiting">思考中 <span class="msg-elapsed" data-since="${Number(msg.timestamp) || Date.now()}"></span></span>`;
+        body.innerHTML = `<span class="msg-waiting is-thinking"><span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>思考中 <span class="msg-elapsed" data-since="${Number(msg.timestamp) || Date.now()}"></span></span>`;
       } else {
         body.innerHTML =
           msg.status === "cancelled"
@@ -2263,6 +2324,8 @@ function buildMessageElement(msg, linkedTasks) {
   entry.appendChild(meta);
   entry.appendChild(bubble);
   if (delegEl) entry.appendChild(delegEl);
+  const wfCard = buildWorkflowCardElement(msg);
+  if (wfCard) entry.appendChild(wfCard);
   return entry;
 }
 
@@ -2394,7 +2457,7 @@ function renderMessages() {
       foldEl.className = "retry-fold";
       foldEl.dataset.foldKey = item.key;
       if (retryFoldStates.get(item.key)) foldEl.open = true;
-      const agentsText = item.agents.length > 0 ? item.agents.join(" / ") : "会话";
+      const agentsText = item.agents.length > 0 ? item.agents.map((a) => agentName(a)).join(" / ") : "会话";
       const summaryEl = document.createElement("summary");
       summaryEl.className = "retry-fold-summary";
       summaryEl.innerHTML = `
@@ -2608,8 +2671,8 @@ function renderInspector() {
     `;
     const more = document.createElement("button");
     more.type = "button";
-    more.className = "link-btn";
-    more.textContent = "查看上下文分析";
+    more.className = "insp-link-row";
+    more.innerHTML = '<span>上下文分析</span><span class="insp-link-arrow">›</span>';
     more.onclick = () => setStageView("telemetry");
     box.appendChild(more);
     els.inspContext.appendChild(box);
@@ -2728,6 +2791,7 @@ function renderDesktopControls() {
   if (els.portBadge) {
     els.portBadge.textContent = activePort ? `:${activePort}` : "";
     els.portBadge.title = activePort ? `当前监听端口 ${activePort}` : "";
+    if (els.portBadge.parentElement) els.portBadge.parentElement.title = activePort ? `当前监听端口 ${activePort}` : "";
   }
   if (els.quitHubBtn) {
     els.quitHubBtn.hidden = !STATE.desktopMode;
@@ -3032,16 +3096,16 @@ async function addImageFilesToComposer(fileList) {
   }
 }
 
-async function sendStreamPrompt(prompt, targetStreamKey, images = [], extra = {}) {
+async function sendStreamPrompt(prompt, targetStreamKey, images = [], options = {}) {
   const cleanPrompt = (prompt || "").trim();
   const allAttachments = Array.isArray(images) ? images : [];
   const cleanImages = allAttachments.filter((a) => !a.isFile);
   const cleanFiles = allAttachments.filter((a) => a.isFile);
   const reuseMessageId =
-    typeof extra?.reuseMessageId === "string" && extra.reuseMessageId ? extra.reuseMessageId : undefined;
+    typeof options?.reuseMessageId === "string" && options.reuseMessageId ? options.reuseMessageId : undefined;
   const replaceAssistantMessageId =
-    typeof extra?.replaceAssistantMessageId === "string" && extra.replaceAssistantMessageId
-      ? extra.replaceAssistantMessageId
+    typeof options?.replaceAssistantMessageId === "string" && options.replaceAssistantMessageId
+      ? options.replaceAssistantMessageId
       : undefined;
   if ((!cleanPrompt && allAttachments.length === 0 && !reuseMessageId) || !targetStreamKey) return;
   if (STATE.sendingStreams.has(targetStreamKey)) {
@@ -3084,6 +3148,7 @@ async function sendStreamPrompt(prompt, targetStreamKey, images = [], extra = {}
     if (cleanFiles.length > 0) {
       payload.files = cleanFiles.map((f) => ({ name: f.name, mimeType: f.mimeType || undefined, data: f.base64 }));
     }
+    if (options.steer) payload.steer = true;
     const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3102,19 +3167,111 @@ async function sendStreamPrompt(prompt, targetStreamKey, images = [], extra = {}
     if (targetStreamKey === STATE.activeStreamKey) {
       els.promptInput.focus();
     }
+    // 会话状态的更新可能稍晚到；稍等一下再看要不要送出排队的消息
+    setTimeout(() => flushQueue(targetStreamKey), 150);
   }
 }
 
-async function sendPrompt() {
+function streamSessionKey(streamKey) {
+  if (isSubStream(streamKey)) return streamKey.slice(4);
+  const group = STATE.taskGroups.get(streamKey.slice(5));
+  return group ? `${group.leadAgent}:${group.groupId}__lead` : null;
+}
+
+function isStreamBusy(streamKey) {
+  return STATE.sendingStreams.has(streamKey) || isSessionRunning(streamSessionKey(streamKey));
+}
+
+// 排队：这一轮还没结束时发的消息先放着，结束后按顺序送出。只在本页面里，刷新会清空
+function getQueue(streamKey) {
+  return STATE.queuedByStream.get(streamKey) || [];
+}
+
+function renderComposerQueue() {
+  if (!els.composerQueue) return;
+  const queue = getQueue(STATE.activeStreamKey);
+  els.composerQueue.innerHTML = "";
+  els.composerQueue.hidden = queue.length === 0;
+  queue.forEach((item, index) => {
+    const row = document.createElement("div");
+    row.className = `queue-item${item.steer ? " is-steer" : ""}`;
+    const tag = document.createElement("span");
+    tag.className = "queue-tag";
+    tag.textContent = item.steer ? "引导" : `排队 ${index + 1}`;
+    const text = document.createElement("span");
+    text.className = "queue-text";
+    text.textContent = item.prompt || `${item.attachments.length} 个附件`;
+    text.title = item.prompt;
+    row.appendChild(tag);
+    row.appendChild(text);
+    if (item.attachments.length > 0 && item.prompt) {
+      const att = document.createElement("span");
+      att.className = "queue-att";
+      att.textContent = `${item.attachments.length} 个附件`;
+      row.appendChild(att);
+    }
+    if (!item.steer) {
+      const steer = document.createElement("button");
+      steer.type = "button";
+      steer.className = "mini-icon-btn";
+      steer.title = "不等了：打断当前这一轮，立刻用这条消息引导";
+      steer.textContent = "↑";
+      steer.onclick = () => steerWithQueued(STATE.activeStreamKey, item.id);
+      row.appendChild(steer);
+    }
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "mini-icon-btn";
+    remove.title = "取消这条";
+    remove.textContent = "×";
+    remove.onclick = () => {
+      STATE.queuedByStream.set(STATE.activeStreamKey, getQueue(STATE.activeStreamKey).filter((q) => q.id !== item.id));
+      renderComposerQueue();
+    };
+    row.appendChild(remove);
+    els.composerQueue.appendChild(row);
+  });
+}
+
+function enqueuePrompt(streamKey, prompt, attachments, steer) {
+  const item = { id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, prompt, attachments, steer };
+  const queue = getQueue(streamKey);
+  // 引导要抢在排队的消息前面
+  STATE.queuedByStream.set(streamKey, steer ? [item, ...queue.filter((q) => !q.steer)] : [...queue, item]);
+  renderComposerQueue();
+}
+
+// 这一轮结束了就把队首送出去。发送本身会再次触发这里，所以队列是一条一条排空的
+function flushQueue(streamKey) {
+  const queue = getQueue(streamKey);
+  if (queue.length === 0 || isStreamBusy(streamKey)) return;
+  const [next, ...rest] = queue;
+  STATE.queuedByStream.set(streamKey, rest);
+  renderComposerQueue();
+  void sendStreamPrompt(next.prompt, streamKey, next.attachments, { steer: next.steer });
+}
+
+// 引导：打断当前这一轮，等它停下后把这条消息作为引导送出
+function steerWithQueued(streamKey, itemId) {
+  const queue = getQueue(streamKey);
+  const item = queue.find((q) => q.id === itemId);
+  if (!item) return;
+  item.steer = true;
+  STATE.queuedByStream.set(streamKey, [item, ...queue.filter((q) => q.id !== itemId && !q.steer)]);
+  renderComposerQueue();
+  if (isStreamBusy(streamKey)) {
+    void cancelSession(streamSessionKey(streamKey));
+  } else {
+    flushQueue(streamKey);
+  }
+}
+
+async function sendPrompt(options = {}) {
   const prompt = els.promptInput.value.trim();
   const group = getActiveGroup();
   const targetStreamKey = STATE.activeStreamKey;
   const images = [...getActiveImageDrafts(targetStreamKey)];
   if ((!prompt && images.length === 0) || !group) return;
-
-  if (STATE.sendingStreams.has(targetStreamKey)) {
-    return;
-  }
 
   els.promptInput.value = "";
   els.promptInput.style.height = "52px";
@@ -3122,6 +3279,12 @@ async function sendPrompt() {
   STATE.draftsByStream.delete(targetStreamKey);
   STATE.imageDraftsByStream.delete(targetStreamKey);
   renderComposerAttachments();
+
+  if (isStreamBusy(targetStreamKey)) {
+    enqueuePrompt(targetStreamKey, prompt, images, Boolean(options.steer));
+    if (options.steer) void cancelSession(streamSessionKey(targetStreamKey));
+    return;
+  }
   await sendStreamPrompt(prompt, targetStreamKey, images);
 }
 
@@ -3153,18 +3316,56 @@ async function loadAdapterHealth() {
   }
 }
 
+// 与后端断开时：只记一条日志，超过几秒还没连上就在页面顶部明说，连上后自动消失。
+// 后端崩溃由守护进程自动重启，页面这边只管不停重试。
+const CONN = { lostAt: 0, bannerTimer: null };
+
+function renderConnBanner() {
+  let banner = document.getElementById("connBanner");
+  if (!CONN.lostAt) {
+    if (banner) banner.remove();
+    return;
+  }
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = "connBanner";
+    banner.className = "conn-banner";
+    banner.setAttribute("role", "status");
+    document.body.appendChild(banner);
+  }
+  const secs = Math.round((Date.now() - CONN.lostAt) / 1000);
+  banner.textContent =
+    secs < 60
+      ? `与后端的连接断开了，正在重连（${secs} 秒）。后端如果是意外退出，会自动重启并恢复任务记录。`
+      : `已经 ${Math.floor(secs / 60)} 分钟连不上后端。请重新启动 RoundTable Meeting，任务记录会保留；原因可查看数据目录下的 crash.log。`;
+}
+
 function connectWs() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/ws`);
   ws.onopen = () => {
     els.wsDot.classList.add("ok");
     els.wsDot.title = "WebSocket 已连接";
-    appendLog("WebSocket 已连接");
+    if (CONN.lostAt) {
+      appendLog(`已重新连接后端（中断 ${Math.round((Date.now() - CONN.lostAt) / 1000)} 秒）`);
+    } else {
+      appendLog("WebSocket 已连接");
+    }
+    CONN.lostAt = 0;
+    clearInterval(CONN.bannerTimer);
+    CONN.bannerTimer = null;
+    renderConnBanner();
   };
   ws.onclose = () => {
     els.wsDot.classList.remove("ok");
     els.wsDot.title = "WebSocket 断开，正在重连...";
-    appendLog("WebSocket 断开，正在重连...");
+    if (!CONN.lostAt) {
+      CONN.lostAt = Date.now();
+      appendLog("与后端的连接断开，正在重连...");
+      CONN.bannerTimer = setInterval(() => {
+        if (Date.now() - CONN.lostAt >= 4000) renderConnBanner();
+      }, 1000);
+    }
     setTimeout(connectWs, 1500);
   };
   ws.onmessage = (evt) => {
@@ -3254,6 +3455,10 @@ function connectWs() {
       ) {
         appendLog(`${msg.workflow.proposedBy} 起草了一个 ${msg.workflow.steps.length} 步的工作流，等待发布`);
         document.querySelector('.mode-tab[data-stage-view="workflow"]')?.classList.add("has-news");
+      }
+      // 对话里的工作流预览卡片要跟着状态变
+      if (msg.workflow.groupId === STATE.activeGroupId && STATE.stageView === "chat") {
+        scheduleUiRender(UI_REGION.messages);
       }
       window.HUB_APP?.onStateChange?.();
     } else if (msg.type === "settings_updated") {
@@ -3412,6 +3617,10 @@ function connectWs() {
       }
     } else if (msg.type === "session_updated") {
       STATE.sessions.set(msg.session.sessionKey, msg.session);
+      if (msg.session.status === "idle" && STATE.queuedByStream.size > 0) {
+        const streamKey = msg.session.role === "lead" ? `lead:${msg.session.groupId}` : `sub:${msg.session.sessionKey}`;
+        setTimeout(() => flushQueue(streamKey), 150);
+      }
       scheduleUiRender(
         UI_REGION.sidebar |
           UI_REGION.header |
@@ -3868,9 +4077,13 @@ els.promptInput.addEventListener("keydown", (e) => {
   }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
-    void sendPrompt();
+    void sendPrompt({ steer: (e.ctrlKey || e.metaKey) && isStreamBusy(STATE.activeStreamKey) });
   }
 });
+
+if (els.steerBtn) {
+  els.steerBtn.onclick = () => void sendPrompt({ steer: true });
+}
 
 if (els.attachImageBtn && els.imageFileInput) {
   els.attachImageBtn.onclick = () => els.imageFileInput.click();

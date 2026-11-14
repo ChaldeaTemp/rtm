@@ -12,7 +12,7 @@ The interface is currently in Chinese only.
 
 ## What it does
 
-- **One task, several agents.** Each task has a lead agent. The lead can delegate work to other agents, and you can switch the lead at any time; the new lead receives a summary of the conversation so far.
+- **One task, several agents.** Each task has a lead agent. The lead can delegate work to other agents, and is chosen when the task is created. To change it, ask the current lead in the conversation to hand over: it writes a brief, and the new lead confirms what it is taking over before carrying on.
 - **Workflows.** Lay out the work for sub-sessions as steps with dependencies, review it, then publish it in one go. Write the steps yourself or ask the lead to draft them.
 - **Progress panel.** Agents keep the task's goal, steps and current state up to date themselves, so you do not have to keep asking where things stand.
 - **Session panel.** Context usage, sub-agents, files read and changed, and artifacts of the session you are looking at.

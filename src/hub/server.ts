@@ -57,17 +57,25 @@ const TRANSIENT_EVENT_TYPES = new Set(["agent_chunk", "tool_event", "snapshot", 
 /** Session-name suffix of the throwaway session that names a task; never shown in the UI. */
 const TITLE_SESSION_SUFFIX = "__title";
 
+const DEFAULT_WORKFLOW_PARALLEL = 3;
+
+function clampWorkflowParallel(value: unknown): number {
+  const n = Math.floor(Number(value));
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, 8) : DEFAULT_WORKFLOW_PARALLEL;
+}
+
 function loadHubSettings(): HubSettings {
   try {
     const parsed = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")) as Partial<HubSettings>;
     return {
       autoTitle: parsed.autoTitle === true,
+      workflowParallel: clampWorkflowParallel(parsed.workflowParallel),
       recentProjects: Array.isArray(parsed.recentProjects)
         ? parsed.recentProjects.filter((p) => p && typeof p.path === "string").slice(0, 20)
         : [],
     };
   } catch {
-    return { autoTitle: false };
+    return { autoTitle: false, workflowParallel: DEFAULT_WORKFLOW_PARALLEL };
   }
 }
 
@@ -131,6 +139,7 @@ const ChatBodySchema = z
     prompt: z.string().optional().default(""),
     images: z.array(ChatImageInputSchema).max(6).optional(),
     files: z.array(ChatFileInputSchema).max(MAX_FILES_PER_MESSAGE).optional(),
+    steer: z.boolean().optional(),
     reuseMessageId: z.string().optional(),
     replaceAssistantMessageId: z.string().optional(),
     leadAgent: AgentIdSchema.optional(),
@@ -185,6 +194,7 @@ const SessionChatBodySchema = z
     prompt: z.string().optional().default(""),
     images: z.array(ChatImageInputSchema).max(6).optional(),
     files: z.array(ChatFileInputSchema).max(MAX_FILES_PER_MESSAGE).optional(),
+    steer: z.boolean().optional(),
     reuseMessageId: z.string().optional(),
     replaceAssistantMessageId: z.string().optional(),
     model: z.string().optional(),
@@ -266,6 +276,14 @@ const WorkflowSaveSchema = z.object({
 });
 
 const WorkflowGroupSchema = z.object({ groupId: z.string().min(1) });
+
+const LeadHandoffSchema = z.object({
+  groupId: z.string().optional(),
+  from: z.string().min(1),
+  to: z.string().min(1),
+  brief: z.string().min(1),
+  depth: z.number().optional(),
+});
 
 const ProgressUpdateSchema = z.object({
   groupId: z.string().optional(),
@@ -665,6 +683,25 @@ function autoTitleFromPrompt(prompt: string): string {
   return firstLine.length > 26 ? `${firstLine.slice(0, 26)}…` : firstLine;
 }
 
+/**
+ * Put in front of a message the user sent to redirect a turn they interrupted. The transcript
+ * shows the user's words only; the agent also needs to know why its turn was cut short.
+ */
+function buildHandoffPrompt(fromLabel: string, brief: string): string {
+  return [
+    "<lead_handoff>",
+    `You are now the Lead Agent of this task. The user asked the previous lead (${fromLabel}) to hand the task over to you, and it wrote this brief for you:`,
+    "",
+    brief,
+    "</lead_handoff>",
+    "",
+    "You have not seen the earlier conversation; the brief and the task's shared context (`context_get`) are what you have. Reply to the user now, briefly: what you understand you are taking over, and what you will do next. Do not start large pieces of work in this reply unless the brief says the user is waiting for them. If something essential is missing from the brief, ask the user.",
+  ].join("\n");
+}
+
+const STEER_PREFIX =
+  "[The user interrupted your previous turn on purpose to steer you. Take the guidance below into account, then continue the task you were working on; do not start over unless the guidance says so.]\n\n";
+
 /** Tells the agent where the attached files were saved; empty when there are none. */
 function buildAttachedFilesBlock(files: ChatFileAttachment[]): string {
   if (files.length === 0) {
@@ -700,6 +737,8 @@ export class AgentHubServer {
   private readonly lastCostBySession = new Map<string, number>();
   private stateStore?: HubStateStore;
   private progressByGroup = new Map<string, TaskProgress>();
+  /** Handoffs the current lead asked for; carried out when its turn ends. */
+  private pendingHandoffs = new Map<string, { from: AgentId; to: AgentId; brief: string }>();
   /** Sessions from before a restart: not running, kept so their history stays reachable. */
   private archivedSessions = new Map<string, SessionRecord>();
   private readonly taskContext = new TaskContextStore((context) =>
@@ -723,6 +762,7 @@ export class AgentHubServer {
         { sections: contextRefs, results: upstreamStepIds },
       );
     },
+    maxParallel: () => clampWorkflowParallel(this.settings.workflowParallel),
     missingContext: (groupId, keys) => this.taskContext.missingSections(groupId, keys),
     saveResult: (groupId, step, output) => this.taskContext.setResult(groupId, step, output),
     clearResults: (groupId) => this.taskContext.clearResults(groupId),
@@ -1015,6 +1055,9 @@ export class AgentHubServer {
     if (typeof patch.autoTitle === "boolean") {
       this.settings.autoTitle = patch.autoTitle;
     }
+    if (patch.workflowParallel !== undefined) {
+      this.settings.workflowParallel = clampWorkflowParallel(patch.workflowParallel);
+    }
     try {
       fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
       fs.writeFileSync(SETTINGS_FILE, JSON.stringify(this.settings, null, 2), "utf8");
@@ -1251,6 +1294,59 @@ export class AgentHubServer {
     return clean;
   }
 
+  private agentLabel(agent: AgentId): string {
+    return this.registry.getDefinition(agent)?.label || agent;
+  }
+
+  /**
+   * The lead of a task asks to pass the lead role to another agent. Nothing switches yet:
+   * the current lead finishes its turn first, then the new lead is started with the brief.
+   */
+  requestLeadHandoff(input: { groupId?: string; from: string; to: string; brief: string; depth?: number }): {
+    groupId: string;
+    to: AgentId;
+    toLabel: string;
+  } {
+    const group = this.groups.get(input.groupId && this.groups.has(input.groupId) ? input.groupId : this.defaultGroupId)!;
+    if ((input.depth ?? 0) > 0 || input.from.trim().toLowerCase() !== group.leadAgent) {
+      throw new Error("Only the current lead of the task can hand the lead role over.");
+    }
+    const enabled = this.registry.listEnabledDefinitions();
+    const wanted = input.to.trim().toLowerCase();
+    const target = enabled.find((d) => d.id === wanted) ?? enabled.find((d) => (d.label || "").toLowerCase() === wanted);
+    const others = enabled.filter((d) => d.id !== group.leadAgent);
+    if (!target) {
+      throw new Error(
+        `No enabled agent "${input.to}". Agents that can take over: ${others.map((d) => d.id).join(", ") || "(none)"}`,
+      );
+    }
+    if (target.id === group.leadAgent) {
+      throw new Error(`${target.id} already leads this task.`);
+    }
+    const brief = input.brief.trim();
+    if (!brief) {
+      throw new Error("The handoff brief is empty.");
+    }
+    this.pendingHandoffs.set(group.groupId, { from: group.leadAgent, to: target.id, brief });
+    return { groupId: group.groupId, to: target.id, toLabel: target.label || target.id };
+  }
+
+  /** Carries out a handoff the lead asked for during the turn that just ended. */
+  private completePendingHandoff(group: TaskGroup, finishedLead: AgentId, turnSucceeded: boolean): void {
+    const pending = this.pendingHandoffs.get(group.groupId);
+    if (!pending) return;
+    this.pendingHandoffs.delete(group.groupId);
+    if (!turnSucceeded || pending.from !== finishedLead || group.leadAgent !== finishedLead || group.archived) return;
+    try {
+      this.setGroupLeadAgent(group.groupId, pending.to);
+    } catch {
+      return;
+    }
+    // Started before the finished turn's response goes out, so a message the user sends next
+    // queues behind the takeover turn. Failures are already shown in the transcript.
+    void this.runLeadChat({ groupId: group.groupId, handoff: { from: pending.from, brief: pending.brief } }).catch(() => {});
+  }
+
   private syncGroupLeadModelFields(group: TaskGroup): void {
     const def = this.registry.getDefinition(group.leadAgent);
     group.leadModel = group.agentModels?.[group.leadAgent] ?? def?.defaultModel;
@@ -1400,7 +1496,7 @@ export class AgentHubServer {
       sessionKey: buildSessionKey(validAgent, `${groupId}__lead`),
       role: "system",
       senderLabel: "系统",
-      text: `主导会话已切换：${previousLead} → ${validAgent}`,
+      text: `主导已交接：${this.agentLabel(previousLead)} → ${this.agentLabel(validAgent)}`,
       thoughtText: "",
       toolCalls: [],
       status: "done",
@@ -2692,6 +2788,8 @@ export class AgentHubServer {
       prompt?: string;
       images?: Array<{ name?: string; mimeType: string; data: string }>;
       files?: Array<{ name: string; mimeType?: string; data: string }>;
+      steer?: boolean;
+      handoff?: { from: AgentId; brief: string };
       reuseMessageId?: string;
       replaceAssistantMessageId?: string;
     },
@@ -2753,14 +2851,17 @@ export class AgentHubServer {
       }
     }
 
-    const displayUserText = (input.prompt ?? "").trim() || (validReuse?.text ?? "").trim();
+    const displayUserText =
+      (input.handoff?.brief ?? input.prompt ?? "").trim() || (validReuse?.text ?? "").trim();
     const effectiveUserPrompt =
       displayUserText ||
       (savedFiles.length > 0 ? "请查看附带的文件。" : savedImages.length > 0 ? "请查看并分析附带的图片。" : "");
     if (!effectiveUserPrompt) {
       throw new Error("请输入消息内容，或至少附带一张图片或一个文件");
     }
-    const promptForAgent = `${effectiveUserPrompt}${buildAttachedFilesBlock(savedFiles)}`;
+    const promptForAgent = input.handoff
+      ? buildHandoffPrompt(this.agentLabel(input.handoff.from), effectiveUserPrompt)
+      : `${input.steer ? STEER_PREFIX : ""}${effectiveUserPrompt}${buildAttachedFilesBlock(savedFiles)}`;
 
     return {
       reusedUserMessage: Boolean(validReuse),
@@ -2794,6 +2895,10 @@ export class AgentHubServer {
     prompt?: string;
     images?: Array<{ name?: string; mimeType: string; data: string }>;
     files?: Array<{ name: string; mimeType?: string; data: string }>;
+    /** The user interrupted the running turn to redirect it; the agent is told so. */
+    steer?: boolean;
+    /** The previous lead passed the role on; `brief` is what it wrote for its successor. */
+    handoff?: { from: AgentId; brief: string };
     reuseMessageId?: string;
     replaceAssistantMessageId?: string;
     leadAgent?: AgentId;
@@ -2857,7 +2962,15 @@ export class AgentHubServer {
       startsFresh && (group.extraDirs?.length ?? 0) > 0
         ? `\n\n<additional_directories>\nBesides the working directory, this task also covers these directories. Read and edit files there as needed:\n${group.extraDirs!.map((d) => `- ${d}`).join("\n")}\n</additional_directories>`
         : "";
-    const leadPromptMeta = ledger.buildLeadPromptWithMeta(lead, `${promptForAgent}${extraDirsNote}`);
+    // On a handoff the previous lead's own brief replaces the mechanical history. It only counts
+    // as delivered once this turn succeeds (recordTurn); a failed takeover gets the history later.
+    const leadPromptMeta = input.handoff
+      ? {
+          prompt: `${promptForAgent}${extraDirsNote}`,
+          handoffTokens: estimateTokens(promptForAgent),
+          missedTurnsCount: 0,
+        }
+      : ledger.buildLeadPromptWithMeta(lead, `${promptForAgent}${extraDirsNote}`);
 
     if (!prepared.reusedUserMessage) {
       const now = Date.now();
@@ -2866,8 +2979,9 @@ export class AgentHubServer {
         groupId: group.groupId,
         streamKey,
         sessionKey,
-        role: "user",
-        senderLabel: "你",
+        role: input.handoff ? "caller" : "user",
+        senderLabel: input.handoff ? `${this.agentLabel(input.handoff.from)} 交接` : "你",
+        agent: input.handoff?.from,
         text: displayUserText,
         thoughtText: "",
         toolCalls: [],
@@ -2935,12 +3049,13 @@ export class AgentHubServer {
 
       const turn = ledger.recordTurn({
         leadAgent: lead,
-        userText: effectiveUserPrompt,
+        userText: input.handoff ? `[Handoff brief from ${input.handoff.from}] ${effectiveUserPrompt}` : effectiveUserPrompt,
         assistantSummary: result.outputText,
         peerCallsSummary: result.peerToolsCalled,
       });
       turn.groupId = group.groupId;
       this.broadcast({ type: "ledger_turn", turn: { ...turn }, timestamp: Date.now() });
+      this.completePendingHandoff(group, lead, result.stopReason !== "cancelled");
 
       if (promptDerivedTitle && this.settings.autoTitle && result.stopReason !== "cancelled") {
         void this.generateTaskTitle(group, promptDerivedTitle, effectiveUserPrompt, result.outputText);
@@ -2956,6 +3071,7 @@ export class AgentHubServer {
       };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
+      this.completePendingHandoff(group, lead, false);
       if (errMsg.includes("SESSION_CANCELLED_BY_USER")) {
         assistantMsg.status = "cancelled";
         assistantMsg.completedAt = Date.now();
@@ -2983,6 +3099,7 @@ export class AgentHubServer {
     prompt?: string;
     images?: Array<{ name?: string; mimeType: string; data: string }>;
     files?: Array<{ name: string; mimeType?: string; data: string }>;
+    steer?: boolean;
     reuseMessageId?: string;
     replaceAssistantMessageId?: string;
     model?: string;
@@ -3654,6 +3771,12 @@ export class AgentHubServer {
         return;
       }
 
+      if (method === "POST" && pathname === "/api/lead/handoff") {
+        const body = LeadHandoffSchema.parse(await readJsonBody(req));
+        sendJson(res, 200, { ok: true, ...this.requestLeadHandoff(body) });
+        return;
+      }
+
       if (method === "POST" && pathname === "/api/chat") {
         const body = ChatBodySchema.parse(await readJsonBody(req));
         const result = await this.runLeadChat(body);
@@ -4071,6 +4194,12 @@ export class AgentHubServer {
         return;
       }
 
+      if (method === "POST" && pathname === "/api/workflows/resume") {
+        const body = WorkflowGroupSchema.parse(await readJsonBody(req));
+        sendJson(res, 200, { ok: true, workflow: this.workflows.resume(body.groupId) });
+        return;
+      }
+
       if (method === "POST" && pathname === "/api/workflows/cancel") {
         const body = WorkflowGroupSchema.parse(await readJsonBody(req));
         sendJson(res, 200, { ok: true, workflow: this.workflows.cancel(body.groupId) });
@@ -4083,7 +4212,9 @@ export class AgentHubServer {
       }
 
       if (method === "POST" && pathname === "/api/settings") {
-        const input = z.object({ autoTitle: z.boolean().optional() }).parse(await readJsonBody(req));
+        const input = z
+          .object({ autoTitle: z.boolean().optional(), workflowParallel: z.number().optional() })
+          .parse(await readJsonBody(req));
         sendJson(res, 200, { ok: true, settings: this.updateSettings(input) });
         return;
       }
@@ -4300,6 +4431,11 @@ export class AgentHubServer {
     }
 
     return this.url;
+  }
+
+  /** Writes pending state to disk now. For the moments when a normal stop() is not possible. */
+  flushState(): void {
+    this.stateStore?.flush();
   }
 
   async stop(): Promise<void> {

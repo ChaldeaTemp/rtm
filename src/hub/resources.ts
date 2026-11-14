@@ -52,6 +52,7 @@ export function buildHubWorkbenchGuide(role: "lead" | "sub" = "lead"): string {
     lines.push(
       "- Peer agent collaboration: Call `peer_list_agents`, `peer_ask` (sync), or `peer_dispatch` + `peer_status` (parallel sub-sessions) when delegating subtasks.",
       "- Multi-step delegation with dependencies: Call `workflow_propose` to draft the steps; the user reviews and publishes the draft in the Workflow panel, so do not dispatch those steps yourself.",
+      "- Handing over the lead: when the user asks you to pass this task to another agent, call `lead_handoff` with that agent's id and a complete brief, then tell the user in one sentence and stop. Never do this on your own initiative.",
       "- Shared task context: sub-sessions do not see this conversation. Whatever several of them need (goal, conventions, constraints, where materials are) goes into the task's shared context once, via `shared_context`/`sections` of `workflow_propose` or `context_put`, and is delivered to them automatically. Keep delegation prompts to what is specific to that delegation; never paste the same background into each one.",
     );
   }
@@ -706,7 +707,22 @@ export class SharedResourceManager {
       skillLines.length > 0 ? [...skillsHeaderLines, ...skillLines].join("\n") : "";
     const skillsIndexTokens = skillsSection ? estimateTokens(skillsSection) : 0;
 
-    if (ruleBlocks.length === 0 && !skillsSection) {
+    // The hub cannot stop an agent from loading what lives in its own config directory, so
+    // switching such an item off only works if the agent is told about it.
+    const turnedOffNative = items.filter((i) => !i.enabled && i.nativeAgents.includes(agent));
+    const turnedOffSection =
+      turnedOffNative.length > 0
+        ? [
+            "## Turned Off In This Workbench",
+            "The user switched these off for this workbench. Your own configuration still loads them, so they may show up in your skill list or rules. Treat them as absent here: do not invoke these skills or follow these rules, and where your other instructions tell you to use one of them, that instruction does not apply in this workbench.",
+            ...turnedOffNative.map(
+              (i) => `- ${i.kind} \`${i.name}\` (${toForwardSlashes(i.primaryPath)})`,
+            ),
+          ].join("\n")
+        : "";
+    const turnedOffTokens = turnedOffSection ? estimateTokens(turnedOffSection) : 0;
+
+    if (ruleBlocks.length === 0 && !skillsSection && !turnedOffSection) {
       return {
         promptPrefix: "",
         sharedRulesTokens: 0,
@@ -737,11 +753,14 @@ export class SharedResourceManager {
     if (skillsSection) {
       sections.push("", skillsSection);
     }
+    if (turnedOffSection) {
+      sections.push("", turnedOffSection);
+    }
     sections.push("</shared_resources_context>", "");
 
     return {
       promptPrefix: `${sections.join("\n")}\n`,
-      sharedRulesTokens,
+      sharedRulesTokens: sharedRulesTokens + turnedOffTokens,
       skillsIndexTokens,
       injectedRules,
       injectedSkillsCount: skillLines.length - (omittedSkills > 0 ? 1 : 0),

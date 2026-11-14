@@ -8,6 +8,7 @@ import { AgentHubServer, readRuntimeFile } from "./hub/server.js";
 import { createDesktopShortcut, planDesktopLaunch, saveDesktopPrefs } from "./desktop.js";
 import { runRepl } from "./cli/repl.js";
 import { openInteractiveWindow } from "./ui/launcher.js";
+import { appendCrashLog, superviseDesktop, SUPERVISED_ENV } from "./supervisor.js";
 
 function parseCliFlags(argv: string[]): {
   command?: string;
@@ -29,6 +30,7 @@ function parseCliFlags(argv: string[]): {
   chooseDir: boolean;
   /** desktop: print the launch plan as JSON and exit without starting anything. */
   dryRun: boolean;
+  noSupervise: boolean;
 } {
   let command: string | undefined;
   let lead: AgentId | undefined;
@@ -46,6 +48,7 @@ function parseCliFlags(argv: string[]): {
   let cwdExplicit = false;
   let chooseDir = false;
   let dryRun = false;
+  let noSupervise = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -82,6 +85,8 @@ function parseCliFlags(argv: string[]): {
       chooseDir = true;
     } else if (arg === "--dry-run") {
       dryRun = true;
+    } else if (arg === "--no-supervise") {
+      noSupervise = true;
     } else if (arg === "--approve" && argv[i + 1]) {
       const val = argv[++i]!;
       if (val === "all" || val === "approve-all") permissionMode = "approve-all";
@@ -113,6 +118,7 @@ function parseCliFlags(argv: string[]): {
     cwdExplicit,
     chooseDir,
     dryRun,
+    noSupervise,
   };
 }
 
@@ -122,6 +128,11 @@ async function main(): Promise<void> {
   if (opts.command === "shortcut") {
     console.log(`Desktop shortcut created: ${createDesktopShortcut()}`);
     return;
+  }
+
+  // The desktop hub runs under a supervisor that restarts it if it dies unexpectedly.
+  if (opts.command === "desktop" && !opts.dryRun && !opts.noSupervise && !process.env[SUPERVISED_ENV]) {
+    process.exit(await superviseDesktop(process.argv.slice(2)));
   }
 
   if (opts.command === "desktop") {
@@ -199,6 +210,22 @@ async function main(): Promise<void> {
   });
   process.once("SIGTERM", () => {
     void cleanup();
+  });
+
+  // A bug in one request must not take every running agent down with it: a stray rejection is
+  // logged and the hub carries on. After an uncaught exception the process state cannot be
+  // trusted, so the state is saved and the process exits non-zero for the supervisor to restart.
+  process.on("unhandledRejection", (reason) => {
+    appendCrashLog("unhandled rejection (hub kept running)", reason instanceof Error ? reason.stack : String(reason));
+  });
+  process.on("uncaughtException", (err) => {
+    appendCrashLog("uncaught exception (hub exiting)", err.stack ?? String(err));
+    try {
+      hub.flushState();
+    } catch {
+      // Already going down.
+    }
+    process.exit(1);
   });
 
   const url = await hub.start(opts.port);
