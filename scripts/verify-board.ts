@@ -93,6 +93,11 @@ async function main(): Promise<void> {
     fetch(url + p, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json() as Promise<Json>);
   const get = (p: string): Promise<Json> => fetch(url + p).then((r) => r.json() as Promise<Json>);
   const sessions = (): Json[] => (hub as unknown as { listVisibleSessions(): Json[] }).listVisibleSessions();
+  const updatesLog = path.join(stateDir, "updates.log");
+  const updates = (): string[] =>
+    fs.existsSync(updatesLog)
+      ? fs.readFileSync(updatesLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l).text as string)
+      : [];
 
   try {
     const regRes = await post("/api/agents/save", {
@@ -105,7 +110,7 @@ async function main(): Promise<void> {
     await post("/api/settings", { boardParallel: 1 });
     let res = await post("/api/board/publish", {
       common: "Shared rule: reply in one line.",
-      items: [{ brief: "VERYSLOW first", cwd }, { brief: "second", cwd }, { brief: "third", cwd, title: "Third" }],
+      items: [{ brief: "VERYSLOW first", cwd }, { brief: "second", cwd }, { brief: "VERYSLOW third", cwd, title: "Third" }],
     });
     check("three tasks published", res.ok === true && res.groups?.length === 3, res.error);
     const ids: string[] = (res.groups ?? []).map((g: Json) => g.groupId);
@@ -192,7 +197,7 @@ async function main(): Promise<void> {
     console.log("=== 4. Waiting and user actions ===");
     const act = (groupId: string, action: string, note?: string) => post("/api/board/action", { groupId, action, note });
     check("third task is running", await until(async () => (await card(ids[2]))?.board.status === "running"));
-    res = await post("/api/board/publish", { items: [{ brief: "fourth", cwd }] });
+    res = await post("/api/board/publish", { items: [{ brief: "SLOW fourth", cwd }] });
     const fourth: string = res.groups[0].groupId;
     const pendingQ = hub.askUserQuestion({
       groupId: ids[2],
@@ -236,6 +241,35 @@ async function main(): Promise<void> {
       hub.getGroup(toArchive)?.board?.status === "queued" &&
       hub.getGroup(toDelete) === undefined);
     await act(afterThem, "cancel");
+
+    console.log("=== 5. A lead that ends without reporting ===");
+    await post("/api/settings", { boardParallel: 8 });
+    const beforeSilent = updates().length;
+    res = await post("/api/board/publish", { items: [{ brief: "never reports", cwd }] });
+    const silent: string = res.groups[0].groupId;
+    const leadMsgs = () => hub.getMessages({ streamKey: `lead:${silent}` });
+    check("it is asked to report or continue", await until(() =>
+      updates().slice(beforeSilent).some((u) => /<workbench_update>/.test(u) && /task_report/.test(u)) &&
+      leadMsgs().some((m: Json) => m.role === "system"), 5000));
+    check("after the limit it waits for the user", await until(async () => {
+      const c = await card(silent);
+      return c?.board.status === "running" && c?.waiting === true && c?.waitingReason === "stalled";
+    }, 60000));
+    const turnsAtStall = leadMsgs().filter((m: Json) => m.role === "assistant").length;
+    await sleep(1500);
+    check("no more automatic turns after that", leadMsgs().filter((m: Json) => m.role === "assistant").length === turnsAtStall);
+
+    await post("/api/settings", { boardParallel: 1 });
+    const slotHolder: string = (await post("/api/board/publish", { items: [{ brief: "SLOW holder", cwd }] })).groups[0].groupId;
+    check("stalled task frees its slot for another task", await until(async () => (await card(slotHolder))?.board.status === "running"));
+    const userChatPromise = post("/api/chat", { groupId: silent, prompt: "SLOW keep going" });
+    check("a user message clears the stall even over the parallel limit", await until(async () => {
+      const c = await card(silent);
+      return c?.board.status === "running" && c?.waiting === false && c?.waitingReason === undefined;
+    }, 5000));
+    check("direct user message succeeds", (await userChatPromise).ok === true);
+    await act(silent, "cancel");
+    await act(slotHolder, "cancel");
   } finally {
     await hub.stop();
     try { fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* ignore on windows */ }

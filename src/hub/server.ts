@@ -787,6 +787,7 @@ interface LeadNotice {
   detail: string;
   taskId?: string;
   questionId?: string;
+  boardNudge?: boolean;
 }
 
 /** How long an interrupted task waits for the guidance that should follow the interruption. */
@@ -1853,6 +1854,35 @@ export class AgentHubServer {
         this.broadcast({ type: "session_updated", session: { ...asleep }, timestamp: Date.now() });
       });
     }
+  }
+
+  private checkBoardStall(groupId: string): void {
+    const group = this.groups.get(groupId);
+    if (!group || group.archived || !group.board || group.board.status !== "running") {
+      return;
+    }
+    if (this.boardWaiting(groupId)) return;
+    if (this.pendingHandoffs.has(groupId)) return;
+    if (this.steerPending.has(buildSessionKey(group.leadAgent, `${groupId}__lead`))) return;
+    const hasBusySession = this.pool.listSessions().some(
+      (s) => s.groupId === groupId && (s.status === "busy" || s.status === "starting"),
+    );
+    if (hasBusySession) return;
+    const hasActiveTurn = [...this.activeAssistantBySession.values()].some((m) => m.groupId === groupId);
+    if (hasActiveTurn) return;
+    const hasRunningTask = [...this.tasks.values()].some(
+      (task) => task.groupId === groupId && (task.status === "running" || task.status === "queued"),
+    );
+    if (hasRunningTask) return;
+    if (this.workflows.get(groupId).status === "running") return;
+    if ((this.leadInbox.get(groupId)?.length ?? 0) > 0) return;
+
+    this.notifyLead(groupId, {
+      boardNudge: true,
+      summary: t("boardNudgeSummary"),
+      detail:
+        'You ended your turn, but this task is still open on the task board and nothing is running for it. Either call `task_report` now (outcome "delivered" with the deliverables, or "failed" with the reason), or say what is left and keep working.',
+    });
   }
 
   reportBoardTask(input: {
@@ -3211,6 +3241,10 @@ export class AgentHubServer {
       // Keep them for the user's next message instead of letting agents drive each other forever.
       if (turns === MAX_AUTO_LEAD_TURNS + 1) {
         this.autoLeadTurns.set(groupId, turns);
+        if (group.board?.status === "running" && !group.board.stalled) {
+          group.board.stalled = true;
+          this.boardChanged(group);
+        }
         const now = Date.now();
         this.upsertMessage({
           messageId: `msg-${randomUUID().slice(0, 8)}`,
@@ -3227,7 +3261,12 @@ export class AgentHubServer {
           completedAt: now,
         });
       }
-      this.leadInbox.set(groupId, fresh);
+      const nonNudge = fresh.filter((n) => !n.boardNudge);
+      if (nonNudge.length > 0) {
+        this.leadInbox.set(groupId, nonNudge);
+      } else {
+        this.leadInbox.delete(groupId);
+      }
       return;
     }
     this.autoLeadTurns.set(groupId, turns);
@@ -3741,6 +3780,11 @@ export class AgentHubServer {
     if (!input.notice && !input.handoff) {
       // The user is driving again: hub-started turns may resume.
       this.autoLeadTurns.delete(group.groupId);
+      if (group.board && (group.board.stalled || group.board.interrupted)) {
+        delete group.board.stalled;
+        delete group.board.interrupted;
+        this.boardChanged(group);
+      }
     }
     const forced = /^\/lead\s+(\S+)\s*$/i.exec((input.prompt ?? "").trim());
     if (forced && !input.handoff) {
@@ -3862,6 +3906,9 @@ export class AgentHubServer {
     this.activeAssistantBySession.set(sessionKey, assistantMsg);
     this.upsertMessage(assistantMsg);
 
+    let endedNormally = false;
+    let handedOff = false;
+
     try {
       const result = await this.pool.runTurn({
         ...this.buildLeadSessionOptions(group, input),
@@ -3910,7 +3957,9 @@ export class AgentHubServer {
       });
       turn.groupId = group.groupId;
       this.broadcast({ type: "ledger_turn", turn: { ...turn }, timestamp: Date.now() });
-      this.completePendingHandoff(group, lead, result.stopReason !== "cancelled");
+      endedNormally = result.stopReason !== "cancelled";
+      handedOff = endedNormally && this.pendingHandoffs.has(group.groupId);
+      this.completePendingHandoff(group, lead, endedNormally);
 
       if (promptDerivedTitle && this.settings.autoTitle && result.stopReason !== "cancelled") {
         void this.generateTaskTitle(group, promptDerivedTitle, effectiveUserPrompt, result.outputText);
@@ -3948,6 +3997,8 @@ export class AgentHubServer {
       }
       if (group.board?.status === "delivered" || group.board?.status === "failed") {
         this.releaseBoardSessions(group.groupId);
+      } else if (endedNormally && !handedOff) {
+        this.checkBoardStall(group.groupId);
       }
       setImmediate(() => this.flushLeadInbox(group.groupId));
     }
