@@ -1,8 +1,8 @@
 <div align="center">
   <img src="src/ui/icon-192.png" width="56" height="56" alt="">
   <h1>RTM · Round Table Meeting</h1>
-  <p><strong>Give your coding agents a shared task.</strong></p>
-  <p>When code, tests, and review happen in separate chats, you carry the context between them. RTM brings Claude Code, Codex, and other CLI agents into one local workbench.</p>
+  <p><strong>Connect your coding agents. Let them talk.</strong></p>
+  <p>Claude Code, Codex, and OpenCode run in separate sessions. RTM connects them and other ACP-compatible agents in one local workbench, where they can ask each other questions, delegate work, and pass back results.</p>
   <p>
     <a href="#get-started"><strong>Get started ↓</strong></a>
     &nbsp;·&nbsp;
@@ -12,19 +12,19 @@
   </p>
 </div>
 
-![RTM in its Roundtable theme, showing a CSV export task with Codex leading, two agents' results, and a pending integration review](guide/screenshots/rtm-workbench.png)
+![RTM workbench showing Codex, Claude, and OpenCode sessions together, with their results and task progress](guide/screenshots/rtm-workbench.png)
 
-## One task, from brief to review
+## Give them a shared workspace
 
-> Add CSV export to the reports page. Keep the active filters and check empty results, commas, quotes, and line breaks.
+**Shared context.** Write the brief and record decisions once. Agents can pick up the context and earlier results as they work.
 
-Give Codex the brief. It delegates the export UI to OpenCode and the edge-case tests to Claude Code. Both results show up in the original task. The integration review waits for both and gets the same export rules.
+**Visual workflows.** See which agent owns each step, what can run in parallel, and what is waiting on a dependency. [See the workflow canvas ↗](guide/screenshots/workflow.png)
 
-[See the review step in action ↗](guide/screenshots/workflow-review.gif)
+**One place to manage skills.** Maintain shared skills and project rules in one place, and choose which agents can use them.
 
 ## Get started
 
-You'll need Node.js 22+ and at least one configured agent. Use two to try delegation. The workbench runs locally from source and connects to your CLI agents through the Agent Client Protocol (ACP).
+You'll need Node.js 22+ and at least one configured agent. Connect two to try agent-to-agent communication. RTM runs locally from source and connects to agents through the Agent Client Protocol (ACP).
 
 ```bash
 git clone https://github.com/ChaldeaTemp/rtm.git
