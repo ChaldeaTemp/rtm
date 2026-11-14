@@ -6,21 +6,68 @@
   <p>
     <a href="#get-started"><strong>Get started ↓</strong></a>
     &nbsp;·&nbsp;
+    <a href="#connect-and-collaborate">See it in action</a>
+    &nbsp;·&nbsp;
     <a href="guide/README.en.md">User guide</a>
     &nbsp;·&nbsp;
     <a href="guide/README.md">中文指南</a>
   </p>
 </div>
 
-![RTM workbench showing Codex, Claude, and OpenCode sessions together, with their results and task progress](guide/screenshots/rtm-workbench.png)
+<p align="center">
+  <img src="guide/screenshots/rtm-workbench.png" width="100%" alt="RTM workbench showing Codex, Claude, and OpenCode sessions together, with their results and task progress">
+</p>
+
+## Connect and collaborate
+
+### Connect your CLI agents
+
+Set up Claude Code, Codex, OpenCode, and other ACP-compatible agents in the same workbench. Pick which one leads new tasks.
+
+<p align="center">
+  <img src="guide/screenshots/agent-connections.png" width="100%" alt="Agent settings with Claude, Codex, and OpenCode enabled and Codex selected as the default lead">
+  <br><sub>Settings → Agent</sub>
+</p>
+
+### Let agents talk to each other
+
+An agent can ask another agent a question or delegate work and get its answer back in the same task.
+
+<p align="center">
+  <img src="guide/screenshots/agent-communication.png" width="100%" alt="A Claude sub-session showing a question delegated by Codex and Claude’s reply">
+  <br><sub>Chat → Sub-session</sub>
+</p>
 
 ## Give them a shared workspace
 
-**Shared context.** Write the brief and record decisions once. Agents can pick up the context and earlier results as they work.
+### Share the task context
 
-**Visual workflows.** See which agent owns each step, what can run in parallel, and what is waiting on a dependency. [See the workflow canvas ↗](guide/screenshots/workflow.png)
+Record the brief and decisions once. Agents can reference the sections they need and pick up earlier results.
 
-**One place to manage skills.** Maintain shared skills and project rules in one place, and choose which agents can use them.
+<p align="center">
+  <img src="guide/screenshots/shared-context.png" width="100%" alt="Shared context editor showing a named CSV formatting section referenced by a workflow step">
+  <br><sub>Workflow → Shared context</sub>
+</p>
+
+### See the workflow
+
+See who owns each step, what can run in parallel, and what is waiting on a dependency.
+
+<p align="center">
+  <img src="guide/screenshots/visual-workflows.png" width="100%" alt="Visual workflow with Codex, OpenCode, and Claude steps branching in parallel and rejoining for integration tests">
+  <br><sub>Workflow → Canvas</sub>
+</p>
+
+### Manage shared skills in one place
+
+See which skills each agent loads natively or gets through RTM. Enable or disable shared skills for individual agents from the same panel.
+
+<p align="center">
+  <img src="guide/screenshots/shared-skills.png" width="100%" alt="Shared skills panel showing project skills and their per-agent native, injected, and disabled settings">
+  <br><sub>Settings → Resources → Shared skills</sub>
+</p>
+
+<sub>Screenshots use demo data.</sub>
 
 ## Get started
 
