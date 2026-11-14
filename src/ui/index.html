@@ -26,7 +26,7 @@
       <div class="brand-bar">
         <div class="brand-top">
           <div class="brand-title">
-            <img class="brand-mark" src="/ui/icon-64.png" alt="" width="26" height="26" />
+            <img class="brand-mark" src="/ui/icon-64.png" alt="" width="22" height="22" />
             <span>RoundTable Meeting</span>
           </div>
           <div class="ws-status">
@@ -107,7 +107,7 @@
         <div class="footer-actions">
           <span class="kbd-hint" title="Ctrl+K 快速切换任务 · Ctrl+N 新建任务 · Esc 停止当前运行">Ctrl+K</span>
           <div class="footer-actions-right">
-            <button id="settingsBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="设置（外观、Agent、日志）">设置</button>
+            <button id="settingsBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="设置（外观、Agent、资源、日志）">设置</button>
             <button id="quitHubBtn" class="alma-btn alma-btn-danger alma-btn-sm" type="button" title="停止后台服务并关闭应用" hidden>
               退出
             </button>
@@ -123,16 +123,12 @@
           <button class="mode-tab active" data-stage-view="chat" type="button">
             <span>对话</span>
           </button>
-          <button class="mode-tab" data-stage-view="resources" type="button">
-            <span>资源</span>
-            <span id="navResBadge" class="mode-badge">0</span>
+          <button class="mode-tab" data-stage-view="workflow" type="button">
+            <span>工作流</span>
           </button>
           <button class="mode-tab" data-stage-view="telemetry" type="button">
             <span>用量</span>
             <span id="navTokBadge" class="mode-badge">0</span>
-          </button>
-          <button class="mode-tab" data-stage-view="workflow" type="button">
-            <span>工作流</span>
           </button>
         </div>
         <button id="liveContextPill" class="context-pill" type="button" title="查看当前会话上下文注入与 Token 消耗">
@@ -178,7 +174,6 @@
 
       <section id="messages" class="messages"></section>
 
-      <section id="resourcesView" class="stage-panel" hidden></section>
       <section id="telemetryView" class="stage-panel" hidden></section>
       <section id="workflowView" class="stage-panel" hidden></section>
 
@@ -258,6 +253,7 @@
         <div class="settings-nav-title">设置</div>
         <button type="button" data-settings-tab="general" class="active">通用</button>
         <button type="button" data-settings-tab="agents">Agent <span id="navAgentsBadge" class="mode-badge">5</span></button>
+        <button type="button" data-settings-tab="resources">资源 <span id="navResBadge" class="mode-badge">0</span></button>
         <button type="button" data-settings-tab="logs">日志</button>
       </nav>
       <div class="settings-main">
@@ -319,6 +315,10 @@
         <section class="settings-pane" data-settings-pane="agents" hidden>
           <h2>Agent</h2>
           <section id="agentsView" class="settings-agents"></section>
+        </section>
+        <section class="settings-pane settings-pane-resources" data-settings-pane="resources" hidden>
+          <h2>资源</h2>
+          <section id="resourcesView" class="settings-resources"></section>
         </section>
         <section class="settings-pane" data-settings-pane="logs" hidden>
           <h2>日志</h2>

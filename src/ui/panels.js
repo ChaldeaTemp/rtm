@@ -46,7 +46,7 @@ async function fetchResources() {
       app.STATE.resourcesList = data.resources || [];
       app.STATE.resourceBudgets = data.budgets || [];
       app.refreshHeaderMetrics();
-      if (app.STATE.stageView === "resources") {
+      if (app.isResourcesViewOpen?.()) {
         renderResourcesPanel();
       }
     }
@@ -195,6 +195,12 @@ function renderResourcesPanel() {
 
   const enabledRules = items.filter((i) => i.enabled && i.kind === "rule").length;
   const enabledSkills = items.filter((i) => i.enabled && i.kind === "skill").length;
+  const projRuleCount = items.filter((i) => i.kind === "rule" && i.scope === "project").length;
+  const globRuleCount = items.filter((i) => i.kind === "rule" && i.scope === "global").length;
+  const skillCount = items.filter((i) => i.kind === "skill").length;
+  const skillIndexTokTotal = items
+    .filter((i) => i.kind === "skill")
+    .reduce((s, i) => s + i.indexTokens, 0);
 
   const filtered = items.filter((item) => {
     if (PANEL_STATE.filter === "global-rule" && !(item.kind === "rule" && item.scope === "global")) return false;
@@ -211,22 +217,31 @@ function renderResourcesPanel() {
     return true;
   });
 
-  const budgetCards = budgets
-    .map(
-      (b) => `
-      <div class="stat-card">
-        <div class="stat-card-label">
-          ${app.agentTagHtml ? app.agentTagHtml(b.agent) : `<span class="agent-tag" data-agent="${esc(b.agent)}">${esc(b.agent)}</span>`}
-          <span>首轮桥接 ~${fmtTok(b.firstTurnInjectionTokens)} tok</span>
-        </div>
-        <div class="stat-card-value">${b.nativeRules + b.bridgedRules} 规则 · ${b.nativeSkills + b.bridgedSkills} 技能</div>
-        <div class="stat-card-meta">
-          <span>原生 ${b.nativeRules}规则 · ${b.nativeSkills}技能</span>
-          <span>Hub注入 ${b.bridgedRules}规则 · ${b.bridgedSkills}技能</span>
-        </div>
-        ${b.droppedRules?.length ? `<div class="stat-card-warn" title="${esc(b.droppedRules.join("、"))}">${b.droppedRules.length} 条规则超出预算，只给了文件路径</div>` : ""}
-      </div>`,
-    )
+  const { cwd: previewCwd } = getResourceScope();
+  const scopeLabel = previewCwd
+    ? previewCwd.split(/[\\/]/).filter(Boolean).pop() || previewCwd
+    : "全局默认";
+
+  const budgetChips = budgets
+    .map((b) => {
+      const tagHtml = app.agentTagHtml
+        ? app.agentTagHtml(b.agent)
+        : `<span class="agent-tag" data-agent="${esc(b.agent)}">${esc(b.agent)}</span>`;
+      const warnHtml = b.droppedRules?.length
+        ? `<span class="res-budget-warn" title="${esc(b.droppedRules.join("、"))}">超预算 ${b.droppedRules.length} 条</span>`
+        : "";
+      return `
+        <div class="res-budget-chip">
+          <div class="res-budget-chip-top">
+            ${tagHtml}
+            <span class="res-budget-tok">~${fmtTok(b.firstTurnInjectionTokens)} tok</span>
+          </div>
+          <div class="res-budget-chip-meta">
+            <span>原生 ${b.nativeRules + b.nativeSkills} · 注入 ${b.bridgedRules + b.bridgedSkills}</span>
+            ${warnHtml}
+          </div>
+        </div>`;
+    })
     .join("");
 
   const enabledAgentIds = (app.getEnabledAgents?.() || []).map((a) => a.agent);
@@ -253,7 +268,6 @@ function renderResourcesPanel() {
       </form>`
     : "";
 
-  const { cwd: previewCwd } = getResourceScope();
   const rowsHtml =
     filtered.length === 0
       ? `<div class="empty-note">当前筛选条件下没有匹配的规则或技能。</div>`
@@ -283,29 +297,31 @@ function renderResourcesPanel() {
               item.kind === "skill"
                 ? `索引 ~${item.indexTokens} / 全文 ~${fmtTok(item.fullTokens)} tok`
                 : `~${fmtTok(item.fullTokens)} tok`;
+            const dedupHint = item.sources.length > 1 ? ` (+${item.sources.length - 1} 个去重来源)` : "";
 
             return `
               <div class="resource-row ${item.enabled ? "" : "disabled"}">
-                <div class="resource-row-top">
-                  <div class="resource-main">
-                    <div class="resource-title-line">
-                      <span class="kind-tag ${esc(item.kind)}">${item.kind === "rule" ? "RULE" : "SKILL"}</span>
-                      <span class="scope-tag">${item.scope === "project" ? "项目" : "全局"}</span>
-                      <span class="origin-tag">${esc(item.origin)}</span>
-                      <span class="resource-name">${esc(item.name)}</span>
-                      <span class="origin-tag">${tokText}</span>
-                    </div>
-                    <div class="resource-desc">${esc(item.description)}</div>
-                    <div class="resource-path">${esc(item.primaryPath)}${item.sources.length > 1 ? ` (+${item.sources.length - 1} 个去重来源)` : ""}</div>
+                <div class="res-row-head">
+                  <div class="res-row-badges">
+                    <span class="kind-tag ${esc(item.kind)}">${item.kind === "rule" ? "规则" : "技能"}</span>
+                    <span class="resource-name">${esc(item.name)}</span>
+                    <span class="scope-tag">${item.scope === "project" ? "项目" : "全局"}</span>
+                    <span class="origin-tag">${esc(item.origin)}</span>
+                    <span class="origin-tag">${tokText}</span>
                   </div>
-                  <div class="resource-right">
-                    <div class="coverage-pills">${covHtml}</div>
-                    <div class="resource-actions">
-                      <button class="alma-btn alma-btn-outline alma-btn-sm" data-preview-res="${esc(item.id)}" type="button">${isExpanded ? "收起" : "预览"}</button>
-                      <button class="alma-btn alma-btn-sm ${item.enabled ? "" : "alma-btn-primary"}" data-toggle-res="${esc(item.id)}" data-next-enabled="${!item.enabled}" type="button">${item.enabled ? "停用" : "启用"}</button>
-                      ${canDelete ? `<button class="alma-btn alma-btn-danger alma-btn-sm" data-del-res="${esc(item.id)}" type="button">删除</button>` : ""}
-                    </div>
+                  <div class="resource-actions">
+                    <button class="alma-btn alma-btn-outline alma-btn-sm" data-preview-res="${esc(item.id)}" type="button">${isExpanded ? "收起" : "预览"}</button>
+                    <button class="alma-btn alma-btn-sm ${item.enabled ? "" : "alma-btn-primary"}" data-toggle-res="${esc(item.id)}" data-next-enabled="${!item.enabled}" type="button">${item.enabled ? "停用" : "启用"}</button>
+                    ${canDelete ? `<button class="alma-btn alma-btn-danger alma-btn-sm" data-del-res="${esc(item.id)}" type="button">删除</button>` : ""}
                   </div>
+                </div>
+                <div class="res-row-body">
+                  <div class="resource-desc">${esc(item.description)}</div>
+                  <div class="resource-path" title="${esc(item.primaryPath + dedupHint)}">${esc(item.primaryPath)}${dedupHint}</div>
+                </div>
+                <div class="res-row-foot">
+                  <span class="res-cov-label">按 Agent 生效</span>
+                  <div class="coverage-pills">${covHtml}</div>
                 </div>
                 ${isExpanded ? `<pre class="resource-preview-box">${esc(previewText)}</pre>` : ""}
               </div>`;
@@ -313,36 +329,34 @@ function renderResourcesPanel() {
           .join("");
 
   container.innerHTML = `
-    <div class="panel-sec-head">
-      <div class="panel-sec-title">各 Agent 的规则与技能</div>
-      <div class="panel-sec-sub">规则全文按需注入缺失端 · 技能仅注入渐进索引 (~${items.filter((i) => i.kind === "skill").reduce((s, i) => s + i.indexTokens, 0)} tok)</div>
-    </div>
-
-    <div class="panel-grid-4">
-      <div class="stat-card">
-        <div class="stat-card-label"><span>已启用共享资源</span><span>去重后</span></div>
-        <div class="stat-card-value">${enabledRules} 规则 · ${enabledSkills} 技能</div>
-        <div class="stat-card-meta"><span>总发现 ${items.length} 项</span><span>项目+全局</span></div>
+    <div class="res-overview">
+      <div class="res-overview-top">
+        <div class="res-overview-stats">
+          <span class="res-scope-pill" title="${esc(previewCwd || "全局")}">作用域：${esc(scopeLabel)}</span>
+          <strong>已启用 ${enabledRules} 规则 · ${enabledSkills} 技能</strong>
+          <span class="res-overview-faint">共发现 ${items.length} 项 · 技能索引合计 ~${fmtTok(skillIndexTokTotal)} tok</span>
+        </div>
+        <div class="res-overview-hint">规则按需注入缺失端；技能仅注渐进索引</div>
       </div>
-      ${budgetCards}
+      ${budgetChips ? `<div class="res-budget-strip">${budgetChips}</div>` : ""}
     </div>
 
-    <div class="panel-sec-head">
-      <div class="panel-sec-title">规则与技能清单</div>
-      <div class="panel-sec-sub">${PANEL_STATE.syncNotice ? esc(PANEL_STATE.syncNotice) : ""}</div>
-    </div>
-
-    <div class="panel-toolbar">
-      <div class="filter-pills">
-        <button class="filter-pill ${PANEL_STATE.filter === "all" ? "active" : ""}" data-res-filter="all" type="button">全部 (${items.length})</button>
-        <button class="filter-pill ${PANEL_STATE.filter === "global-rule" ? "active" : ""}" data-res-filter="global-rule" type="button">全局规则</button>
-        <button class="filter-pill ${PANEL_STATE.filter === "project-rule" ? "active" : ""}" data-res-filter="project-rule" type="button">项目规则</button>
-        <button class="filter-pill ${PANEL_STATE.filter === "skill" ? "active" : ""}" data-res-filter="skill" type="button">共享技能</button>
+    <div class="res-toolbar-stack">
+      <div class="res-toolbar-row">
+        <div class="filter-pills">
+          <button class="filter-pill ${PANEL_STATE.filter === "all" ? "active" : ""}" data-res-filter="all" type="button">全部 (${items.length})</button>
+          <button class="filter-pill ${PANEL_STATE.filter === "project-rule" ? "active" : ""}" data-res-filter="project-rule" type="button">项目规则 (${projRuleCount})</button>
+          <button class="filter-pill ${PANEL_STATE.filter === "global-rule" ? "active" : ""}" data-res-filter="global-rule" type="button">全局规则 (${globRuleCount})</button>
+          <button class="filter-pill ${PANEL_STATE.filter === "skill" ? "active" : ""}" data-res-filter="skill" type="button">共享技能 (${skillCount})</button>
+        </div>
+        <div class="res-toolbar-actions">
+          <button id="toggleNewRuleBtn" class="alma-btn alma-btn-primary alma-btn-sm" type="button">+ 新建规则</button>
+          <button id="syncProjectFilesBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="显式将 Hub 共享规则块同步至项目根目录 AGENTS.md / CLAUDE.md">同步至项目文件</button>
+        </div>
       </div>
-      <div class="toolbar-right">
-        <input id="resSearchInput" class="panel-search" type="search" placeholder="搜索规则/技能名称或路径..." value="${esc(PANEL_STATE.search)}" />
-        <button id="toggleNewRuleBtn" class="alma-btn alma-btn-primary alma-btn-sm" type="button">+ 新建共享规则</button>
-        <button id="syncProjectFilesBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="显式将 Hub 共享规则块同步至项目根目录 AGENTS.md / CLAUDE.md">同步至项目文件</button>
+      <div class="res-toolbar-row">
+        <input id="resSearchInput" class="panel-search res-search-grow" type="search" placeholder="搜索规则/技能名称、描述或路径..." value="${esc(PANEL_STATE.search)}" />
+        ${PANEL_STATE.syncNotice ? `<span class="res-sync-notice">${esc(PANEL_STATE.syncNotice)}</span>` : ""}
       </div>
     </div>
 
@@ -670,6 +684,7 @@ const WF_STATE = {
   drafts: new Map(), // groupId -> { steps, baseUpdatedAt, dirty, version }
   ctxDrafts: new Map(), // groupId -> { common, sections, stamp, dirty, version }
   ctxOpen: false, // 共享上下文区域是否展开
+  ctxActiveKey: "common", // 当前查看/编辑的分区：common | sec:<idx> | res:<key>
   zoom: 1, // 流程画布缩放比例 (0.6 - 1.6)
   lastSignature: "",
   selectedId: null, // 明细浮窗当前对着的步骤
@@ -995,12 +1010,13 @@ async function wfAskLeadToDraft(group) {
   app.appendLog(`已让 ${group.leadAgent} 起草工作流`);
 }
 
-// 流程图布局：按「离起点有几层依赖」分列，从左到右；同一列里自上而下排
-const WF_NODE_W = 228;
-const WF_NODE_H = 72;
-const WF_COL_GAP = 64;
-const WF_ROW_GAP = 16;
-const WF_PAD = 18;
+// 流程图布局：按「离起点有几层依赖」分列，从左到右；同列按重心启发式排序减少交叉
+const WF_NODE_W = 236;
+const WF_NODE_H = 76;
+const WF_COL_GAP = 84;
+const WF_ROW_GAP = 42;
+const WF_PAD_X = 24;
+const WF_PAD_Y = 36;
 
 function wfGetStepOutputPreview(groupId, stepId, sessionKey) {
   const resultSec = wfServerContext(groupId).sections.find(
@@ -1021,27 +1037,222 @@ function wfGetStepOutputPreview(groupId, stepId, sessionKey) {
 
 function wfLayout(steps) {
   const depths = wfDepths(steps);
-  const columns = [];
+  let maxDepth = 0;
+  for (const d of depths.values()) {
+    if (d > maxDepth) maxDepth = d;
+  }
+  const columns = Array.from({ length: maxDepth + 1 }, () => []);
   for (const step of steps) {
     const d = depths.get(step.id) || 0;
-    (columns[d] = columns[d] || []).push(step);
+    columns[d].push(step);
   }
+
+  // 两轮正反向重心排序，让有依赖关系的步骤尽量对齐同一水平线，减少交叉线
+  const orderIdx = new Map(steps.map((s, i) => [s.id, i]));
+  const stepIds = new Set(steps.map((s) => s.id));
+  const depsOf = new Map();
+  const childrenOf = new Map(steps.map((s) => [s.id, []]));
+  for (const s of steps) {
+    const deps = (s.dependsOn || []).filter((d) => stepIds.has(d) && d !== s.id);
+    depsOf.set(s.id, deps);
+    for (const d of deps) childrenOf.get(d).push(s.id);
+  }
+
+  const rowOf = new Map();
+  columns.forEach((col) => col.forEach((s, r) => rowOf.set(s.id, r)));
+
+  const sortColumn = (c, neighborMap) => {
+    const col = columns[c];
+    if (!col || col.length <= 1) return;
+    const weights = new Map();
+    col.forEach((s, idx) => {
+      const nb = neighborMap.get(s.id) || [];
+      const w = nb.length > 0 ? nb.reduce((sum, id) => sum + (rowOf.get(id) ?? idx), 0) / nb.length : idx;
+      weights.set(s.id, { w, cur: idx, orig: orderIdx.get(s.id) ?? idx });
+    });
+    col.sort((a, b) => {
+      const wa = weights.get(a.id);
+      const wb = weights.get(b.id);
+      if (Math.abs(wa.w - wb.w) > 1e-6) return wa.w - wb.w;
+      if (wa.cur !== wb.cur) return wa.cur - wb.cur;
+      return wa.orig - wb.orig;
+    });
+    col.forEach((s, r) => rowOf.set(s.id, r));
+  };
+
+  if (columns.length > 1) {
+    for (let pass = 0; pass < 2; pass++) {
+      for (let c = 1; c < columns.length; c++) sortColumn(c, depsOf);
+      for (let c = columns.length - 2; c >= 0; c--) sortColumn(c, childrenOf);
+    }
+    for (let c = 1; c < columns.length; c++) sortColumn(c, depsOf);
+  }
+
   const pos = new Map();
   let maxRows = 0;
   columns.forEach((col, c) => {
     maxRows = Math.max(maxRows, col.length);
     col.forEach((step, r) => {
       pos.set(step.id, {
-        x: WF_PAD + c * (WF_NODE_W + WF_COL_GAP),
-        y: WF_PAD + r * (WF_NODE_H + WF_ROW_GAP),
+        x: WF_PAD_X + c * (WF_NODE_W + WF_COL_GAP),
+        y: WF_PAD_Y + r * (WF_NODE_H + WF_ROW_GAP),
+        col: c,
+        row: r,
       });
     });
   });
   return {
     pos,
-    width: WF_PAD * 2 + columns.length * WF_NODE_W + Math.max(0, columns.length - 1) * WF_COL_GAP,
-    height: WF_PAD * 2 + maxRows * WF_NODE_H + Math.max(0, maxRows - 1) * WF_ROW_GAP,
+    columns,
+    maxRows,
+    width: WF_PAD_X * 2 + columns.length * WF_NODE_W + Math.max(0, columns.length - 1) * WF_COL_GAP,
+    height: WF_PAD_Y * 2 + maxRows * WF_NODE_H + Math.max(0, maxRows - 1) * WF_ROW_GAP,
   };
+}
+
+// 计算工作流连线：端口错位减少重合；跨列且前方有节点遮挡时走水平行间走廊绕行
+function wfBuildEdges(steps, layout, statusMap) {
+  const allPos = [...layout.pos.values()];
+  const stepOrder = new Map(steps.map((s, i) => [s.id, i]));
+  const rawEdges = [];
+
+  for (const step of steps) {
+    const to = layout.pos.get(step.id);
+    if (!to) continue;
+    const toStatus = statusMap.get(step.id) || "draft";
+    for (const dep of step.dependsOn || []) {
+      const from = layout.pos.get(dep);
+      if (!from) continue;
+      const depStatus = statusMap.get(dep) || "draft";
+      const isDone = depStatus === "completed";
+      const isActive = isDone && toStatus === "running";
+      const isBlocked = depStatus === "failed" || depStatus === "cancelled" || depStatus === "skipped";
+      rawEdges.push({
+        depId: dep,
+        stepId: step.id,
+        from,
+        to,
+        edgeCls: isActive ? "wf-edge active" : isDone ? "wf-edge done" : isBlocked ? "wf-edge blocked" : "wf-edge",
+        markerId: isActive ? "wfArrowActive" : isDone ? "wfArrowDone" : isBlocked ? "wfArrowBlocked" : "wfArrow",
+      });
+    }
+  }
+
+  // 多出边 / 多入边纵向微错位（控制在节点中部 ±18px 内，避开边角）
+  const outByNode = new Map();
+  const inByNode = new Map();
+  for (const e of rawEdges) {
+    if (!outByNode.has(e.depId)) outByNode.set(e.depId, []);
+    outByNode.get(e.depId).push(e);
+    if (!inByNode.has(e.stepId)) inByNode.set(e.stepId, []);
+    inByNode.get(e.stepId).push(e);
+  }
+  for (const list of outByNode.values()) {
+    list.sort(
+      (a, b) =>
+        a.to.y - b.to.y ||
+        a.to.col - b.to.col ||
+        (stepOrder.get(a.stepId) ?? 0) - (stepOrder.get(b.stepId) ?? 0),
+    );
+    const gap = Math.min(10, 36 / Math.max(1, list.length));
+    list.forEach((e, idx) => {
+      e.y1 = e.from.y + WF_NODE_H / 2 + (idx - (list.length - 1) / 2) * gap;
+    });
+  }
+  for (const list of inByNode.values()) {
+    list.sort(
+      (a, b) =>
+        a.from.y - b.from.y ||
+        a.from.col - b.from.col ||
+        (stepOrder.get(a.depId) ?? 0) - (stepOrder.get(b.depId) ?? 0),
+    );
+    const gap = Math.min(10, 36 / Math.max(1, list.length));
+    list.forEach((e, idx) => {
+      e.y2 = e.to.y + WF_NODE_H / 2 + (idx - (list.length - 1) / 2) * gap;
+    });
+  }
+
+  const maxRows = Math.max(1, layout.maxRows || 1);
+  const corridorBaseY = (k) => {
+    if (k <= 0) return WF_PAD_Y - 18;
+    if (k >= maxRows) return layout.height - WF_PAD_Y + 18;
+    return WF_PAD_Y + k * (WF_NODE_H + WF_ROW_GAP) - WF_ROW_GAP / 2;
+  };
+
+  const isObstructed = (e) => {
+    if (e.to.col <= e.from.col + 1) return false;
+    const minY = Math.min(e.y1, e.y2);
+    const maxY = Math.max(e.y1, e.y2);
+    return allPos.some(
+      (n) =>
+        n.col > e.from.col &&
+        n.col < e.to.col &&
+        n.y - 10 <= maxY &&
+        n.y + WF_NODE_H + 10 >= minY,
+    );
+  };
+
+  // 为需要绕行的跨列边挑选最近的水平走廊，并对同走廊重叠线段分道
+  const corridorGroups = new Map();
+  for (const e of rawEdges) {
+    if (!isObstructed(e)) continue;
+    let bestK = 0;
+    let bestCost = Infinity;
+    for (let k = 0; k <= maxRows; k++) {
+      const cy = corridorBaseY(k);
+      const outerPenalty = k === 0 || k === maxRows ? 10 : 0;
+      const cost = Math.abs(e.y1 - cy) + Math.abs(e.y2 - cy) + outerPenalty;
+      if (cost < bestCost) {
+        bestCost = cost;
+        bestK = k;
+      }
+    }
+    e.corridorK = bestK;
+    if (!corridorGroups.has(bestK)) corridorGroups.set(bestK, []);
+    corridorGroups.get(bestK).push(e);
+  }
+
+  for (const [k, groupEdges] of corridorGroups.entries()) {
+    groupEdges.sort(
+      (a, b) => a.from.col - b.from.col || a.to.col - b.to.col || a.y1 + a.y2 - (b.y1 + b.y2),
+    );
+    const laneEnds = [];
+    for (const e of groupEdges) {
+      let lane = laneEnds.findIndex((lastToCol) => e.from.col >= lastToCol);
+      if (lane === -1) {
+        lane = laneEnds.length;
+        laneEnds.push(e.to.col);
+      } else {
+        laneEnds[lane] = e.to.col;
+      }
+      e.lane = lane;
+    }
+    const laneCount = laneEnds.length;
+    const step = Math.min(6, 22 / Math.max(1, laneCount - 1));
+    const base = corridorBaseY(k);
+    for (const e of groupEdges) {
+      const offset = Math.max(-11, Math.min(11, (e.lane - (laneCount - 1) / 2) * step));
+      e.corridorY = base + offset;
+    }
+  }
+
+  const turnW = Math.min(72, WF_COL_GAP - 12);
+  const cp = Math.round(turnW * 0.42);
+  return rawEdges.map((e) => {
+    const x1 = e.from.x + WF_NODE_W;
+    const x2 = e.to.x;
+    let d;
+    if (e.corridorY !== undefined) {
+      const xTurn1 = x1 + turnW;
+      const xTurn2 = x2 - turnW;
+      const cy = Math.round(e.corridorY * 10) / 10;
+      d = `M${x1},${e.y1} C${x1 + cp},${e.y1} ${xTurn1 - cp},${cy} ${xTurn1},${cy} L${xTurn2},${cy} C${xTurn2 + cp},${cy} ${x2 - cp},${e.y2} ${x2},${e.y2}`;
+    } else {
+      const mid = (x1 + x2) / 2;
+      d = `M${x1},${e.y1} C${mid},${e.y1} ${mid},${e.y2} ${x2},${e.y2}`;
+    }
+    return `<path class="${e.edgeCls}" d="${d}" marker-end="url(#${e.markerId})" />`;
+  });
 }
 
 function wfClosePopover() {
@@ -1323,12 +1534,13 @@ function renderWorkflowPanel() {
     group.leadAgent,
     server.updatedAt,
     server.status,
-    server.steps.map((s) => `${s.id}:${s.status}`).join(","),
+    server.steps.map((s) => `${s.id}:${s.status}:${s.phase || ""}:${s.round || 1}`).join(","),
     draft.version,
     agents.map((a) => a.agent).join(","),
     wfServerContext(groupId).sections.map((s) => `${s.key}:${s.updatedAt}`).join(","),
     wfContextDraft(groupId).version,
     WF_STATE.ctxOpen,
+    WF_STATE.ctxActiveKey,
   ].join("|");
   if (signature === WF_STATE.lastSignature && container.childElementCount > 0) return;
   // 流程图：按当前缩放比例和步骤依赖重算节点与连线
@@ -1337,7 +1549,7 @@ function renderWorkflowPanel() {
   const steps = running ? server.steps : draft.steps;
   const serverById = new Map(server.steps.map((s) => [s.id, s]));
   const showResults = !running && !draft.dirty && (server.status === "completed" || server.status === "failed");
-  const statusOf = (step) => (running || showResults ? serverById.get(step.id)?.status || "draft" : "draft");
+  const statusOf = (step) => (step && (running || showResults) ? serverById.get(step.id)?.status || "draft" : "draft");
   const hasRetryableSteps =
     !running &&
     server.steps.some((s) => s.status === "failed" || s.status === "cancelled" || s.status === "skipped");
@@ -1357,100 +1569,254 @@ function renderWorkflowPanel() {
             ? `${server.proposedBy} 起草的草稿，确认后发布`
             : "草稿";
 
-  // 共享上下文：公共部分写一次，每一步都会带上；命名分区只给引用它的步骤
+  // 共享上下文：收起时一行徽章+直达标签，展开后左导航右编辑/只读预览，不挤占画布
   const ctxDraft = wfContextDraft(groupId);
   const ctxResults = wfServerContext(groupId).sections.filter((sec) => sec.kind === "result");
-  const refCount = (key) => steps.filter((st) => (st.contextRefs || []).includes(key)).length;
-  const ctxSummary = [
-    ctxDraft.common.trim() ? `公共 ${ctxDraft.common.trim().length} 字` : "还没有公共内容",
-    ctxDraft.sections.length > 0 ? `${ctxDraft.sections.length} 个分区` : "",
-    ctxResults.length > 0 ? `${ctxResults.length} 个步骤结果` : "",
-    ctxDraft.dirty ? "未保存" : "",
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  const ctxHtml = `
-    <details class="wf-context" id="wfContextBox" ${WF_STATE.ctxOpen ? "open" : ""}>
-      <summary><span>共享上下文</span><span class="ctx-faint">${esc(ctxSummary)}</span></summary>
-      <div class="wf-context-body">
-        <div class="wf-pop-block">
-          <label>公共部分<span class="dirs-hint">每个子会话都会收到，写一次即可，不用在每一步里重复</span></label>
-          <textarea class="rule-editor-textarea" id="wfCtxCommon" ${running ? "readonly" : ""} placeholder="目标、版本、约定、禁止事项、材料在哪……">${esc(ctxDraft.common)}</textarea>
-        </div>
-        ${ctxDraft.sections
-          .map(
-            (sec, i) => `
-          <div class="wf-ctx-section">
-            <div class="wf-ctx-section-head">
-              <input class="text-input" data-ctx-field="key" data-ctx-index="${i}" value="${esc(sec.key)}" placeholder="分区名，如 user-mgmt" ${sec.saved || running ? "readonly" : ""} />
-              <input class="text-input" data-ctx-field="summary" data-ctx-index="${i}" value="${esc(sec.summary)}" placeholder="一句话说明里面是什么" ${running ? "readonly" : ""} />
-              <span class="ctx-faint">${refCount(sec.key.trim().toLowerCase())} 步引用</span>
-              ${running ? "" : `<button type="button" class="mini-icon-btn" data-ctx-remove="${i}" title="删除这个分区">×</button>`}
-            </div>
-            <textarea class="rule-editor-textarea" data-ctx-field="content" data-ctx-index="${i}" ${running ? "readonly" : ""} placeholder="只有部分步骤需要的内容">${esc(sec.content)}</textarea>
-          </div>`,
-          )
-          .join("")}
-        ${
-          ctxResults.length > 0
-            ? `<div class="wf-deps"><span class="wf-deps-label">步骤结果（自动保存，下游步骤会收到）</span>${ctxResults
-                .map((sec) => `<span class="origin-tag" title="${esc(sec.content.slice(0, 400))}">${esc(sec.summary || sec.key)}</span>`)
-                .join("")}</div>`
-            : ""
-        }
-        ${
-          running
-            ? ""
-            : `<div class="panel-toolbar">
-                 <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" id="wfCtxAddBtn">添加分区</button>
-                 <button type="button" class="alma-btn alma-btn-sm" id="wfCtxSaveBtn" ${ctxDraft.dirty ? "" : "disabled"}>保存上下文</button>
-               </div>`
-        }
-      </div>
-    </details>`;
+  const refCount = (key) => (key ? steps.filter((st) => (st.contextRefs || []).includes(key)).length : 0);
 
-  const layout = wfLayout(steps);
-  const edges = [];
-  for (const step of steps) {
-    const to = layout.pos.get(step.id);
-    const toStatus = statusOf(step);
-    for (const dep of step.dependsOn) {
-      const from = layout.pos.get(dep);
-      if (!from || !to) continue;
-      const x1 = from.x + WF_NODE_W;
-      const y1 = from.y + WF_NODE_H / 2;
-      const x2 = to.x;
-      const y2 = to.y + WF_NODE_H / 2;
-      const mid = (x1 + x2) / 2;
-      const depStatus = statusOf(steps.find((s) => s.id === dep));
-      const isDone = depStatus === "completed";
-      const isActive = isDone && toStatus === "running";
-      const edgeCls = isActive ? "wf-edge active" : isDone ? "wf-edge done" : "wf-edge";
-      edges.push(
-        `<path class="${edgeCls}" d="M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}" marker-end="url(#wfArrow)" />`,
-      );
-    }
+  let ctxActiveKey = WF_STATE.ctxActiveKey || "common";
+  if (ctxActiveKey.startsWith("sec:")) {
+    const idx = Number(ctxActiveKey.slice(4));
+    if (!Number.isInteger(idx) || idx < 0 || idx >= ctxDraft.sections.length) ctxActiveKey = "common";
+  } else if (ctxActiveKey.startsWith("res:")) {
+    const resKey = ctxActiveKey.slice(4);
+    if (!ctxResults.some((sec) => sec.key === resKey)) ctxActiveKey = "common";
   }
+  WF_STATE.ctxActiveKey = ctxActiveKey;
+
+  const commonTrimmed = ctxDraft.common.trim();
+  const commonPreview = commonTrimmed.replace(/\s+/g, " ").slice(0, 42) + (commonTrimmed.length > 42 ? "…" : "");
+  const hasGlanceItems = Boolean(commonTrimmed || ctxDraft.sections.length > 0 || ctxResults.length > 0);
+  const glanceHtml = hasGlanceItems
+    ? `<div class="wf-ctx-glance" id="wfCtxGlance" ${WF_STATE.ctxOpen ? "hidden" : ""}>
+         ${commonTrimmed ? `<button type="button" class="wf-ctx-chip is-common" data-ctx-jump="common" title="点击展开并编辑公共部分">公共：${esc(commonPreview)}</button>` : ""}
+         ${ctxDraft.sections
+           .map(
+             (sec, i) =>
+               `<button type="button" class="wf-ctx-chip" data-ctx-jump="sec:${i}" title="${esc(sec.summary || sec.key || "点击查看/编辑")}">${esc(sec.key || `分区 ${i + 1}`)} · ${refCount(sec.key.trim().toLowerCase())}步</button>`,
+           )
+           .join("")}
+         ${ctxResults
+           .map(
+             (sec) =>
+               `<button type="button" class="wf-ctx-chip is-result" data-ctx-jump="res:${esc(sec.key)}" title="点击查看步骤产出">${esc((sec.summary || sec.key).replace(/的结果.*$/, ""))}</button>`,
+           )
+           .join("")}
+       </div>`
+    : "";
+
+  let activePaneHtml = "";
+  if (ctxActiveKey.startsWith("sec:")) {
+    const secIdx = Number(ctxActiveKey.slice(4));
+    const sec = ctxDraft.sections[secIdx];
+    const secRefs = refCount(sec.key.trim().toLowerCase());
+    activePaneHtml = `
+      <div class="wf-ctx-pane-head">
+        <span class="wf-ctx-pane-title">命名分区</span>
+        <span class="ctx-faint">${secRefs} 步引用 · 上限 8000 字</span>
+      </div>
+      <div class="wf-ctx-section-head">
+        <input class="text-input" data-ctx-field="key" data-ctx-index="${secIdx}" value="${esc(sec.key)}" placeholder="分区名，如 user-mgmt" ${sec.saved || running ? "readonly" : ""} />
+        <input class="text-input" data-ctx-field="summary" data-ctx-index="${secIdx}" value="${esc(sec.summary)}" placeholder="一句话说明里面是什么" ${running ? "readonly" : ""} />
+        ${running ? "" : `<button type="button" class="mini-icon-btn" data-ctx-remove="${secIdx}" title="删除这个分区">×</button>`}
+      </div>
+      <textarea class="rule-editor-textarea wf-ctx-editor" data-ctx-field="content" data-ctx-index="${secIdx}" ${running ? "readonly" : ""} placeholder="只有部分步骤需要的内容">${esc(sec.content)}</textarea>`;
+  } else if (ctxActiveKey.startsWith("res:")) {
+    const resKey = ctxActiveKey.slice(4);
+    const resSec = ctxResults.find((s) => s.key === resKey);
+    activePaneHtml = `
+      <div class="wf-ctx-pane-head">
+        <span class="wf-ctx-pane-title">${esc(resSec?.summary || resKey)}</span>
+        <span class="ctx-faint">自动保存 · 下游步骤会自动收到${resSec?.truncated ? " · 已截断至 6000 字" : ""}</span>
+      </div>
+      <pre class="wf-ctx-result-pre">${esc(resSec?.content || "")}</pre>`;
+  } else {
+    activePaneHtml = `
+      <div class="wf-ctx-pane-head">
+        <span class="wf-ctx-pane-title">公共部分</span>
+        <span class="ctx-faint">每个子会话都会收到，写一次即可 · 上限 4000 字</span>
+      </div>
+      <textarea class="rule-editor-textarea wf-ctx-editor" id="wfCtxCommon" ${running ? "readonly" : ""} placeholder="目标、版本、约定、禁止事项、材料在哪……">${esc(ctxDraft.common)}</textarea>`;
+  }
+
+  const ctxHtml = `
+    <div class="wf-context-shell">
+      <details class="wf-context" id="wfContextBox" ${WF_STATE.ctxOpen ? "open" : ""}>
+        <summary>
+          <span class="wf-ctx-head-left">
+            <span class="wf-ctx-chevron" aria-hidden="true">▸</span>
+            <span>共享上下文</span>
+          </span>
+          <span class="wf-ctx-badges">
+            <span class="wf-ctx-pill">${commonTrimmed ? `公共 ${commonTrimmed.length} 字` : "公共未填"}</span>
+            ${ctxDraft.sections.length > 0 ? `<span class="wf-ctx-pill">${ctxDraft.sections.length} 个分区</span>` : ""}
+            ${ctxResults.length > 0 ? `<span class="wf-ctx-pill is-result">${ctxResults.length} 个产出</span>` : ""}
+            ${ctxDraft.dirty ? `<span class="wf-ctx-pill is-dirty">未保存</span>` : ""}
+          </span>
+        </summary>
+        <div class="wf-context-grid">
+          <div class="wf-ctx-nav">
+            <button type="button" class="wf-ctx-nav-item ${ctxActiveKey === "common" ? "active" : ""}" data-ctx-nav="common">
+              <span class="wf-ctx-nav-name">公共部分</span>
+              <span class="wf-ctx-nav-meta">${commonTrimmed.length}字</span>
+            </button>
+            ${
+              ctxDraft.sections.length > 0
+                ? `<div class="wf-ctx-nav-group">命名分区</div>
+                   ${ctxDraft.sections
+                     .map(
+                       (sec, i) => `
+                     <button type="button" class="wf-ctx-nav-item ${ctxActiveKey === `sec:${i}` ? "active" : ""}" data-ctx-nav="sec:${i}" title="${esc(sec.summary || sec.key || `分区 ${i + 1}`)}">
+                       <span class="wf-ctx-nav-name">${esc(sec.key || `新分区 ${i + 1}`)}</span>
+                       <span class="wf-ctx-nav-meta">${refCount(sec.key.trim().toLowerCase())}步</span>
+                     </button>`,
+                     )
+                     .join("")}`
+                : ""
+            }
+            ${
+              ctxResults.length > 0
+                ? `<div class="wf-ctx-nav-group">步骤产出（只读）</div>
+                   ${ctxResults
+                     .map(
+                       (sec) => `
+                     <button type="button" class="wf-ctx-nav-item is-result ${ctxActiveKey === `res:${sec.key}` ? "active" : ""}" data-ctx-nav="res:${esc(sec.key)}" title="${esc(sec.summary || sec.key)}">
+                       <span class="wf-ctx-nav-name">${esc((sec.summary || sec.key).replace(/的结果.*$/, ""))}</span>
+                       <span class="wf-ctx-nav-meta">${sec.content.length}字</span>
+                     </button>`,
+                     )
+                     .join("")}`
+                : ""
+            }
+            ${
+              running
+                ? ""
+                : `<button type="button" class="alma-btn alma-btn-outline alma-btn-sm wf-ctx-add-btn" id="wfCtxAddBtn">+ 添加分区</button>`
+            }
+          </div>
+          <div class="wf-ctx-pane">
+            ${activePaneHtml}
+            ${
+              running
+                ? ""
+                : `<div class="wf-ctx-pane-foot">
+                     <span class="ctx-faint" id="wfCtxSaveState">${ctxDraft.dirty ? "有未保存的改动" : "已同步至工作流"}</span>
+                     <button type="button" class="alma-btn alma-btn-primary alma-btn-sm" id="wfCtxSaveBtn" ${ctxDraft.dirty ? "" : "disabled"}>保存上下文</button>
+                   </div>`
+            }
+          </div>
+        </div>
+      </details>
+      ${glanceHtml}
+    </div>`;
+
+  const statusMap = new Map(steps.map((s) => [s.id, statusOf(s)]));
+  const layout = wfLayout(steps);
+  const edges = wfBuildEdges(steps, layout, statusMap);
+
+  let runDone = 0;
+  let runActive = 0;
+  let runFail = 0;
+  let runWait = 0;
+  let runSkip = 0;
   const nodes = steps
     .map((step, index) => {
       const p = layout.pos.get(step.id);
-      const status = statusOf(step);
+      const live = serverById.get(step.id);
+      const status = statusMap.get(step.id) || "draft";
+      if (status === "completed") runDone += 1;
+      else if (status === "running") runActive += 1;
+      else if (status === "failed") runFail += 1;
+      else if (status === "pending") runWait += 1;
+      else if (status === "skipped" || status === "cancelled") runSkip += 1;
+
+      const isReady =
+        running &&
+        status === "pending" &&
+        step.dependsOn.every((depId) => statusMap.get(depId) === "completed");
+      const isReview = status === "running" && Boolean(live?.review && live?.phase === "review");
+      const isRework = status === "running" && Boolean(live?.review && (live?.round || 1) > 1 && live?.phase !== "review");
+      const isEmptyDraft = status === "draft" && !step.prompt.trim();
+
+      let markHtml = `<span class="wf-status-mark is-draft">${index + 1}</span>`;
+      if (status === "running") {
+        markHtml = `<span class="wf-status-mark is-running" aria-hidden="true"></span>`;
+      } else if (status === "completed") {
+        markHtml = `<span class="wf-status-mark is-completed" aria-hidden="true">✓</span>`;
+      } else if (status === "failed") {
+        markHtml = `<span class="wf-status-mark is-failed" aria-hidden="true">✕</span>`;
+      } else if (status === "pending") {
+        markHtml = `<span class="wf-status-mark ${isReady ? "is-ready" : "is-pending"}" aria-hidden="true">${isReady ? "⏳" : "⋯"}</span>`;
+      } else if (status === "skipped" || status === "cancelled") {
+        markHtml = `<span class="wf-status-mark is-muted" aria-hidden="true">—</span>`;
+      }
+
+      const statusText =
+        running || showResults
+          ? isReady
+            ? "排队待跑"
+            : wfStepStatusText(live, status)
+          : step.prompt.trim()
+            ? "已就绪"
+            : "待填任务";
+      const nodeCls = [
+        "wf-node",
+        `status-${esc(status)}`,
+        isReady ? "is-ready" : "",
+        isReview ? "phase-review" : "",
+        isRework ? "phase-rework" : "",
+        isEmptyDraft ? "is-empty-draft" : "",
+        WF_STATE.selectedId === step.id ? "selected" : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const flagsHtml = [
+        step.isolateWorktree ? `<span class="wf-mini-tag" title="独立 git worktree">wt</span>` : "",
+        step.review ? `<span class="wf-mini-tag is-review" title="含验收关卡">验</span>` : "",
+      ]
+        .filter(Boolean)
+        .join("");
+
       return `
-        <button type="button" class="wf-node status-${esc(status)}" data-wf-node="${esc(step.id)}"
+        <button type="button" class="${nodeCls}" data-wf-node="${esc(step.id)}"
           style="left:${p.x}px;top:${p.y}px;width:${WF_NODE_W}px;height:${WF_NODE_H}px" title="${esc(step.name)}">
           <span class="wf-node-top">
-            <span class="dot ${status === "running" ? "busy" : status === "completed" ? "completed" : status === "failed" ? "failed" : "idle"}"></span>
+            ${markHtml}
             <span class="wf-node-name">${esc(step.name || `步骤 ${index + 1}`)}</span>
           </span>
           <span class="wf-node-bottom">
-            ${app.agentTagHtml ? app.agentTagHtml(step.agent) : esc(step.agent)}
-            <span class="wf-node-status">${running || showResults ? esc(wfStepStatusText(steps.find((s) => s.id === step.id) && server.steps.find((s) => s.id === step.id), status)) : step.prompt.trim() ? (step.review ? "带验收" : step.isolateWorktree ? "worktree" : "") : "还没写任务"}</span>
+            <span class="wf-node-tags">
+              ${app.agentTagHtml ? app.agentTagHtml(step.agent) : esc(step.agent)}
+              ${flagsHtml}
+            </span>
+            <span class="wf-node-status-pill">${esc(statusText)}</span>
           </span>
         </button>`;
     })
     .join("");
 
-  const zoom = Math.min(1.6, Math.max(0.6, Number(WF_STATE.zoom) || 1));
+  const totalSteps = Math.max(1, steps.length);
+  const runSummaryHtml =
+    (running || showResults) && steps.length > 0
+      ? `<div class="wf-run-summary">
+           <div class="wf-run-bar" aria-hidden="true">
+             ${runDone > 0 ? `<span class="wf-run-seg is-done" style="width:${(runDone / totalSteps) * 100}%"></span>` : ""}
+             ${runActive > 0 ? `<span class="wf-run-seg is-running" style="width:${(runActive / totalSteps) * 100}%"></span>` : ""}
+             ${runFail > 0 ? `<span class="wf-run-seg is-failed" style="width:${(runFail / totalSteps) * 100}%"></span>` : ""}
+             ${runWait > 0 ? `<span class="wf-run-seg is-wait" style="width:${(runWait / totalSteps) * 100}%"></span>` : ""}
+             ${runSkip > 0 ? `<span class="wf-run-seg is-skip" style="width:${(runSkip / totalSteps) * 100}%"></span>` : ""}
+           </div>
+           <div class="wf-run-counts">
+             <span class="wf-run-badge is-done">已完成 ${runDone}/${steps.length}</span>
+             ${runActive > 0 ? `<span class="wf-run-badge is-running">进行中 ${runActive}</span>` : ""}
+             ${runWait > 0 ? `<span class="wf-run-badge is-wait">待跑/等待 ${runWait}</span>` : ""}
+             ${runFail > 0 ? `<span class="wf-run-badge is-failed">失败 ${runFail}</span>` : ""}
+             ${runSkip > 0 ? `<span class="wf-run-badge is-skip">跳过/取消 ${runSkip}</span>` : ""}
+           </div>
+         </div>`
+      : "";
+
+  const zoom = Math.min(1.6, Math.max(0.45, Number(WF_STATE.zoom) || 1));
   const zoomPct = Math.round(zoom * 100);
   const scaledW = Math.round(layout.width * zoom);
   const scaledH = Math.round(layout.height * zoom);
@@ -1493,6 +1859,7 @@ function renderWorkflowPanel() {
       </div>
     </div>
     ${ctxHtml}
+    ${runSummaryHtml}
     ${
       steps.length === 0
         ? `<div class="empty-note">还没有步骤。添加几步交给子会话的任务，或点下方模板快速起步；也可以让 ${esc(group.leadAgent)} 先起草。
@@ -1527,6 +1894,15 @@ function renderWorkflowPanel() {
                        <marker id="wfArrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
                          <path d="M0,0 L8,4 L0,8 z" class="wf-arrow" />
                        </marker>
+                       <marker id="wfArrowDone" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+                         <path d="M0,0 L8,4 L0,8 z" class="wf-arrow is-done" />
+                       </marker>
+                       <marker id="wfArrowActive" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+                         <path d="M0,0 L8,4 L0,8 z" class="wf-arrow is-active" />
+                       </marker>
+                       <marker id="wfArrowBlocked" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+                         <path d="M0,0 L8,4 L0,8 z" class="wf-arrow is-blocked" />
+                       </marker>
                      </defs>
                      ${edges.join("")}
                    </svg>
@@ -1547,9 +1923,29 @@ function renderWorkflowPanel() {
   const ctxBox = document.getElementById("wfContextBox");
   if (ctxBox) {
     ctxBox.ontoggle = () => {
-      WF_STATE.ctxOpen = ctxBox.open;
+      const nextOpen = ctxBox.open;
+      if (WF_STATE.ctxOpen !== nextOpen) {
+        WF_STATE.ctxOpen = nextOpen;
+        const glance = document.getElementById("wfCtxGlance");
+        if (glance) glance.hidden = nextOpen;
+      }
     };
   }
+  container.querySelectorAll("[data-ctx-jump]").forEach((btn) => {
+    btn.onclick = () => {
+      WF_STATE.ctxOpen = true;
+      WF_STATE.ctxActiveKey = btn.dataset.ctxJump || "common";
+      WF_STATE.lastSignature = "";
+      renderWorkflowPanel();
+    };
+  });
+  container.querySelectorAll("[data-ctx-nav]").forEach((btn) => {
+    btn.onclick = () => {
+      WF_STATE.ctxActiveKey = btn.dataset.ctxNav || "common";
+      WF_STATE.lastSignature = "";
+      renderWorkflowPanel();
+    };
+  });
   const markCtxDirty = (structural) => {
     ctxDraft.dirty = true;
     if (structural) {
@@ -1558,26 +1954,36 @@ function renderWorkflowPanel() {
     } else {
       const saveBtn = document.getElementById("wfCtxSaveBtn");
       if (saveBtn) saveBtn.disabled = false;
+      const saveState = document.getElementById("wfCtxSaveState");
+      if (saveState) saveState.textContent = "有未保存的改动";
     }
   };
   const commonEl = document.getElementById("wfCtxCommon");
   if (commonEl) {
     commonEl.oninput = () => {
       ctxDraft.common = commonEl.value;
+      const meta = container.querySelector('[data-ctx-nav="common"] .wf-ctx-nav-meta');
+      if (meta) meta.textContent = `${commonEl.value.trim().length}字`;
       markCtxDirty(false);
     };
   }
   container.querySelectorAll("[data-ctx-field]").forEach((el) => {
     el.oninput = () => {
-      const sec = ctxDraft.sections[Number(el.dataset.ctxIndex)];
+      const idx = Number(el.dataset.ctxIndex);
+      const sec = ctxDraft.sections[idx];
       if (!sec) return;
       sec[el.dataset.ctxField] = el.value;
+      if (el.dataset.ctxField === "key") {
+        const navName = container.querySelector(`[data-ctx-nav="sec:${idx}"] .wf-ctx-nav-name`);
+        if (navName) navName.textContent = el.value.trim() || `新分区 ${idx + 1}`;
+      }
       markCtxDirty(false);
     };
   });
   container.querySelectorAll("[data-ctx-remove]").forEach((btn) => {
     btn.onclick = () => {
-      const [removed] = ctxDraft.sections.splice(Number(btn.dataset.ctxRemove), 1);
+      const removeIdx = Number(btn.dataset.ctxRemove);
+      const [removed] = ctxDraft.sections.splice(removeIdx, 1);
       // 分区没了，引用它的步骤也不再引用
       if (removed) {
         const key = removed.key.trim().toLowerCase();
@@ -1588,6 +1994,8 @@ function renderWorkflowPanel() {
           }
         }
       }
+      WF_STATE.ctxActiveKey =
+        ctxDraft.sections.length > 0 ? `sec:${Math.min(removeIdx, ctxDraft.sections.length - 1)}` : "common";
       markCtxDirty(true);
     };
   });
@@ -1596,6 +2004,7 @@ function renderWorkflowPanel() {
     ctxAddBtn.onclick = () => {
       ctxDraft.sections.push({ key: "", summary: "", content: "", saved: false });
       WF_STATE.ctxOpen = true;
+      WF_STATE.ctxActiveKey = `sec:${ctxDraft.sections.length - 1}`;
       markCtxDirty(true);
     };
   }
@@ -1685,10 +2094,12 @@ function renderWorkflowPanel() {
       if (mode === "in") {
         WF_STATE.zoom = Math.min(1.6, Number((cur + 0.15).toFixed(2)));
       } else if (mode === "out") {
-        WF_STATE.zoom = Math.max(0.6, Number((cur - 0.15).toFixed(2)));
+        WF_STATE.zoom = Math.max(0.45, Number((cur - 0.15).toFixed(2)));
       } else if (mode === "fit" && wrap) {
-        const avail = Math.max(240, wrap.clientWidth - 16);
-        WF_STATE.zoom = Math.min(1, Math.max(0.6, Number((avail / Math.max(1, layout.width)).toFixed(2))));
+        const availW = Math.max(240, wrap.clientWidth - 20);
+        const availH = Math.max(240, wrap.clientHeight - 20);
+        const fitRatio = Math.min(availW / Math.max(1, layout.width), availH / Math.max(1, layout.height));
+        WF_STATE.zoom = Math.min(1, Math.max(0.45, Number(fitRatio.toFixed(2))));
       } else {
         WF_STATE.zoom = 1;
       }
@@ -1738,7 +2149,7 @@ if (app) {
 
     if (scopeChanged) {
       void fetchResources();
-    } else if (app.STATE.stageView === "resources") {
+    } else if (app.isResourcesViewOpen?.()) {
       if (app.STATE.resourcesList.length === 0) {
         void fetchResources();
       } else {
@@ -1757,3 +2168,8 @@ if (app) {
   };
   void fetchResources();
 }
+
+window.HUB_PANELS = {
+  fetchResources,
+  renderResourcesPanel,
+};

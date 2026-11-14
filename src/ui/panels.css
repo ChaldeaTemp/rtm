@@ -118,24 +118,20 @@
   color: var(--ink);
 }
 
-main.stage[data-view="resources"] #chatStageHeader,
-main.stage[data-view="resources"] #sessionTabs,
-main.stage[data-view="resources"] #permBanner,
-main.stage[data-view="resources"] #questionBanner,
-main.stage[data-view="resources"] #messages,
-main.stage[data-view="resources"] #chatComposerWrap,
 main.stage[data-view="telemetry"] #chatStageHeader,
 main.stage[data-view="telemetry"] #sessionTabs,
+main.stage[data-view="telemetry"] #subWorktreeBar,
 main.stage[data-view="telemetry"] #permBanner,
 main.stage[data-view="telemetry"] #questionBanner,
 main.stage[data-view="telemetry"] #messages,
 main.stage[data-view="telemetry"] #chatComposerWrap,
-main.stage[data-view="agents"] #chatStageHeader,
-main.stage[data-view="agents"] #sessionTabs,
-main.stage[data-view="agents"] #permBanner,
-main.stage[data-view="agents"] #questionBanner,
-main.stage[data-view="agents"] #messages,
-main.stage[data-view="agents"] #chatComposerWrap {
+main.stage[data-view="workflow"] #chatStageHeader,
+main.stage[data-view="workflow"] #sessionTabs,
+main.stage[data-view="workflow"] #subWorktreeBar,
+main.stage[data-view="workflow"] #permBanner,
+main.stage[data-view="workflow"] #questionBanner,
+main.stage[data-view="workflow"] #messages,
+main.stage[data-view="workflow"] #chatComposerWrap {
   display: none !important;
 }
 
@@ -161,6 +157,15 @@ main.stage[data-view="agents"] #chatComposerWrap {
 
 .stage-panel[hidden] {
   display: none;
+}
+
+#workflowView.stage-panel {
+  padding: 14px 22px 18px;
+  gap: 12px;
+}
+
+#workflowView .panel-sec-head {
+  padding-bottom: 6px;
 }
 
 .panel-sec-head {
@@ -345,6 +350,132 @@ main.stage[data-view="agents"] #chatComposerWrap {
   border-color: var(--accent);
 }
 
+/* Settings -> Resources Compact Layout */
+.res-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+}
+
+.res-overview-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 14px;
+}
+
+.res-overview-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.res-scope-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 12px;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.res-overview-faint,
+.res-overview-hint {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.res-budget-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.res-budget-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-sm);
+  background: var(--soft);
+}
+
+.res-budget-chip-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.res-budget-tok {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.res-budget-chip-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+
+.res-budget-warn {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.res-toolbar-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.res-toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.res-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.res-search-grow {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.res-sync-notice {
+  font-size: 12px;
+  color: var(--accent);
+}
+
 /* Resource List Rows */
 .resource-list {
   display: flex;
@@ -355,10 +486,10 @@ main.stage[data-view="agents"] #chatComposerWrap {
 .resource-row {
   border: 1px solid var(--line);
   background: var(--bg-elevated);
-  padding: 12px 14px;
+  padding: 11px 13px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   transition: border-color 0.15s ease;
 }
 
@@ -370,29 +501,47 @@ main.stage[data-view="agents"] #chatComposerWrap {
   opacity: 0.62;
 }
 
-.resource-row-top {
+.res-row-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 14px;
+  gap: 10px;
 }
 
-.resource-main {
-  min-width: 0;
-  flex: 1;
-}
-
-.resource-title-line {
+.res-row-badges {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  margin-bottom: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.res-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.res-row-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line-soft);
+}
+
+.res-cov-label {
+  font-size: 11.5px;
+  color: var(--faint);
+  flex-shrink: 0;
 }
 
 .kind-tag {
   font-family: var(--ui);
-  font-size: 12px;
+  font-size: 11.5px;
   padding: 1px 6px;
   border: 1px solid var(--line);
   text-transform: uppercase;
@@ -413,7 +562,7 @@ main.stage[data-view="agents"] #chatComposerWrap {
 .scope-tag,
 .origin-tag {
   font-family: var(--ui);
-  font-size: 12px;
+  font-size: 11.5px;
   padding: 1px 6px;
   border: 1px solid var(--line-soft);
   color: var(--muted);
@@ -422,43 +571,35 @@ main.stage[data-view="agents"] #chatComposerWrap {
 
 .resource-name {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 13.5px;
   color: var(--ink);
 }
 
 .resource-desc {
-  font-size: 13px;
+  font-size: 12.5px;
   color: var(--muted);
-  line-height: 1.5;
+  line-height: 1.45;
 }
 
 .resource-path {
-  margin-top: 3px;
   font-family: var(--mono);
-  font-size: 12.5px;
+  font-size: 11.5px;
   color: var(--faint);
-  word-break: break-all;
-}
-
-.resource-right {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
-  flex: 0 1 auto;
-  max-width: 48%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .coverage-pills {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  align-items: center;
   gap: 4px;
 }
 
 .cov-pill {
   font-family: var(--ui);
-  font-size: 12px;
+  font-size: 11.5px;
   padding: 1px 6px;
   border: 1px solid var(--line);
   background: var(--bg);
@@ -482,6 +623,7 @@ main.stage[data-view="agents"] #chatComposerWrap {
 .resource-actions {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 6px;
 }
 
@@ -931,27 +1073,42 @@ main.stage[data-view="agents"] #chatComposerWrap {
 }
 
 .cwd-row {
+  margin-top: 8px;
   display: flex;
-  align-items: center;
-  gap: 6px;
+  align-items: stretch;
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--soft);
+  overflow: hidden;
 }
 
 .cwd-row .cwd-line {
   flex: 1 1 auto;
   min-width: 0;
+  margin-top: 0;
+  border: none;
+  background: transparent;
+  height: 28px;
+  line-height: 28px;
+  padding: 0 8px;
 }
 
 .cwd-pick-btn {
   flex-shrink: 0;
-  margin-top: 8px;
-  padding: 3px 7px;
-  border: 1px solid var(--line);
-  background: var(--bg);
-  font-size: 12.5px;
+  margin-top: 0;
+  height: 28px;
+  padding: 0 9px;
+  border: none;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--bg-elevated);
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .cwd-pick-btn:hover {
-  border-color: var(--accent);
+  background: var(--bg);
   color: var(--accent);
 }
 
@@ -1010,7 +1167,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 10px 6px;
+  padding: 0 12px 8px;
+  border-bottom: 1px solid var(--line-soft);
 }
 
 .group-search-input {
@@ -1543,6 +1701,10 @@ main.stage[data-view="agents"] #chatComposerWrap {
 /* Workflow as a flowchart: columns left to right, a popover for the details */
 .wf-canvas-shell {
   position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 480px;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   background:
@@ -1590,13 +1752,19 @@ main.stage[data-view="agents"] #chatComposerWrap {
 }
 
 .wf-canvas-wrap {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
   overflow: auto;
-  max-height: calc(100vh - 250px);
+  min-height: 480px;
+  max-height: calc(100vh - 180px);
 }
 
 .wf-canvas-sizer {
   position: relative;
+  flex: 0 0 auto;
   min-width: 100%;
+  margin-block: auto;
 }
 
 .wf-canvas {
@@ -1607,28 +1775,43 @@ main.stage[data-view="agents"] #chatComposerWrap {
 .wf-edges {
   position: absolute;
   inset: 0;
+  z-index: 1;
   pointer-events: none;
 }
 
 .wf-edge {
   fill: none;
   stroke: var(--line-strong);
-  stroke-width: 1.5;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .wf-edge.done {
   stroke: var(--accent);
+  stroke-width: 2;
 }
 
 .wf-edge.active {
   stroke: var(--warn);
+  stroke-width: 2.4;
   stroke-dasharray: 6 4;
-  animation: wf-flow 1.1s linear infinite;
+  animation: wf-flow 1.05s linear infinite;
+}
+
+.wf-edge.blocked {
+  stroke: var(--err);
+  stroke-opacity: 0.42;
+  stroke-dasharray: 3 4;
 }
 
 @keyframes wf-flow {
   from { stroke-dashoffset: 20; }
   to { stroke-dashoffset: 0; }
+}
+
+@keyframes wf-spin {
+  to { transform: rotate(360deg); }
 }
 
 .wf-templates {
@@ -1697,13 +1880,102 @@ main.stage[data-view="agents"] #chatComposerWrap {
   fill: var(--line-strong);
 }
 
+.wf-arrow.is-done {
+  fill: var(--accent);
+}
+
+.wf-arrow.is-active {
+  fill: var(--warn);
+}
+
+.wf-arrow.is-blocked {
+  fill: color-mix(in srgb, var(--err) 55%, var(--line-strong));
+}
+
+/* 工作流运行进度摘要条 */
+.wf-run-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+}
+
+.wf-run-bar {
+  display: flex;
+  height: 7px;
+  width: 100%;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--soft);
+}
+
+.wf-run-seg {
+  height: 100%;
+  transition: width 0.25s var(--ease);
+}
+
+.wf-run-seg.is-done { background: var(--accent); }
+.wf-run-seg.is-running { background: var(--warn); }
+.wf-run-seg.is-failed { background: var(--err); }
+.wf-run-seg.is-wait { background: var(--line-strong); }
+.wf-run-seg.is-skip { background: var(--faint); opacity: 0.55; }
+
+.wf-run-counts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.wf-run-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--bg);
+}
+
+.wf-run-badge.is-done {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: var(--accent-soft);
+}
+
+.wf-run-badge.is-running {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 50%, var(--line));
+  background: var(--warn-soft);
+  font-weight: 600;
+}
+
+.wf-run-badge.is-failed {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 50%, var(--line));
+  background: var(--err-soft);
+  font-weight: 600;
+}
+
+.wf-run-badge.is-skip {
+  opacity: 0.72;
+}
+
 .wf-node {
+  --wf-review: #2563eb;
+  --wf-review-soft: rgba(37, 99, 235, 0.11);
   position: absolute;
+  z-index: 2;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 5px;
-  padding: 8px 12px;
+  gap: 7px;
+  padding: 9px 11px 9px 13px;
   border: 1px solid var(--line-strong);
   border-radius: var(--r-md);
   background: var(--bg-elevated);
@@ -1711,7 +1983,13 @@ main.stage[data-view="agents"] #chatComposerWrap {
   font: inherit;
   text-align: left;
   cursor: pointer;
-  box-shadow: var(--shadow-sm);
+  box-shadow: inset 4px 0 0 var(--line-strong), var(--shadow-sm);
+  transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+body.dark .wf-node {
+  --wf-review: #60a5fa;
+  --wf-review-soft: rgba(96, 165, 250, 0.14);
 }
 
 .wf-node:hover {
@@ -1720,32 +1998,135 @@ main.stage[data-view="agents"] #chatComposerWrap {
 
 .wf-node.selected {
   border-color: var(--ink);
-  box-shadow: 0 0 0 2px var(--soft), var(--shadow-md);
+  box-shadow: inset 4px 0 0 var(--ink), 0 0 0 2px var(--soft), var(--shadow-md);
+}
+
+.wf-node.status-draft.is-empty-draft {
+  border-style: dashed;
+  box-shadow: inset 4px 0 0 var(--line), var(--shadow-sm);
+}
+
+.wf-node.status-pending {
+  border-style: dashed;
+  border-color: var(--line-strong);
+  background: color-mix(in srgb, var(--bg-panel) 65%, var(--bg-elevated));
+  box-shadow: inset 4px 0 0 var(--line-strong), var(--shadow-sm);
+}
+
+.wf-node.status-pending.is-ready {
+  border-color: color-mix(in srgb, var(--warn) 65%, var(--line));
+  background: color-mix(in srgb, var(--warn) 6%, var(--bg-elevated));
+  box-shadow: inset 4px 0 0 var(--warn), var(--shadow-sm);
 }
 
 .wf-node.status-running {
+  border-width: 1.5px;
   border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 9%, var(--bg-elevated));
+  box-shadow: inset 4px 0 0 var(--warn), var(--shadow-md);
+}
+
+.wf-node.status-running.phase-review {
+  border-color: var(--wf-review);
+  background: color-mix(in srgb, var(--wf-review) 9%, var(--bg-elevated));
+  box-shadow: inset 4px 0 0 var(--wf-review), var(--shadow-md);
 }
 
 .wf-node.status-completed {
   border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-elevated));
+  box-shadow: inset 4px 0 0 var(--accent), var(--shadow-sm);
 }
 
 .wf-node.status-failed {
+  border-width: 1.5px;
   border-color: var(--err);
+  background: color-mix(in srgb, var(--err) 9%, var(--bg-elevated));
+  box-shadow: inset 4px 0 0 var(--err), var(--shadow-sm);
 }
 
 .wf-node.status-skipped,
 .wf-node.status-cancelled {
-  opacity: 0.55;
+  border-style: dashed;
+  background: color-mix(in srgb, var(--bg-panel) 78%, var(--bg-elevated));
+  color: var(--muted);
+  box-shadow: inset 4px 0 0 var(--faint);
+}
+
+.wf-node.status-skipped .wf-node-name,
+.wf-node.status-cancelled .wf-node-name {
+  text-decoration: line-through;
+  color: var(--muted);
 }
 
 .wf-node-top,
 .wf-node-bottom {
   display: flex;
   align-items: center;
-  gap: 7px;
+  justify-content: space-between;
+  gap: 6px;
   min-width: 0;
+}
+
+.wf-node-top {
+  justify-content: flex-start;
+}
+
+.wf-status-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.wf-status-mark.is-draft {
+  background: var(--soft);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.wf-status-mark.is-running {
+  border: 2px solid color-mix(in srgb, var(--warn) 32%, transparent);
+  border-top-color: var(--warn);
+  animation: wf-spin 0.85s linear infinite;
+}
+
+.wf-node.phase-review .wf-status-mark.is-running {
+  border-color: color-mix(in srgb, var(--wf-review) 32%, transparent);
+  border-top-color: var(--wf-review);
+}
+
+.wf-status-mark.is-completed {
+  background: var(--accent);
+  color: var(--on-ink);
+}
+
+.wf-status-mark.is-failed {
+  background: var(--err);
+  color: #ffffff;
+}
+
+.wf-status-mark.is-pending {
+  background: var(--soft);
+  color: var(--faint);
+}
+
+.wf-status-mark.is-ready {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.wf-status-mark.is-muted {
+  background: var(--soft);
+  color: var(--faint);
 }
 
 .wf-node-name {
@@ -1757,11 +2138,67 @@ main.stage[data-view="agents"] #chatComposerWrap {
   white-space: nowrap;
 }
 
-.wf-node-status {
+.wf-node-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.wf-mini-tag {
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.wf-mini-tag.is-review {
+  border-color: color-mix(in srgb, var(--wf-review) 40%, var(--line));
+  color: var(--wf-review);
+}
+
+.wf-node-status-pill {
   margin-left: auto;
-  font-size: 12px;
-  color: var(--faint);
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
   white-space: nowrap;
+  color: var(--faint);
+  background: var(--soft);
+}
+
+.wf-node.status-running .wf-node-status-pill {
+  color: var(--warn);
+  background: var(--warn-soft);
+  font-weight: 600;
+}
+
+.wf-node.status-running.phase-review .wf-node-status-pill {
+  color: var(--wf-review);
+  background: var(--wf-review-soft);
+}
+
+.wf-node.status-completed .wf-node-status-pill {
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+.wf-node.status-failed .wf-node-status-pill {
+  color: var(--err);
+  background: var(--err-soft);
+  font-weight: 600;
+}
+
+.wf-node.status-pending.is-ready .wf-node-status-pill {
+  color: var(--warn);
+  background: var(--warn-soft);
 }
 
 .wf-popover {
@@ -1831,10 +2268,17 @@ main.stage[data-view="agents"] #chatComposerWrap {
 }
 
 /* Shared task context editor on the workflow panel */
+.wf-context-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .wf-context {
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   background: var(--bg-elevated);
+  overflow: hidden;
 }
 
 .wf-context > summary {
@@ -1853,27 +2297,224 @@ main.stage[data-view="agents"] #chatComposerWrap {
   display: none;
 }
 
-.wf-context > summary .ctx-faint {
+.wf-ctx-head-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.wf-ctx-chevron {
+  display: inline-block;
+  color: var(--faint);
+  font-size: 12px;
+  transition: transform 0.16s var(--ease);
+}
+
+.wf-context[open] .wf-ctx-chevron {
+  transform: rotate(90deg);
+}
+
+.wf-ctx-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.wf-ctx-pill {
+  padding: 1px 7px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 11.5px;
   font-weight: 400;
 }
 
-.wf-context-body {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 4px 14px 14px;
+.wf-ctx-pill.is-result {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: var(--accent-soft);
 }
 
-.wf-context-body textarea {
-  min-height: 88px;
+.wf-ctx-pill.is-dirty {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
+  background: var(--warn-soft);
+  font-weight: 600;
 }
 
-.wf-ctx-section {
+.wf-ctx-glance {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 6px;
-  padding-top: 10px;
+  overflow-x: auto;
+  padding: 2px 2px 4px;
+  scrollbar-width: thin;
+}
+
+.wf-ctx-chip {
+  flex: 0 0 auto;
+  max-width: 260px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--muted);
+  font-family: var(--ui);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: border-color 0.14s var(--ease), color 0.14s var(--ease);
+}
+
+.wf-ctx-chip:hover {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.wf-ctx-chip.is-common {
+  border-style: dashed;
+}
+
+.wf-ctx-chip.is-result {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.wf-context-grid {
+  display: grid;
+  grid-template-columns: 204px minmax(0, 1fr);
+  min-height: 210px;
+  max-height: 330px;
   border-top: 1px solid var(--line-soft);
+}
+
+.wf-ctx-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 8px;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--line-soft);
+  overflow-y: auto;
+}
+
+.wf-ctx-nav-group {
+  margin-top: 6px;
+  padding: 2px 6px;
+  font-size: 11px;
+  color: var(--faint);
+  font-weight: 600;
+}
+
+.wf-ctx-nav-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--ui);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wf-ctx-nav-item:hover {
+  background: var(--soft);
+  color: var(--ink);
+}
+
+.wf-ctx-nav-item.active {
+  background: var(--bg-elevated);
+  border-color: var(--line);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.wf-ctx-nav-item.is-result.active {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
+.wf-ctx-nav-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-ctx-nav-meta {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.wf-ctx-add-btn {
+  margin-top: auto;
+  padding-top: 5px;
+  padding-bottom: 5px;
+  width: 100%;
+}
+
+.wf-ctx-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.wf-ctx-pane-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.wf-ctx-pane-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.wf-ctx-editor {
+  flex: 1 1 auto;
+  min-height: 120px;
+}
+
+.wf-ctx-result-pre {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-y: auto;
+  min-height: 140px;
+}
+
+.wf-ctx-pane-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 4px;
 }
 
 .wf-ctx-section-head {
@@ -1883,13 +2524,25 @@ main.stage[data-view="agents"] #chatComposerWrap {
 }
 
 .wf-ctx-section-head .text-input:first-child {
-  flex: 0 0 170px;
+  flex: 0 0 165px;
   font-family: var(--mono);
 }
 
 .wf-ctx-section-head .text-input:nth-child(2) {
   flex: 1;
   min-width: 0;
+}
+
+@media (max-width: 780px) {
+  .wf-context-grid {
+    grid-template-columns: 1fr;
+    max-height: none;
+  }
+  .wf-ctx-nav {
+    border-right: none;
+    border-bottom: 1px solid var(--line-soft);
+    max-height: 140px;
+  }
 }
 
 /* 资源页里按 Agent 的开关：外观沿用状态标签，只是可以点 */

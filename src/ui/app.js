@@ -36,6 +36,7 @@ const STATE = {
   contexts: new Map(),
   projects: [],
   collapsedProjects: new Set(),
+  expandedDoneGroups: new Set(),
   settingsTab: "general",
   defaultLead: "",
   configuredDefaultLead: "",
@@ -323,6 +324,10 @@ function renderAgentControls() {
 }
 
 function setStageView(view) {
+  if (view === "resources") {
+    openSettings("resources");
+    return;
+  }
   STATE.stageView = view;
   const stageEl = document.querySelector("main.stage");
   if (stageEl) {
@@ -331,11 +336,12 @@ function setStageView(view) {
   const isChat = view === "chat";
   if (els.chatStageHeader) els.chatStageHeader.hidden = !isChat;
   if (els.sessionTabs) els.sessionTabs.hidden = !isChat || !shouldShowSessionTabs();
+  const wtBar = document.getElementById("subWorktreeBar");
+  if (wtBar) wtBar.hidden = !isChat;
   if (els.permBanner) els.permBanner.hidden = !isChat || STATE.pendingPermissions.size === 0;
   if (els.questionBanner) els.questionBanner.hidden = !isChat || STATE.pendingQuestions.size === 0;
   if (els.messages) els.messages.hidden = !isChat;
   if (els.chatComposerWrap) els.chatComposerWrap.hidden = !isChat;
-  if (els.resourcesView) els.resourcesView.hidden = view !== "resources";
   if (els.telemetryView) els.telemetryView.hidden = view !== "telemetry";
   if (els.workflowView) els.workflowView.hidden = view !== "workflow";
 
@@ -669,6 +675,10 @@ function isAgentsViewOpen() {
   return Boolean(els.settingsBackdrop && !els.settingsBackdrop.hidden && STATE.settingsTab === "agents");
 }
 
+function isResourcesViewOpen() {
+  return Boolean(els.settingsBackdrop && !els.settingsBackdrop.hidden && STATE.settingsTab === "resources");
+}
+
 function openSettings(tab) {
   if (!els.settingsBackdrop) return;
   STATE.settingsTab = tab || STATE.settingsTab || "general";
@@ -680,6 +690,12 @@ function openSettings(tab) {
     pane.hidden = pane.dataset.settingsPane !== STATE.settingsTab;
   });
   if (STATE.settingsTab === "agents") window.HUB_INTERACTIVE?.renderAgentsView?.();
+  if (STATE.settingsTab === "resources") {
+    window.HUB_PANELS?.renderResourcesPanel?.();
+    if (!STATE.resourcesList || STATE.resourcesList.length === 0) {
+      window.HUB_PANELS?.fetchResources?.();
+    }
+  }
   if (STATE.settingsTab === "logs" && els.logFeed) els.logFeed.scrollTop = els.logFeed.scrollHeight;
 }
 
@@ -773,6 +789,7 @@ function openAppModal(opts) {
     }
 
     els.appModalConfirmBtn.textContent = opts.confirmText || "确定";
+    if (els.appModalCancelBtn) els.appModalCancelBtn.textContent = opts.cancelText || "取消";
     els.appModalConfirmBtn.className = `alma-btn ${opts.danger ? "alma-btn-danger" : "alma-btn-primary"}`;
     els.appModalBackdrop.hidden = false;
 
@@ -1243,15 +1260,28 @@ function renderSidebarGroups() {
       };
       tree.appendChild(leadNode);
 
-      for (const sub of subs) {
+      const latestTaskBySession = new Map();
+      for (const task of getGroupTasks(group.groupId)) {
+        if (!latestTaskBySession.has(task.targetSessionKey)) {
+          latestTaskBySession.set(task.targetSessionKey, task);
+        }
+      }
+
+      const buildSubTreeNode = (sub) => {
         const subStreamKey = `sub:${sub.sessionKey}`;
         const subRunning = isSessionRunning(sub.sessionKey);
+        const latestTask = latestTaskBySession.get(sub.sessionKey);
+        const dotCls = subRunning
+          ? "busy"
+          : sub.status === "error" || latestTask?.status === "failed"
+            ? "failed"
+            : escapeHtml(sub.status);
         const subNode = document.createElement("div");
         subNode.className = `tree-node is-sub${STATE.activeStreamKey === subStreamKey ? " active" : ""}`;
         subNode.title = sub.sessionKey;
         subNode.innerHTML = `
           <span class="tree-node-left">
-            <span class="dot ${subRunning ? "busy" : escapeHtml(sub.status)}"></span>
+            <span class="dot ${dotCls}"></span>
             <span class="tree-node-label">${escapeHtml(agentName(sub.agent))} · ${escapeHtml(sub.label || sub.name)}</span>
           </span>
           ${sub.isWorktree ? '<span class="wt-pill">wt</span>' : ""}
@@ -1260,7 +1290,55 @@ function renderSidebarGroups() {
           e.stopPropagation();
           selectGroup(group.groupId, subStreamKey);
         };
-        tree.appendChild(subNode);
+        return subNode;
+      };
+
+      const activeSubs = [];
+      const doneSubs = [];
+      for (const sub of subs) {
+        const subRunning = isSessionRunning(sub.sessionKey);
+        const latestTask = latestTaskBySession.get(sub.sessionKey);
+        const isActiveOrFailed = subRunning || sub.status === "error" || latestTask?.status === "failed";
+        if (isActiveOrFailed) activeSubs.push(sub);
+        else doneSubs.push(sub);
+      }
+
+      for (const sub of activeSubs) {
+        tree.appendChild(buildSubTreeNode(sub));
+      }
+
+      if (doneSubs.length > 0) {
+        const isExpanded = STATE.expandedDoneGroups.has(group.groupId);
+        if (!isExpanded) {
+          const selectedDone = doneSubs.find((s) => STATE.activeStreamKey === `sub:${s.sessionKey}`);
+          if (selectedDone) {
+            tree.appendChild(buildSubTreeNode(selectedDone));
+          }
+        }
+
+        const foldBtn = document.createElement("button");
+        foldBtn.type = "button";
+        foldBtn.className = `tree-fold-btn${isExpanded ? " expanded" : ""}`;
+        foldBtn.innerHTML = `<span class="tree-fold-arrow">${isExpanded ? "▾" : "▸"}</span><span>已完成 (${doneSubs.length})</span>`;
+        foldBtn.onclick = (e) => {
+          e.stopPropagation();
+          if (STATE.expandedDoneGroups.has(group.groupId)) {
+            STATE.expandedDoneGroups.delete(group.groupId);
+          } else {
+            STATE.expandedDoneGroups.add(group.groupId);
+          }
+          renderSidebarGroups();
+        };
+        tree.appendChild(foldBtn);
+
+        if (isExpanded) {
+          const doneWrap = document.createElement("div");
+          doneWrap.className = "session-tree-done";
+          for (const sub of doneSubs) {
+            doneWrap.appendChild(buildSubTreeNode(sub));
+          }
+          tree.appendChild(doneWrap);
+        }
       }
 
       card.appendChild(tree);
@@ -1482,13 +1560,13 @@ function renderStageHeaderAndTabs() {
     els.leadSwitcher.classList.toggle("is-disabled", Boolean(group.archived));
   }
 
-  // Sub-session tab bar
+  // Sub-session tab bar (only visible in chat view so switching to workflow/telemetry never pops it back)
   const subs = getGroupSubSessions(group.groupId);
   if (subs.length === 0) {
     els.sessionTabs.hidden = true;
     els.sessionTabs.innerHTML = "";
   } else {
-    els.sessionTabs.hidden = false;
+    els.sessionTabs.hidden = STATE.stageView !== "chat";
     els.sessionTabs.innerHTML = "";
     const leadStreamKey = `lead:${group.groupId}`;
     const leadTab = document.createElement("button");
@@ -1498,7 +1576,12 @@ function renderStageHeaderAndTabs() {
     leadTab.onclick = () => selectGroup(group.groupId, leadStreamKey);
     els.sessionTabs.appendChild(leadTab);
 
-    for (const sub of subs) {
+    const orderedSubs = [...subs].sort((a, b) => {
+      const aHot = isSessionRunning(a.sessionKey) || a.status === "error" ? 0 : 1;
+      const bHot = isSessionRunning(b.sessionKey) || b.status === "error" ? 0 : 1;
+      return aHot - bHot;
+    });
+    for (const sub of orderedSubs) {
       const key = `sub:${sub.sessionKey}`;
       const subRunning = isSessionRunning(sub.sessionKey);
       const tab = document.createElement("button");
@@ -1518,6 +1601,7 @@ function renderStageHeaderAndTabs() {
       subSession.branch || subSession.effectiveCwd,
     );
     nextBar.id = "subWorktreeBar";
+    nextBar.hidden = STATE.stageView !== "chat";
     if (prevWtBar) {
       prevWtBar.replaceWith(nextBar);
     } else if (els.sessionTabs) {
@@ -4311,6 +4395,14 @@ function buildQuickSwitcherItems(queryRaw) {
       },
     },
     {
+      id: "cmd:open-resources",
+      title: "打开资源管理（规则与技能）",
+      meta: "设置 · 资源",
+      dotClass: "idle",
+      searchText: "资源 规则 技能 设置 resources rules skills",
+      run: () => openSettings("resources"),
+    },
+    {
       id: "cmd:toggle-theme",
       title: document.body.classList.contains("dark") ? "切换为浅色主题" : "切换为深色主题",
       meta: "外观",
@@ -4810,6 +4902,7 @@ window.HUB_APP = {
   openSettings,
   closeSettings,
   isAgentsViewOpen,
+  isResourcesViewOpen,
   renderModelSelectorBar,
   onStateChange: null,
   onResourcesUpdated: null,
