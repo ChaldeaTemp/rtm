@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { McpServerManager, parseCodexMcpServers, parseJsonMcpServers } from "../src/hub/mcp-servers.js";
 import { levelFor, MemoryMonitor } from "../src/hub/memory.js";
 import { SharedResourceManager } from "../src/hub/resources.js";
 import { AgentHubServer } from "../src/hub/server.js";
@@ -185,11 +186,106 @@ async function main(): Promise<void> {
       mgr.setResourceEnabled(item.id, true, cwd, other);
       check("switched back on", mgr.buildInjectionForAgent(other, cwd).promptPrefix.includes("`demo-skill`"));
     }
+    console.log("=== 6. Shared MCP servers ===");
+    const codexDefs = parseCodexMcpServers(
+      [
+        'model = "x"',
+        "[mcp_servers]",
+        "[mcp_servers.db]",
+        'url = "http://127.0.0.1:18780/mcp/db"',
+        "[mcp_servers.repl]",
+        "args = []",
+        "command = 'C:\\tools\\repl.exe'",
+        'env_vars = ["PASS_ME"]',
+        "[mcp_servers.repl.env]",
+        "HOME_DIR = 'D:\\data'",
+        '[mcp_servers."kyp-review"]',
+        'command = "python"',
+        'args = ["D:/x/proxy.py", "--fast"]',
+        '[plugins."x"]',
+        "enabled = true",
+      ].join("\n"),
+    );
+    check(
+      "Codex config is read",
+      codexDefs.length === 3 &&
+        codexDefs[0]!.transport === "http" &&
+        codexDefs[1]!.command === "C:\\tools\\repl.exe" &&
+        codexDefs[1]!.env?.HOME_DIR === "D:\\data" &&
+        codexDefs[1]!.envVars?.[0] === "PASS_ME" &&
+        codexDefs[2]!.name === "kyp-review" &&
+        codexDefs[2]!.args?.join() === "D:/x/proxy.py,--fast",
+      JSON.stringify(codexDefs).slice(0, 200),
+    );
+    check(
+      "Claude-style JSON is read",
+      parseJsonMcpServers({ a: { command: "npx", args: ["-y", "srv"], env: { K: "v" } }, b: { type: "http", url: "http://x/mcp" }, c: { type: "sse", url: "http://x/sse" } }).map((s) => s.name + ":" + s.transport).join() === "a:stdio,b:http",
+    );
+
+    const mcpHome = path.join(tmp, "mcp-home");
+    const mcpProj = path.join(tmp, "mcp-proj");
+    fs.mkdirSync(path.join(mcpHome, ".codex"), { recursive: true });
+    fs.mkdirSync(mcpProj, { recursive: true });
+    fs.writeFileSync(path.join(mcpHome, ".codex", "config.toml"), '[mcp_servers.db]\nurl = "http://127.0.0.1:1/mcp"\n[mcp_servers.tool]\ncommand = "node"\nargs = ["t.js"]\n', "utf8");
+    fs.writeFileSync(path.join(mcpProj, ".mcp.json"), JSON.stringify({ mcpServers: { docs: { command: "node", args: ["docs.js"], env: { TOKEN: "${RTM_TEST_DOCS_TOKEN}" } } } }), "utf8");
+    const mcpEnv: NodeJS.ProcessEnv = {};
+    const mgr2 = new McpServerManager(path.join(tmp, "mcp-servers.json"), mcpHome, mcpEnv);
+    const names = (agent: string, role: "lead" | "sub", http = true) =>
+      mgr2.forSession({ agent, role, cwd: mcpProj, httpSupported: http }).map((s) => s.name).join();
+    check("discovered servers are off until switched on", names("opencode", "lead") === "" && mgr2.list(mcpProj).length === 3);
+    mgr2.setState("codex:db", { enabled: true });
+    mgr2.setState("codex:tool", { enabled: true });
+    check("shared with other agents, lead only", names("opencode", "lead") === "db,tool" && names("opencode", "sub") === "");
+    check("not passed back to the agent that already has it", names("codex", "lead") === "");
+    check("HTTP servers only go to agents that support them", names("opencode", "lead", false) === "tool");
+    mgr2.setState("codex:tool", { roles: ["lead", "sub"] });
+    check("sub-sessions get it once ticked", names("opencode", "sub") === "tool");
+    mgr2.setState("codex:tool", { agent: "opencode", agentEnabled: false });
+    check("can be switched off for one agent", names("opencode", "lead") === "db" && names("kimi", "lead") === "db,tool");
+    mgr2.setState("project:docs", { enabled: true });
+    check("an untrusted project file is not started", !names("kimi", "lead").includes("docs") && mgr2.list(mcpProj).find((s) => s.id === "project:docs")?.trusted === false);
+    mgr2.setProjectTrust(mcpProj, true);
+    check("a trusted one with a missing variable is still held back", !names("kimi", "lead").includes("docs") && mgr2.list(mcpProj).find((s) => s.id === "project:docs")?.missingEnv.join() === "RTM_TEST_DOCS_TOKEN");
+    mcpEnv.RTM_TEST_DOCS_TOKEN = "secret";
+    const docs = mgr2.forSession({ agent: "kimi", role: "lead", cwd: mcpProj, httpSupported: true }).find((s) => s.name === "docs") as { env: Array<{ name: string; value: string }> } | undefined;
+    check("started once the variable is set, with its value filled in", docs?.env[0]?.value === "secret");
+    fs.appendFileSync(path.join(mcpProj, ".mcp.json"), "\n", "utf8");
+    check("changing the project file withdraws the trust", !names("kimi", "lead").includes("docs"));
+    let refused = false;
+    try { mgr2.save({ name: "agent-hub-peers", transport: "stdio", command: "x" }); } catch { refused = true; }
+    check("the workbench's own server name is reserved", refused);
+
+    // End to end: the hub hands the server to a real session/new, by role.
+    const newLog = path.join(stateDir, "session-new.log");
+    const lastMcp = (): string[] => {
+      const lines = fs.existsSync(newLog) ? fs.readFileSync(newLog, "utf8").trim().split("\n") : [];
+      return lines.length ? (JSON.parse(lines[lines.length - 1]!).mcp as string[]) : [];
+    };
+    res = await post("/api/mcp/save", { groupId: g.groupId, server: { name: "demo-tools", transport: "stdio", command: process.execPath, args: ["-e", "setInterval(()=>{},1000)"] } });
+    check("server added through the API and listed", res.ok === true && res.servers.some((s: Json) => s.id === "rtm:demo-tools" && s.enabled), res.error);
+    const g3 = (await post("/api/groups", { title: "mcp", leadAgent: "mock-a", cwd })).group;
+    await post("/api/chat", { groupId: g3.groupId, prompt: "hello" });
+    check("lead session receives the shared server", lastMcp().includes("demo-tools") && lastMcp().includes("agent-hub-peers"), lastMcp().join());
+    const subTask = hub.dispatchPeerTask({
+      targetAgent: "mock-a", groupId: g3.groupId, session: "s1", callerAgent: "mock-a",
+      callerSession: `mock-a:${g3.groupId}__lead`, depth: 0, isolateWorktree: false, prompt: "hi",
+    });
+    await until(() => sessions().find((s) => s.sessionKey === subTask.targetSessionKey)?.status === "idle");
+    check("sub-session does not", !lastMcp().includes("demo-tools") && lastMcp().includes("agent-hub-peers"), lastMcp().join());
+    await post("/api/mcp/state", { groupId: g3.groupId, id: "rtm:demo-tools", roles: ["lead", "sub"] });
+    const subTask2 = hub.dispatchPeerTask({
+      targetAgent: "mock-a", groupId: g3.groupId, session: "s2", callerAgent: "mock-a",
+      callerSession: `mock-a:${g3.groupId}__lead`, depth: 0, isolateWorktree: false, prompt: "hi",
+    });
+    await until(() => sessions().find((s) => s.sessionKey === subTask2.targetSessionKey)?.status === "idle");
+    check("sub-session does after it is ticked", lastMcp().includes("demo-tools"), lastMcp().join());
+    res = await post("/api/mcp/delete", { groupId: g3.groupId, name: "demo-tools" });
+    check("server deleted", res.ok === true && !res.servers.some((s: Json) => s.id === "rtm:demo-tools"));
   } finally {
     await hub.stop();
   }
 
-  console.log("=== 6. Supervisor restarts a killed hub and keeps its logs ===");
+  console.log("=== 7. Supervisor restarts a killed hub and keeps its logs ===");
   const dataDir = process.env.RTM_DATA_DIR!;
   const port = 44000 + Math.floor(Math.random() * 1000);
   const base = `http://127.0.0.1:${port}`;

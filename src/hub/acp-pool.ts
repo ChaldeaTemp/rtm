@@ -402,6 +402,12 @@ export class AcpPool extends EventEmitter {
   private resourceManager?: SharedResourceManager;
   private registry?: AgentRegistry;
   private extraDirsResolver?: (groupId: string) => string[];
+  private sharedMcpResolver?: (input: {
+    agent: AgentId;
+    role: "lead" | "sub";
+    cwd: string;
+    httpSupported: boolean;
+  }) => Array<Record<string, unknown>>;
   private elicitationHandler?: ElicitationBridgeHandler;
   /** Warm starts still in flight that no turn has claimed yet. */
   private warmPending = new Set<string>();
@@ -431,6 +437,13 @@ export class AcpPool extends EventEmitter {
   }
 
   /** Lets the hub say which other directories a task group's sessions should have access to. */
+  /** Supplies the user's shared MCP servers for a new session (see hub/mcp-servers.ts). */
+  setSharedMcpResolver(
+    resolver: (input: { agent: AgentId; role: "lead" | "sub"; cwd: string; httpSupported: boolean }) => Array<Record<string, unknown>>,
+  ): void {
+    this.sharedMcpResolver = resolver;
+  }
+
   setExtraDirsResolver(resolver: (groupId: string) => string[]): void {
     this.extraDirsResolver = resolver;
   }
@@ -974,6 +987,21 @@ export class AcpPool extends EventEmitter {
             args: mcpLaunch.args,
             env: [],
           });
+          // Shared servers ride along with the workbench tools; throwaway sessions (no peer
+          // MCP) get neither.
+          const caps = initResp.agentCapabilities as { mcpCapabilities?: { http?: boolean } } | undefined;
+          try {
+            for (const server of this.sharedMcpResolver?.({
+              agent: options.agent,
+              role: record.role,
+              cwd: options.baseCwd,
+              httpSupported: Boolean(caps?.mcpCapabilities?.http),
+            }) ?? []) {
+              builder.withMcpServer(server as never);
+            }
+          } catch {
+            // A broken shared-server list must not stop the session from starting.
+          }
         }
         return builder.start();
       };

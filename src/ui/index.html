@@ -249,6 +249,7 @@
         <button type="button" data-settings-tab="general" class="active" data-i18n="general">通用</button>
         <button type="button" data-settings-tab="agents">Agent <span id="navAgentsBadge" class="mode-badge">5</span></button>
         <button type="button" data-settings-tab="resources"><span data-i18n="resources">资源</span> <span id="navResBadge" class="mode-badge">0</span></button>
+        <button type="button" data-settings-tab="mcp">MCP</button>
         <button type="button" data-settings-tab="logs" data-i18n="logs">日志</button>
       </nav>
       <div class="settings-main">
@@ -323,6 +324,10 @@
           <h2 data-i18n="resources">资源</h2>
           <section id="resourcesView" class="settings-resources"></section>
         </section>
+        <section class="settings-pane" data-settings-pane="mcp" hidden>
+          <h2 data-i18n="mcpSharedServers">共享 MCP 服务</h2>
+          <section id="mcpView"></section>
+        </section>
         <section class="settings-pane" data-settings-pane="logs" hidden>
           <h2 data-i18n="logs">日志</h2>
           <div id="logFeed" class="log-feed"></div>
@@ -375,5 +380,6 @@
   <script type="module" src="/ui/app.js"></script>
   <script type="module" src="/ui/panels.js"></script>
   <script type="module" src="/ui/interactive.js"></script>
+  <script type="module" src="/ui/mcp.js"></script>
 </body>
 </html>

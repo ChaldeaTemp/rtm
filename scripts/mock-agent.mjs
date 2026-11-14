@@ -68,6 +68,17 @@ rl.on("line", (line) => {
   if (msg.method === "initialize") {
     send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: false } } });
   } else if (msg.method === "session/new") {
+    // Lets a test see which MCP servers the hub passed to this session.
+    try {
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.appendFileSync(
+        path.join(stateDir, "session-new.log"),
+        `${JSON.stringify({ mcp: (msg.params?.mcpServers ?? []).map((s) => s.name) })}\n`,
+        "utf8",
+      );
+    } catch {
+      // Best effort.
+    }
     send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: `mock-${process.pid}-${++sessionSeq}` } });
   } else if (msg.method === "session/prompt") {
     const sessionId = msg.params?.sessionId;

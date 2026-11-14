@@ -37,6 +37,7 @@ import { AgentRegistry } from "./agent-registry.js";
 import { ThreadLedger } from "./ledger.js";
 import { MemoryMonitor, type MemoryStatus } from "./memory.js";
 import { WorkflowTemplateStore } from "./workflow-templates.js";
+import { McpServerManager } from "./mcp-servers.js";
 import { checkPortAvailable, findAvailablePort, pickNativeDirectory } from "./port-finder.js";
 import { openTerminalWindow, PROJECT_ROOT, resolveAgentLoginCommand } from "./process-tree.js";
 import { WorkflowManager } from "./workflow.js";
@@ -57,6 +58,7 @@ const UPLOADS_DIR = path.join(installDataDir(PROJECT_ROOT), "uploads");
 const SETTINGS_FILE = path.join(installDataDir(PROJECT_ROOT), "settings.json");
 const STATE_FILE = path.join(installDataDir(PROJECT_ROOT), "state.json");
 const WORKFLOW_TEMPLATES_FILE = path.join(installDataDir(PROJECT_ROOT), "workflow-templates.json");
+const MCP_SERVERS_FILE = path.join(installDataDir(PROJECT_ROOT), "mcp-servers.json");
 /** Events that never change what is persisted; everything else schedules a save. */
 const TRANSIENT_EVENT_TYPES = new Set(["agent_chunk", "tool_event", "snapshot", "models_updated"]);
 /** Session-name suffix of the throwaway session that names a task; never shown in the UI. */
@@ -772,6 +774,7 @@ export class AgentHubServer {
   });
   private idleSweepTimer?: ReturnType<typeof setInterval>;
   private readonly workflowTemplates = new WorkflowTemplateStore(WORKFLOW_TEMPLATES_FILE);
+  readonly mcpServers = new McpServerManager(MCP_SERVERS_FILE);
   /** Handoffs the current lead asked for; carried out when its turn ends. */
   private pendingHandoffs = new Map<string, { from: AgentId; to: AgentId; brief: string }>();
   /** Sessions from before a restart: not running, kept so their history stays reachable. */
@@ -861,6 +864,7 @@ export class AgentHubServer {
     this.pool.setAgentRegistry(this.registry);
     this.pool.setElicitationHandler((params) => this.handleElicitationRequest(params));
     this.pool.setExtraDirsResolver((groupId) => this.groups.get(groupId)?.extraDirs ?? []);
+    this.pool.setSharedMcpResolver((input) => this.mcpServers.forSession(input));
     this.launchLead = options.defaultLead;
     // Auth probes refresh in the background; push the new state when it actually changed.
     this.registry.onHealthChanged(() => this.broadcastAgentsUpdated());
@@ -4359,6 +4363,59 @@ export class AgentHubServer {
         const body = WorkflowGroupSchema.parse(await readJsonBody(req));
         sendJson(res, 200, { ok: true, workflow: this.workflows.retryFailed(body.groupId) });
         return;
+      }
+
+      if (pathname === "/api/mcp" || pathname.startsWith("/api/mcp/")) {
+        const body = method === "POST" ? ((await readJsonBody(req)) as Record<string, unknown>) : {};
+        const groupId = (method === "GET" ? reqUrl.searchParams.get("groupId") : (body.groupId as string | undefined)) || undefined;
+        const cwd = (groupId && this.groups.get(groupId)?.cwd) || this.baseCwd;
+        const reply = () => sendJson(res, 200, { ok: true, cwd, servers: this.mcpServers.list(cwd) });
+        if (method === "GET" && pathname === "/api/mcp") {
+          reply();
+          return;
+        }
+        if (method === "POST" && pathname === "/api/mcp/state") {
+          const input = z
+            .object({
+              id: z.string().min(1),
+              enabled: z.boolean().optional(),
+              roles: z.array(z.enum(["lead", "sub"])).optional(),
+              agent: z.string().optional(),
+              agentEnabled: z.boolean().optional(),
+            })
+            .parse(body);
+          this.mcpServers.setState(input.id, { ...input, agent: input.agent?.trim().toLowerCase() || undefined });
+          reply();
+          return;
+        }
+        if (method === "POST" && pathname === "/api/mcp/save") {
+          const input = z
+            .object({
+              server: z.object({
+                name: z.string().min(1),
+                transport: z.enum(["stdio", "http"]),
+                command: z.string().optional(),
+                args: z.array(z.string()).optional(),
+                env: z.record(z.string(), z.string()).optional(),
+                url: z.string().optional(),
+                headers: z.record(z.string(), z.string()).optional(),
+              }),
+            })
+            .parse(body);
+          this.mcpServers.save(input.server);
+          reply();
+          return;
+        }
+        if (method === "POST" && pathname === "/api/mcp/delete") {
+          this.mcpServers.delete(z.object({ name: z.string().min(1) }).parse(body).name);
+          reply();
+          return;
+        }
+        if (method === "POST" && pathname === "/api/mcp/trust") {
+          this.mcpServers.setProjectTrust(cwd, z.object({ trusted: z.boolean() }).parse(body).trusted);
+          reply();
+          return;
+        }
       }
 
       if (method === "GET" && pathname === "/api/workflows/templates") {

@@ -260,6 +260,8 @@ function senderLabelText(msg) {
   const label = msg.senderLabel || "";
   if (msg.agent && label === msg.agent) return agentName(msg.agent);
   if (msg.agent && label === msg.agent + " 委派") return t("delegatedBy", agentName(msg.agent));
+  // 交接说明这条消息的标签由服务端按「名称 交接」生成
+  if (msg.agent && label.endsWith(" 交接")) return t("handedOverBy", agentName(msg.agent));
   return displayMessageSender(msg);
 }
 
@@ -705,6 +707,7 @@ function openSettings(tab) {
     pane.hidden = pane.dataset.settingsPane !== STATE.settingsTab;
   });
   if (STATE.settingsTab === "agents") window.HUB_INTERACTIVE?.renderAgentsView?.();
+  if (STATE.settingsTab === "mcp") window.HUB_MCP?.render?.();
   if (STATE.settingsTab === "resources") {
     window.HUB_PANELS?.renderResourcesPanel?.();
     if (!STATE.resourcesList || STATE.resourcesList.length === 0) {
@@ -720,6 +723,7 @@ function closeSettings() {
 
 function applyLanguage() {
   localizeDocument();
+  if (STATE.settingsTab === "mcp" && els.settingsBackdrop && !els.settingsBackdrop.hidden) window.HUB_MCP?.rerender?.();
   document.getElementById("languageSelect").value = getLanguagePreference();
   els.themeToggleBtn.textContent = document.body.classList.contains("dark") ? t("light") : t("dark");
   els.wsDot.title = t(els.wsDot.classList.contains("ok")
