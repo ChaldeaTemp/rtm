@@ -1,127 +1,69 @@
 # RTM (Round Table Meeting)
 
-[简体中文](README.md) | English
+[简体中文](README.md) · English
 
-RTM is a local workbench where several command-line coding agents work on one task together. It connects agents such as Claude Code, Codex, OpenCode and Kimi to a single interface: one agent leads the task and the others join as sub-sessions.
+RTM is a local workbench for coding with multiple agents. It connects command-line agents such as Claude Code, Codex, and OpenCode through the Agent Client Protocol (ACP). You talk to one lead agent, which can delegate implementation, testing, or review to other agents. Follow their sessions, progress, and changes from the same task.
 
-> The name and the logo are provisional. This is version 0.1.0, suitable for personal use and small trials.
+[Quick start](#quick-start) · [Main features](#main-features) · [User guide](guide/README.en.md) · [Development](#development)
 
-![Chat view: lead session, progress panel and sub-agents](docs/screenshots/chat.png)
+![RTM chat view with tasks and sub-sessions on the left and progress and context on the right](guide/screenshots/chat.png)
 
-The interface is currently in Chinese only.
+## Quick start
 
-## What it does
-
-- **One task, several agents.** Each task has a lead agent. The lead can delegate work to other agents, and is chosen when the task is created. To change it, ask the current lead in the conversation to hand over: it writes a brief, and the new lead confirms what it is taking over before carrying on. If the lead itself is broken and cannot hand over, send `/lead <agent>` in the lead conversation to switch directly.
-- **Workflows.** Lay out the work for sub-sessions as steps with dependencies, review it, then publish it in one go. Write the steps yourself or ask the lead to draft them. A step can carry an acceptance gate: another agent reviews the work and a rejection goes back to be redone. A workflow that stopped part-way can continue from its finished steps, and arrangements you reuse can be saved as templates.
-- **Shared context.** A task's background, conventions and step results are written once; sub-sessions take what they need instead of having it repeated in every delegation.
-- **Progress panel.** Agents keep the task's goal, steps and current state up to date themselves, so you do not have to keep asking where things stand.
-- **Session panel.** Context usage, sub-agents, files read and changed, and artifacts of the session you are looking at.
-- **Shared rules and skills.** Each agent's own rule files and skills are made available to the others; whatever an agent does not load natively is supplied to it. Each item can be switched off for everyone or for a single agent.
-- **Directories and projects.** A task can span several directories, the sidebar groups tasks by project, and tasks can be archived and restored.
-- **Survives restarts.** Tasks, messages, workflows and progress are saved and restored.
-- **Long runs.** If the backend exits unexpectedly it is restarted and the reason is written to `.rtm/crash.log`. Idle sub-sessions are put to sleep to free memory and wake up with their earlier conversation. When the system is short on memory the UI says so and workflows drop to one step at a time (memory is only measured on Windows for now).
-
-![Workflow: runs left to right, steps in the same column run in parallel](docs/screenshots/workflow.png)
-
-## Requirements
-
-- Node.js 22 or newer.
-- At least one ACP-capable command-line agent installed and signed in, for example Claude Code, Codex, OpenCode or Kimi.
-- A Chromium-based browser (Edge, Chrome, Brave, ...) to open the interface as an app window. Without one, RTM falls back to the system default browser.
-- Windows and macOS share the same launcher. Day-to-day use and verification have been on Windows; the macOS path follows the same logic but has not been run on a real Mac yet.
-
-## Getting started
+You need **Node.js 22 or newer** and at least one agent ready to use. Set up two agents to try cross-agent delegation or review. RTM currently runs from source. Development and CI use Windows. The repository also includes a macOS launcher that has yet to be tested on a Mac.
 
 ```bash
-npm install
+git clone https://github.com/ChaldeaTemp/rtm.git
+cd rtm
+npm ci
+npm run desktop
 ```
 
-Then start it either way:
+See the [user guide](guide/README.en.md) for first launch, agent setup, and the full CSV export example.
 
-| | Windows | macOS |
-|---|---|---|
-| Double-click | `RTM.vbs` | `RTM.command` |
-| Command line | `npm run desktop` | `npm run desktop` |
+## Main features
 
-On launch RTM will:
+### One lead agent, several sub-sessions
 
-1. Open another window if it is already running.
-2. Otherwise reuse the last workspace and port, picking another port if that one is taken. The first launch shows the system folder dialog so you can choose a workspace.
-3. Open the interface as an app window. The server exits when you close the window.
+Describe the goal in the lead chat. The lead can delegate implementation, testing, or review to other agents and summarize the results. Expand a task in the sidebar to open its sub-sessions, or use the right panel to check progress and context. The lead can also write a brief and hand the task over to another agent.
 
-To put a launcher on your desktop:
+### Parallel workflows and review gates
 
-```bash
-npm run shortcut
-```
+Add steps yourself or ask the lead to draft them. After you publish the workflow, steps can run in parallel once their dependencies are met. Assign another agent to review a step against your criteria. Rejected work returns to the original session within the review limit. Resume a stopped workflow while keeping completed steps.
 
-`npm run desktop` accepts flags, for example `npm run desktop -- --choose-dir`:
+In the CSV export example below, the export UI and edge-case tests run in parallel once the export rules are defined. Integration testing waits for both.
 
-| Flag | Effect |
-|---|---|
-| `--choose-dir` | Choose the workspace again |
-| `--cwd <dir>` | Use this workspace |
-| `--port <port>` | Use this port |
-| `--lead <agent>` | Default lead agent for this run |
-| `--no-open` | Start the server without opening a window |
+![CSV export workflow with two parallel steps feeding into an integration test with a review gate](guide/screenshots/workflow.png)
 
-Other commands:
+<details>
+<summary>Demo · Open an integration test step and inspect its review criteria</summary>
 
-| Command | Effect |
-|---|---|
-| `npm run ui` | Start in the current directory and keep an interactive prompt in the terminal |
-| `npm start` | Terminal prompt only, no interface |
-| `npm run status` | Show which agents are installed and signed in |
+![Clicking the integration test node reveals the reviewer, review limit, and acceptance criteria](guide/screenshots/workflow-review.gif)
 
-## Adding agents
+</details>
 
-claude, codex, agy, opencode and kimi are built in. Add others under Settings → Agent → Add agent, in one of three ways:
+### Shared context, rules, and MCP
 
-1. Common CLIs found on this machine are detected and can be added with one click.
-2. Enter a tool name and let an agent you already have find the launch command and register it.
-3. Enter the launch command and arguments yourself.
+Keep requirements, conventions, and step results in the same task so sub-sessions and downstream steps can reference them. Enable shared rules and skills per agent, and share configured MCP servers across agents.
 
-The long-term default lead is set in the same place.
+### Local projects and changes
 
-## Appearance
-
-Settings → General offers three skins, each with a light and a dark variant: Simple, Classic and Round Table.
-
-Open **Settings → General → Language** to choose English, Simplified Chinese, or the browser language. RTM remembers your choice and uses it for Markdown exports.
-
-Set `RTM_LANG` to `en` or `zh-CN` to choose the language for terminal commands.
-
-![Round Table skin, dark](docs/screenshots/skin-roundtable.png)
-
-## Before you use it
-
-- **The default permission mode approves everything.** Agents call tools without asking. Switch to read-only approval or per-call confirmation at the top right of the chat view if you prefer.
-- **The server listens on this machine only** (`127.0.0.1`) and rejects requests from other websites. There is no access token, though, so other programs on the same machine can call it.
-- **All data lives in `.rtm/`**: tasks and messages in `state.json`, uploads in `uploads/`, agent configuration in `agents.json`. The directory is not tracked by git; an `.agent-hub/` directory left by an earlier version is renamed to `.rtm/` on first start. Also, uploads are never cleaned up automatically.
-- **After a restart an agent gets a summary of the earlier conversation**, not the full history.
-- **It runs from the source directory only.** Packaged distribution is not supported yet.
+Work across several directories, isolate a sub-session's changes in a Git worktree, and inspect its diff in the workbench. RTM saves chats, progress, and workflows locally so you can return to them after a restart. Archive tasks or export them to Markdown.
 
 ## Development
 
 ```bash
-npm run typecheck
+npm run verify:mock
 ```
 
-`npm run verify:robustness` and `npm run verify:walkthrough` use a built-in mock agent, need no agent sign-in and finish in well under a minute; `npm run verify:mock` runs both plus the type check, and is what CI runs.
+This runs the type check and two regression suites with mock agents, without signing in to any real agent. GitHub Actions runs the same command on Windows with Node.js 22. The end-to-end scripts `npm run verify` and `verify:phase2-3` through `verify:phase8` require the corresponding agents to be configured locally. Run `npm run build` before `verify:phase8`.
 
-`npm run verify` and `verify:phase2-3` through `verify:phase8` are end-to-end checks. They start the real agents on this machine, which must be signed in. Run `npm run build` before `verify:phase8`.
+| Path | Contents |
+| --- | --- |
+| `src/hub/` | Local server, ACP session pool, workflows, and persistence |
+| `src/mcp/` | Agent tools for delegation, progress, shared context, and workflows |
+| `src/ui/` | Workbench UI in plain JavaScript |
+| `src/desktop.ts` | Desktop launcher and shortcuts |
+| `scripts/` | Verification and benchmarking |
 
-Layout:
-
-- `src/hub/`: the local server (session pool, agent registry, shared resources, workflows, state)
-- `src/mcp/`: MCP tools offered to the agents (delegation, questions, progress, workflows)
-- `src/ui/`: the interface, plain JavaScript with no build step
-- `src/desktop.ts`: the desktop launch flow shared by Windows and macOS
-- `scripts/`: verification and benchmark scripts
-
-The tasks and conversations in the screenshots are demo data.
-
-## License
-
-[MIT](LICENSE)
+[Changelog](CHANGELOG.md) · [MIT License](LICENSE)

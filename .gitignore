@@ -10,3 +10,6 @@ dist/
 
 # Machine-specific acpx agent paths
 .acpxrc.json
+
+# Local project notes and assets
+/docs/
