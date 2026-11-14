@@ -141,6 +141,50 @@ export class WorkflowManager {
     return this.clone(workflow)!;
   }
 
+  /**
+   * Re-runs incomplete steps while keeping already-completed steps and their saved results intact.
+   */
+  retryFailed(groupId: string): WorkflowRecord {
+    const workflow = this.workflows.get(groupId);
+    if (!workflow || workflow.steps.length === 0) {
+      throw new Error("工作流还没有步骤");
+    }
+    if (workflow.status === "running") {
+      throw new Error("工作流正在运行，请先停止或等待当前步骤结束");
+    }
+    const incomplete = workflow.steps.filter((s) => s.status !== "completed");
+    if (incomplete.length === 0) {
+      throw new Error("所有步骤均已完成，无需重试");
+    }
+    const empty = incomplete.filter((s) => !s.prompt.trim());
+    if (empty.length > 0) {
+      throw new Error(`这些步骤还没有写任务内容：${empty.map((s) => s.name).join("、")}`);
+    }
+    const missing = new Set<string>();
+    for (const step of incomplete) {
+      for (const key of this.deps.missingContext(groupId, step.contextRefs ?? [])) missing.add(key);
+    }
+    if (missing.size > 0) {
+      throw new Error(`这些步骤引用的上下文分区不存在：${[...missing].join("、")}`);
+    }
+    for (const step of workflow.steps) {
+      if (step.status === "completed") {
+        if (step.output?.trim()) {
+          this.deps.saveResult(groupId, step, step.output);
+        }
+        continue;
+      }
+      step.status = "pending";
+      step.taskId = undefined;
+      step.sessionKey = undefined;
+      step.error = undefined;
+      step.output = undefined;
+    }
+    workflow.status = "running";
+    this.advance(workflow);
+    return this.clone(workflow)!;
+  }
+
   /** Stops running steps and drops the ones that have not started. */
   cancel(groupId: string): WorkflowRecord {
     const workflow = this.workflows.get(groupId);

@@ -31,8 +31,7 @@
           </div>
           <div class="ws-status">
             <span id="portBadge" class="mono"></span>
-            <span id="wsDot" class="dot"></span>
-            <span id="wsText">connecting</span>
+            <span id="wsDot" class="dot" title="WebSocket 连接状态"></span>
           </div>
         </div>
         <div class="cwd-row">
@@ -45,11 +44,6 @@
         <button id="toggleNewTaskBtn" class="alma-btn alma-btn-primary new-task-main" type="button">
           新建任务
         </button>
-        <div id="quickLaunchRow" class="quick-launch-row" title="一键以指定主导 Agent 启动新的并行任务">
-          <button class="quick-btn" data-quick-lead="claude" type="button">+ claude</button>
-          <button class="quick-btn" data-quick-lead="codex" type="button">+ codex</button>
-          <button class="quick-btn" data-quick-lead="agy" type="button">+ agy</button>
-        </div>
 
         <form id="newTaskPopover" class="new-task-popover" hidden>
           <input
@@ -110,11 +104,6 @@
       <div id="groupList" class="group-list"></div>
 
       <div class="sidebar-footer">
-        <div id="adapterPills" class="adapter-pills">
-          <span class="adapter-pill" data-adapter="claude"><span class="dot" data-auth-dot="claude"></span>claude</span>
-          <span class="adapter-pill" data-adapter="codex"><span class="dot" data-auth-dot="codex"></span>codex</span>
-          <span class="adapter-pill" data-adapter="agy"><span class="dot" data-auth-dot="agy"></span>agy</span>
-        </div>
         <div class="footer-actions">
           <span class="kbd-hint" title="Ctrl+K 快速切换任务 · Ctrl+N 新建任务 · Esc 停止当前运行">Ctrl+K</span>
           <div class="footer-actions-right">
@@ -203,12 +192,13 @@
           <span class="alma-box-corner-tr">+</span>
           <span class="alma-box-corner-bl">+</span>
           <span class="alma-box-corner-br">+</span>
+          <div id="composerSuggest" class="composer-suggest" hidden></div>
           <div id="composerAttachments" class="composer-attachments" hidden></div>
           <textarea
             id="promptInput"
             class="composer-input"
             rows="2"
-            placeholder="给 Agent 发消息"
+            placeholder="给 Agent 发消息（输入 / 查命令，@ 引用文件）"
           ></textarea>
           <div class="composer-foot">
             <div class="composer-model-bar">
@@ -219,6 +209,7 @@
               <button id="attachImageBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="添加图片或文件（也可以直接粘贴，或拖到输入框里）">附件</button>
             </div>
             <div class="composer-actions">
+              <span class="composer-kbd-hint">Enter 发送 · Shift+Enter 换行</span>
               <button id="stopSessionBtn" class="alma-btn alma-btn-danger" type="button" hidden>停止</button>
               <button id="sendBtn" class="alma-btn alma-btn-primary" type="button">发送</button>
             </div>
@@ -228,11 +219,11 @@
           <span>这个任务已归档，只能查看。</span>
           <button id="restoreArchivedBtn" class="alma-btn alma-btn-primary alma-btn-sm" type="button">恢复任务</button>
         </div>
-        <div id="composerHint" class="composer-hint">主导会话可调用 peer_ask / peer_dispatch 委派子会话</div>
         <button id="jumpLatestBtn" class="jump-latest-btn" type="button" hidden>↓ 回到最新消息</button>
       </footer>
     </main>
 
+    <div id="inspectorBackdrop" class="inspector-backdrop" hidden></div>
     <!-- Right Inspector: everything about the session on screen -->
     <aside class="inspector">
       <div id="inspHead" class="insp-head"></div>

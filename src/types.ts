@@ -232,6 +232,12 @@ export interface TaskGroup {
   updatedAt: number;
 }
 
+export interface SessionSlashCommand {
+  name: string;
+  description: string;
+  hint?: string;
+}
+
 export interface SessionRecord {
   sessionKey: string;
   groupId: string;
@@ -262,6 +268,8 @@ export interface SessionRecord {
   tokenTotals?: SessionUsageTotals;
   /** The agent's own current plan, when it reports one. */
   plan?: SessionPlanEntry[];
+  /** Slash commands advertised by the adapter for this session. */
+  availableCommands?: SessionSlashCommand[];
   /** How hub rules / workbench guide reach the agent: session/new systemPrompt or first-turn prompt prefix. */
   promptInjection?: "system" | "prefix";
 }
@@ -311,6 +319,13 @@ export interface LedgerTurn {
   peerCallsSummary: string[];
 }
 
+export interface SessionToolDiff {
+  path: string;
+  oldText?: string;
+  newText: string;
+  truncated?: boolean;
+}
+
 export interface SessionToolCall {
   toolCallId: string;
   title: string;
@@ -319,8 +334,17 @@ export interface SessionToolCall {
   rawInput?: unknown;
   /** Files the tool call touches, as reported by the adapter. */
   locations?: Array<{ path: string; line?: number | null }>;
+  outputText?: string;
+  outputTruncated?: boolean;
+  diffs?: SessionToolDiff[];
   timestamp: number;
+  completedAt?: number;
 }
+
+export type ChatMessagePart =
+  | { type: "thought"; text: string }
+  | { type: "text"; text: string }
+  | { type: "tool"; toolCallId: string };
 
 export interface ChatImageAttachment {
   id: string;
@@ -349,6 +373,8 @@ export interface ChatMessageRecord {
   text: string;
   thoughtText: string;
   toolCalls: SessionToolCall[];
+  /** Chronological interleaving of thought, text and tool call references when available. */
+  parts?: ChatMessagePart[];
   status: "streaming" | "done" | "error" | "cancelled";
   timestamp: number;
   completedAt?: number;
@@ -574,6 +600,13 @@ export type HubEvent =
       timestamp: number;
     }
   | {
+      type: "message_deleted";
+      groupId: string;
+      streamKey: string;
+      messageId: string;
+      timestamp: number;
+    }
+  | {
       type: "permission_mode_changed";
       permissionMode: PermissionMode;
       timestamp: number;
@@ -607,6 +640,9 @@ export type HubEvent =
       status?: string;
       rawInput?: unknown;
       locations?: Array<{ path: string; line?: number | null }>;
+      outputText?: string;
+      outputTruncated?: boolean;
+      diffs?: SessionToolDiff[];
       timestamp: number;
     }
   | {

@@ -263,10 +263,7 @@ const DISCOVER_CACHE_TTL_MS = 4000;
 export class SharedResourceManager {
   readonly baseCwd: string;
   readonly homeDir: string;
-  private readonly projectHubDir: string;
-  private readonly projectRulesDir: string;
   private readonly globalRulesDir: string;
-  private readonly configFile: string;
   private registry?: AgentRegistry;
   /** Short-lived scan cache keyed by resolved cwd + active agent list. Entries are read-only. */
   private readonly discoverCache = new Map<string, { at: number; items: DiscoveredItem[] }>();
@@ -274,10 +271,23 @@ export class SharedResourceManager {
   constructor(baseCwd: string, homeDir = os.homedir()) {
     this.baseCwd = path.resolve(baseCwd);
     this.homeDir = path.resolve(homeDir);
-    this.projectHubDir = dataDir(this.baseCwd);
-    this.projectRulesDir = path.join(this.projectHubDir, "resources", "rules");
     this.globalRulesDir = path.join(dataDir(this.homeDir), "resources", "rules");
-    this.configFile = path.join(this.projectHubDir, "resources", "config.json");
+  }
+
+  private resolveTargetCwd(cwd?: string): string {
+    return cwd?.trim() ? path.resolve(cwd) : this.baseCwd;
+  }
+
+  private projectHubDirFor(cwd?: string): string {
+    return dataDir(this.resolveTargetCwd(cwd));
+  }
+
+  private projectRulesDirFor(cwd?: string): string {
+    return path.join(this.projectHubDirFor(cwd), "resources", "rules");
+  }
+
+  private configFileFor(cwd?: string): string {
+    return path.join(this.projectHubDirFor(cwd), "resources", "config.json");
   }
 
   setAgentRegistry(registry: AgentRegistry): void {
@@ -288,31 +298,35 @@ export class SharedResourceManager {
     return this.registry ? this.registry.listEnabledIds() : [...ALL_AGENTS];
   }
 
-  private loadDisabledSet(): Set<string> {
-    if (!fs.existsSync(this.configFile)) {
+  private loadDisabledSet(cwd?: string): Set<string> {
+    const configFile = this.configFileFor(cwd);
+    if (!fs.existsSync(configFile)) {
       return new Set();
     }
     try {
-      const parsed = JSON.parse(fs.readFileSync(this.configFile, "utf8")) as Partial<ResourceConfigFile>;
+      const parsed = JSON.parse(fs.readFileSync(configFile, "utf8")) as Partial<ResourceConfigFile>;
       return new Set(Array.isArray(parsed.disabledIds) ? parsed.disabledIds : []);
     } catch {
       return new Set();
     }
   }
 
-  private ensureProjectHubGitignore(): void {
-    fs.mkdirSync(this.projectHubDir, { recursive: true });
-    const gitignorePath = path.join(this.projectHubDir, ".gitignore");
+  private ensureProjectHubGitignore(cwd?: string): void {
+    const hubDir = this.projectHubDirFor(cwd);
+    fs.mkdirSync(hubDir, { recursive: true });
+    const gitignorePath = path.join(hubDir, ".gitignore");
     if (!fs.existsSync(gitignorePath)) {
       fs.writeFileSync(gitignorePath, "*\n", "utf8");
     }
   }
 
-  private saveDisabledSet(disabled: Set<string>): void {
-    this.ensureProjectHubGitignore();
-    fs.mkdirSync(path.dirname(this.configFile), { recursive: true });
+  private saveDisabledSet(disabled: Set<string>, cwd?: string): void {
+    const targetCwd = this.resolveTargetCwd(cwd);
+    this.ensureProjectHubGitignore(targetCwd);
+    const configFile = this.configFileFor(targetCwd);
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
     const payload: ResourceConfigFile = { disabledIds: [...disabled].sort() };
-    fs.writeFileSync(this.configFile, JSON.stringify(payload, null, 2), "utf8");
+    fs.writeFileSync(configFile, JSON.stringify(payload, null, 2), "utf8");
     this.invalidateCache();
   }
 
@@ -552,7 +566,7 @@ export class SharedResourceManager {
   }
 
   private scanResources(resolvedCwd: string, activeAgents: AgentId[]): DiscoveredItem[] {
-    const disabled = this.loadDisabledSet();
+    const disabled = this.loadDisabledSet(resolvedCwd);
     const candidates = this.collectRawCandidates(resolvedCwd);
     const mergedMap = new Map<string, { item: SharedResourceItem & { _rawContent: string } }>();
 
@@ -759,20 +773,27 @@ export class SharedResourceManager {
     });
   }
 
-  setResourceEnabled(id: string, enabled: boolean): void {
-    const disabled = this.loadDisabledSet();
+  setResourceEnabled(id: string, enabled: boolean, cwd = this.baseCwd): void {
+    const targetCwd = this.resolveTargetCwd(cwd);
+    const disabled = this.loadDisabledSet(targetCwd);
     if (enabled) {
       disabled.delete(id);
     } else {
       disabled.add(id);
     }
-    this.saveDisabledSet(disabled);
+    this.saveDisabledSet(disabled, targetCwd);
   }
 
-  saveHubRule(input: { name: string; scope: ResourceScope; content: string }): SharedResourceItem {
-    const targetDir = input.scope === "global" ? this.globalRulesDir : this.projectRulesDir;
+  saveHubRule(input: {
+    name: string;
+    scope: ResourceScope;
+    content: string;
+    cwd?: string;
+  }): SharedResourceItem {
+    const targetCwd = this.resolveTargetCwd(input.cwd);
+    const targetDir = input.scope === "global" ? this.globalRulesDir : this.projectRulesDirFor(targetCwd);
     if (input.scope === "project") {
-      this.ensureProjectHubGitignore();
+      this.ensureProjectHubGitignore(targetCwd);
     }
     fs.mkdirSync(targetDir, { recursive: true });
     const slug = slugifyRuleName(input.name);
@@ -782,7 +803,7 @@ export class SharedResourceManager {
     fs.writeFileSync(filePath, contentToWrite, "utf8");
     this.invalidateCache();
 
-    const found = this.discover(this.baseCwd).find(
+    const found = this.discover(targetCwd).find(
       (item) => path.resolve(item.primaryPath).toLowerCase() === path.resolve(filePath).toLowerCase(),
     );
     if (!found) {
@@ -791,14 +812,15 @@ export class SharedResourceManager {
     return found;
   }
 
-  deleteHubRule(id: string): boolean {
-    const item = this.discover(this.baseCwd).find((i) => i.id === id);
+  deleteHubRule(id: string, cwd = this.baseCwd): boolean {
+    const targetCwd = this.resolveTargetCwd(cwd);
+    const item = this.discover(targetCwd).find((i) => i.id === id);
     if (!item || (item.origin !== "hub-project" && item.origin !== "hub-global")) {
       return false;
     }
     const resolved = path.resolve(item.primaryPath).toLowerCase();
     const allowedRoots = [
-      path.resolve(this.projectRulesDir).toLowerCase(),
+      path.resolve(this.projectRulesDirFor(targetCwd)).toLowerCase(),
       path.resolve(this.globalRulesDir).toLowerCase(),
     ];
     if (!allowedRoots.some((root) => resolved.startsWith(root + path.sep))) {

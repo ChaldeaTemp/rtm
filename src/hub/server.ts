@@ -10,6 +10,7 @@ import {
   type ArtifactKind,
   type ArtifactRecord,
   type ChatImageAttachment,
+  type ChatMessagePart,
   type ChatMessageRecord,
   type HubEvent,
   type PendingUserQuestion,
@@ -38,7 +39,12 @@ import { WorkflowManager } from "./workflow.js";
 import { TaskContextStore } from "./task-context.js";
 import { HubStateStore } from "./state-store.js";
 import { SharedResourceManager, estimateTokens } from "./resources.js";
-import { summarizeWorkspaceChanges } from "./worktree.js";
+import {
+  inspectWorktreeChanges,
+  mergeSessionWorktree,
+  removeSessionWorktree,
+  summarizeWorkspaceChanges,
+} from "./worktree.js";
 import { installDataDir } from "./data-dir.js";
 
 const MAX_PEER_DEPTH = 3;
@@ -125,6 +131,8 @@ const ChatBodySchema = z
     prompt: z.string().optional().default(""),
     images: z.array(ChatImageInputSchema).max(6).optional(),
     files: z.array(ChatFileInputSchema).max(MAX_FILES_PER_MESSAGE).optional(),
+    reuseMessageId: z.string().optional(),
+    replaceAssistantMessageId: z.string().optional(),
     leadAgent: AgentIdSchema.optional(),
     cwd: z.string().optional(),
     session: z.string().optional(),
@@ -132,9 +140,13 @@ const ChatBodySchema = z
     effort: z.string().optional(),
   })
   .refine(
-    (v) => v.prompt.trim().length > 0 || (v.images?.length ?? 0) > 0 || (v.files?.length ?? 0) > 0,
+    (v) =>
+      v.prompt.trim().length > 0 ||
+      (v.images?.length ?? 0) > 0 ||
+      (v.files?.length ?? 0) > 0 ||
+      Boolean(v.reuseMessageId?.trim()),
     {
-    message: "请输入消息内容，或至少附带一张图片或一个文件",
+      message: "请输入消息内容，或至少附带一张图片或一个文件",
     },
   );
 
@@ -173,13 +185,19 @@ const SessionChatBodySchema = z
     prompt: z.string().optional().default(""),
     images: z.array(ChatImageInputSchema).max(6).optional(),
     files: z.array(ChatFileInputSchema).max(MAX_FILES_PER_MESSAGE).optional(),
+    reuseMessageId: z.string().optional(),
+    replaceAssistantMessageId: z.string().optional(),
     model: z.string().optional(),
     effort: z.string().optional(),
   })
   .refine(
-    (v) => v.prompt.trim().length > 0 || (v.images?.length ?? 0) > 0 || (v.files?.length ?? 0) > 0,
+    (v) =>
+      v.prompt.trim().length > 0 ||
+      (v.images?.length ?? 0) > 0 ||
+      (v.files?.length ?? 0) > 0 ||
+      Boolean(v.reuseMessageId?.trim()),
     {
-    message: "请输入消息内容，或至少附带一张图片或一个文件",
+      message: "请输入消息内容，或至少附带一张图片或一个文件",
     },
   );
 
@@ -282,16 +300,36 @@ const PermissionModeBodySchema = z.object({
 const ResourceToggleSchema = z.object({
   id: z.string().min(1),
   enabled: z.boolean(),
+  cwd: z.string().optional(),
+  groupId: z.string().optional(),
 });
 
 const ResourceSaveRuleSchema = z.object({
   name: z.string().min(1),
   scope: z.enum(["project", "global"]),
   content: z.string().min(1),
+  cwd: z.string().optional(),
+  groupId: z.string().optional(),
 });
 
 const ResourceDeleteRuleSchema = z.object({
   id: z.string().min(1),
+  cwd: z.string().optional(),
+  groupId: z.string().optional(),
+});
+
+const ResourceSyncSchema = z.object({
+  cwd: z.string().optional(),
+  groupId: z.string().optional(),
+});
+
+const WorktreeMergeBodySchema = z.object({
+  sessionKey: z.string().min(1),
+  cleanup: z.boolean().optional().default(true),
+});
+
+const WorktreeDiscardBodySchema = z.object({
+  sessionKey: z.string().min(1),
 });
 
 const ArtifactCreateSchema = z.object({
@@ -381,8 +419,14 @@ const UI_ICON_FILES: Record<string, string> = {
  * Markup that renders a Mermaid diagram with the library served by the hub itself (no CDN).
  * If the source does not parse, the error and the source are shown instead of a blank card.
  */
-function buildMermaidMarkup(source: string): string {
+function buildMermaidMarkup(source: string, preferDark?: boolean): string {
   const escaped = source.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  const darkExpr =
+    preferDark === true
+      ? "true"
+      : preferDark === false
+        ? "false"
+        : "window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches";
   return `<div id="mmd-out" class="mmd-out"></div>
     <pre id="mmd-src" class="mermaid-src" hidden>${escaped}</pre>
     <script src="/ui/vendor/mermaid.min.js"></script>
@@ -391,7 +435,7 @@ function buildMermaidMarkup(source: string): string {
       var src = document.getElementById("mmd-src");
       var out = document.getElementById("mmd-out");
       try {
-        var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+        var dark = ${darkExpr};
         mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "neutral" });
         var result = await mermaid.render("mmd-svg", src.textContent);
         out.innerHTML = result.svg;
@@ -403,19 +447,65 @@ function buildMermaidMarkup(source: string): string {
     </script>`;
 }
 
-function buildArtifactHtmlDocument(artifact: ArtifactRecord): string {
+interface ArtifactThemeOptions {
+  theme?: string;
+  skin?: string;
+}
+
+function buildArtifactThemeCss(opts?: ArtifactThemeOptions): { cssVars: string; colorScheme: string; dark: boolean } {
+  const dark = opts?.theme === "dark";
+  const skin = opts?.skin || "classic";
+  if (skin === "roundtable") {
+    if (dark) {
+      return {
+        dark: true,
+        colorScheme: "dark",
+        cssVars: `--bg: #171512; --card: #211e1a; --ink: #ede6d6; --muted: #a69c8a; --line: #3b352c; --accent: #c9a45c;`,
+      };
+    }
+    return {
+      dark: false,
+      colorScheme: "light",
+      cssVars: `--bg: #f3f1ea; --card: #fbfaf5; --ink: #221f19; --muted: #676053; --line: #cfc8b8; --accent: #1d6b47;`,
+    };
+  }
+  if (dark) {
+    return {
+      dark: true,
+      colorScheme: "dark",
+      cssVars: `--bg: #14171a; --card: #1d2226; --ink: #e8edf2; --muted: #98a3af; --line: #2f373f; --accent: #3cb882;`,
+    };
+  }
+  return {
+    dark: false,
+    colorScheme: "light",
+    cssVars: `--bg: #f3f2ec; --card: #faf9f5; --ink: #151514; --muted: #56564f; --line: #c4c2b6; --accent: #0d7148;`,
+  };
+}
+
+function buildArtifactHtmlDocument(artifact: ArtifactRecord, opts?: ArtifactThemeOptions): string {
   const safeTitle = artifact.title.replace(/[<>&"]/g, (c) =>
     c === "<" ? "&lt;" : c === ">" ? "&gt;" : c === "&" ? "&amp;" : "&quot;",
   );
+  const themeStyle = buildArtifactThemeCss(opts);
   let bodyMarkup = artifact.content;
   const trimmed = artifact.content.trim();
   if (artifact.kind === "svg" && !/<svg[\s>]/i.test(trimmed)) {
     bodyMarkup = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 300">${artifact.content}</svg>`;
   } else if (artifact.kind === "mermaid") {
-    bodyMarkup = buildMermaidMarkup(trimmed);
+    bodyMarkup = buildMermaidMarkup(trimmed, opts?.theme ? themeStyle.dark : undefined);
   }
 
-  // If the HTML already defines a full <html> document, inject auto-height reporter cleanly before </body>
+  // If the HTML already defines a full <html> document, inject theme variables & height reporter cleanly
+  const themeInjectTag = `<style id="__rtm_theme_vars">
+    :root {
+      color-scheme: ${themeStyle.colorScheme};
+      ${themeStyle.cssVars}
+      --background: var(--bg);
+      --foreground: var(--ink);
+      --border: var(--line);
+    }
+  </style>`;
   const resizeScript = `<script>
   (function(){
     function report(){
@@ -433,9 +523,13 @@ function buildArtifactHtmlDocument(artifact: ArtifactRecord): string {
   </script>`;
 
   if (/<html[\s>]/i.test(trimmed)) {
-    return trimmed.includes("</body>")
-      ? trimmed.replace("</body>", `${resizeScript}\n</body>`)
-      : `${trimmed}\n${resizeScript}`;
+    let doc = trimmed;
+    if (doc.includes("</head>")) {
+      doc = doc.replace("</head>", `${themeInjectTag}\n</head>`);
+    }
+    return doc.includes("</body>")
+      ? doc.replace("</body>", `${resizeScript}\n</body>`)
+      : `${doc}\n${resizeScript}`;
   }
 
   return `<!doctype html>
@@ -446,15 +540,11 @@ function buildArtifactHtmlDocument(artifact: ArtifactRecord): string {
   <title>${safeTitle}</title>
   <style>
     :root {
-      --bg: #f3f2ec;
-      --card: #faf9f5;
-      --ink: #151514;
-      --muted: #56564f;
-      --line: #c4c2b6;
-      --accent: #0d7148;
-      --background: #f3f2ec;
-      --foreground: #151514;
-      --border: #c4c2b6;
+      color-scheme: ${themeStyle.colorScheme};
+      ${themeStyle.cssVars}
+      --background: var(--bg);
+      --foreground: var(--ink);
+      --border: var(--line);
     }
     * { box-sizing: border-box; }
     body {
@@ -587,8 +677,15 @@ function buildAttachedFilesBlock(files: ChatFileAttachment[]): string {
 function cloneMessage(msg: ChatMessageRecord): ChatMessageRecord {
   return {
     ...msg,
-    toolCalls: msg.toolCalls.map((t) => ({ ...t })),
+    toolCalls: msg.toolCalls.map((t) => ({
+      ...t,
+      locations: t.locations ? t.locations.map((loc) => ({ ...loc })) : undefined,
+      diffs: t.diffs ? t.diffs.map((d) => ({ ...d })) : undefined,
+    })),
+    parts: msg.parts ? msg.parts.map((p) => ({ ...p })) : undefined,
+    artifactIds: msg.artifactIds ? [...msg.artifactIds] : undefined,
     images: msg.images ? msg.images.map((img) => ({ ...img })) : undefined,
+    files: msg.files ? msg.files.map((f) => ({ ...f })) : undefined,
   };
 }
 
@@ -731,6 +828,14 @@ export class AgentHubServer {
       if (event.type === "agent_chunk") {
         const active = this.activeAssistantBySession.get(event.sessionKey);
         if (active) {
+          const partType: ChatMessagePart["type"] = event.channel === "thought" ? "thought" : "text";
+          if (!active.parts) active.parts = [];
+          const lastPart = active.parts[active.parts.length - 1];
+          if (lastPart && lastPart.type === partType) {
+            lastPart.text += event.text;
+          } else {
+            active.parts.push({ type: partType, text: event.text });
+          }
           if (event.channel === "message") {
             active.text += event.text;
           } else if (event.channel === "thought") {
@@ -743,6 +848,7 @@ export class AgentHubServer {
       } else if (event.type === "tool_event") {
         const active = this.activeAssistantBySession.get(event.sessionKey);
         if (active) {
+          if (!active.parts) active.parts = [];
           const existingTool = active.toolCalls.find((t) => t.toolCallId === event.toolCallId);
           if (existingTool) {
             existingTool.title = event.title || existingTool.title;
@@ -750,6 +856,12 @@ export class AgentHubServer {
             if (event.status) existingTool.status = event.status;
             if (event.rawInput !== undefined) existingTool.rawInput = event.rawInput;
             if (event.locations && event.locations.length > 0) existingTool.locations = event.locations;
+            if (event.outputText !== undefined) existingTool.outputText = event.outputText;
+            if (event.outputTruncated !== undefined) existingTool.outputTruncated = event.outputTruncated;
+            if (event.diffs && event.diffs.length > 0) existingTool.diffs = event.diffs;
+            if (event.status === "completed" || event.status === "failed") {
+              existingTool.completedAt = event.timestamp;
+            }
             existingTool.timestamp = event.timestamp;
           } else {
             active.toolCalls.push({
@@ -759,8 +871,14 @@ export class AgentHubServer {
               status: event.status,
               rawInput: event.rawInput,
               locations: event.locations,
+              outputText: event.outputText,
+              outputTruncated: event.outputTruncated,
+              diffs: event.diffs,
               timestamp: event.timestamp,
+              completedAt:
+                event.status === "completed" || event.status === "failed" ? event.timestamp : undefined,
             });
+            active.parts.push({ type: "tool", toolCallId: event.toolCallId });
           }
           event.messageId = active.messageId;
           event.streamKey = active.streamKey;
@@ -907,6 +1025,99 @@ export class AgentHubServer {
     return this.getSettings();
   }
 
+  private workspaceFileCache = new Map<string, { at: number; files: string[] }>();
+
+  private resolveResourceCwd(cwdParam?: string, groupId?: string): string {
+    if (cwdParam && cwdParam.trim()) {
+      return path.resolve(cwdParam.trim());
+    }
+    if (groupId && groupId.trim()) {
+      const grp = this.groups.get(groupId.trim());
+      if (grp?.cwd) return grp.cwd;
+    }
+    return this.baseCwd;
+  }
+
+  private listWorkspaceFiles(cwd: string, query: string): string[] {
+    const resolvedCwd = path.resolve(cwd);
+    const now = Date.now();
+    const cached = this.workspaceFileCache.get(resolvedCwd);
+    let files: string[];
+    if (cached && now - cached.at < 10_000) {
+      files = cached.files;
+    } else {
+      const IGNORED = new Set([
+        ".git",
+        "node_modules",
+        "dist",
+        ".rtm",
+        ".rtm-worktrees",
+        ".agent-hub",
+        ".agent-hub-worktrees",
+        ".venv",
+        "venv",
+        "coverage",
+        "target",
+        "build",
+      ]);
+      const collected: string[] = [];
+      const queue: string[] = [resolvedCwd];
+      const MAX_FILES = 2000;
+      while (queue.length > 0 && collected.length < MAX_FILES) {
+        const currentDir = queue.shift()!;
+        let entries: fs.Dirent[];
+        try {
+          entries = fs.readdirSync(currentDir, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const entry of entries) {
+          if (collected.length >= MAX_FILES) break;
+          if (IGNORED.has(entry.name)) continue;
+          const full = path.join(currentDir, entry.name);
+          if (entry.isDirectory()) {
+            queue.push(full);
+          } else if (entry.isFile()) {
+            const rel = path.relative(resolvedCwd, full).replace(/\\/g, "/");
+            if (rel) collected.push(rel);
+          }
+        }
+      }
+      collected.sort((a, b) => a.localeCompare(b));
+      this.workspaceFileCache.set(resolvedCwd, { at: now, files: collected });
+      files = collected;
+    }
+
+    const q = query.trim().toLowerCase();
+    if (!q) {
+      return files.slice(0, 25);
+    }
+    const scored: Array<{ file: string; score: number }> = [];
+    for (const file of files) {
+      const lower = file.toLowerCase();
+      const base = path.posix.basename(lower);
+      if (base.startsWith(q)) {
+        scored.push({ file, score: 0 });
+      } else if (base.includes(q)) {
+        scored.push({ file, score: 1 });
+      } else if (lower.includes(q)) {
+        scored.push({ file, score: 2 });
+      }
+    }
+    scored.sort((a, b) => a.score - b.score || a.file.length - b.file.length || a.file.localeCompare(b.file));
+    return scored.slice(0, 25).map((item) => item.file);
+  }
+
+  private pickFastModelForTitle(agent: AgentId): string | undefined {
+    const FAST_RE = /(haiku|mini|flash|nano|lite)/i;
+    const catalogs = this.registry.getAllModelCatalogs();
+    const catalog = catalogs[agent];
+    const fromCatalog = catalog?.models?.find((m) => FAST_RE.test(m.id))?.id;
+    if (fromCatalog) return fromCatalog;
+    const defModels = this.registry.getDefinition(agent)?.models ?? [];
+    return defModels.find((id) => FAST_RE.test(id));
+  }
+
   /**
    * Asks the lead agent for a short task title in a throwaway session (no peer MCP, no shared
    * rules, so it stays out of the task's own context), then applies it unless the user has
@@ -918,6 +1129,23 @@ export class AgentHubServer {
     userPrompt: string,
     answer: string,
   ): Promise<void> {
+    const trimmedPrompt = userPrompt.trim();
+    if (
+      trimmedPrompt &&
+      !trimmedPrompt.includes("\n") &&
+      trimmedPrompt.length <= 18 &&
+      /[\p{L}\p{N}]/u.test(trimmedPrompt)
+    ) {
+      const directTitle = cleanGeneratedTitle(trimmedPrompt);
+      const live = this.groups.get(group.groupId);
+      if (directTitle && live && live.title === currentTitle && live.title !== directTitle) {
+        live.title = directTitle;
+        live.updatedAt = Date.now();
+        this.broadcast({ type: "group_updated", group: { ...live }, timestamp: live.updatedAt });
+      }
+      return;
+    }
+
     const agent = group.leadAgent;
     const sessionName = `${group.groupId}${TITLE_SESSION_SUFFIX}`;
     const sessionKey = buildSessionKey(agent, sessionName);
@@ -933,6 +1161,8 @@ export class AgentHubServer {
           "",
           `助手：${answer.slice(0, 600)}`,
         ].join("\n"),
+        model: this.pickFastModelForTitle(agent),
+        effort: "low",
         injectSharedResources: false,
         injectPeerMcp: false,
         isolateWorktree: false,
@@ -1265,11 +1495,40 @@ export class AgentHubServer {
   }
 
   async deleteGroup(groupId: string): Promise<void> {
-    if (!this.groups.has(groupId)) {
+    const targetGroup = this.groups.get(groupId);
+    if (!targetGroup) {
       throw new Error(`Unknown task group: ${groupId}`);
     }
     const sessionsToClose = this.pool.listSessions().filter((s) => s.groupId === groupId);
     await Promise.all(sessionsToClose.map((s) => this.pool.closeSession(s.sessionKey)));
+
+    // Clean up git worktrees created inside this group once ACP processes have released handles
+    const worktreesToRemove = new Map<string, string>();
+    for (const s of sessionsToClose) {
+      if (s.isWorktree && s.effectiveCwd) {
+        worktreesToRemove.set(path.resolve(s.effectiveCwd), s.baseCwd || targetGroup.cwd || this.baseCwd);
+      }
+    }
+    for (const session of this.archivedSessions.values()) {
+      if (session.groupId === groupId && session.isWorktree && session.effectiveCwd) {
+        worktreesToRemove.set(
+          path.resolve(session.effectiveCwd),
+          session.baseCwd || targetGroup.cwd || this.baseCwd,
+        );
+      }
+    }
+    for (const task of this.tasks.values()) {
+      if (task.groupId === groupId && task.worktreePath) {
+        worktreesToRemove.set(path.resolve(task.worktreePath), targetGroup.cwd || this.baseCwd);
+      }
+    }
+    for (const [wtPath, wtBaseCwd] of worktreesToRemove) {
+      try {
+        removeSessionWorktree(wtBaseCwd, wtPath);
+      } catch {
+        // Best-effort worktree removal; do not block deleting the group
+      }
+    }
 
     this.groups.delete(groupId);
     this.ledgers.delete(groupId);
@@ -1279,9 +1538,65 @@ export class AgentHubServer {
     for (const [key, session] of this.archivedSessions) {
       if (session.groupId === groupId) this.archivedSessions.delete(key);
     }
+
+    const uploadsRoot = path.resolve(UPLOADS_DIR);
+    const collectUploadPaths = (msg: ChatMessageRecord): string[] => {
+      const paths: string[] = [];
+      for (const img of msg.images ?? []) {
+        if (typeof img.url === "string" && img.url.startsWith("/uploads/")) {
+          const name = path.basename(decodeURIComponent(img.url.slice("/uploads/".length)));
+          if (name) paths.push(path.resolve(UPLOADS_DIR, name));
+        }
+      }
+      for (const file of msg.files ?? []) {
+        if (file.localPath) paths.push(path.resolve(file.localPath));
+      }
+      return paths;
+    };
+
+    const candidateUploads = new Set<string>();
     for (const [msgId, msg] of this.messages.entries()) {
       if (msg.groupId === groupId) {
+        for (const p of collectUploadPaths(msg)) candidateUploads.add(p);
         this.messages.delete(msgId);
+      }
+    }
+
+    if (candidateUploads.size > 0) {
+      const stillReferenced = new Set<string>();
+      for (const msg of this.messages.values()) {
+        for (const p of collectUploadPaths(msg)) stillReferenced.add(p);
+      }
+      const normRoot = process.platform === "win32" ? uploadsRoot.toLowerCase() : uploadsRoot;
+      for (const filePath of candidateUploads) {
+        if (stillReferenced.has(filePath)) continue;
+        const normPath = process.platform === "win32" ? filePath.toLowerCase() : filePath;
+        if (!normPath.startsWith(normRoot + path.sep)) continue;
+        try {
+          if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        } catch {
+          // Best-effort attachment cleanup
+        }
+      }
+    }
+
+    for (const [artifactId, artifact] of this.artifacts.entries()) {
+      if (artifact.groupId === groupId) {
+        this.artifacts.delete(artifactId);
+      }
+    }
+    for (const [questionId, entry] of this.pendingQuestions.entries()) {
+      if (entry.info.groupId === groupId) {
+        clearTimeout(entry.timer);
+        this.pendingQuestions.delete(questionId);
+        entry.resolve({ cancelled: true, answers: {} });
+        this.broadcast({
+          type: "question_resolved",
+          questionId,
+          cancelled: true,
+          answers: {},
+          timestamp: Date.now(),
+        });
       }
     }
     for (const [sessionKey, active] of this.activeAssistantBySession.entries()) {
@@ -1308,6 +1623,77 @@ export class AgentHubServer {
       const firstRemaining = this.groups.values().next().value as TaskGroup;
       this.defaultGroupId = firstRemaining.groupId;
     }
+  }
+
+  private resolveSessionWorktreeTarget(sessionKey: string): {
+    session?: SessionRecord;
+    baseCwd: string;
+    worktreePath: string;
+  } {
+    const session = this.pool.getSession(sessionKey) ?? this.archivedSessions.get(sessionKey);
+    const matchingTask = [...this.tasks.values()]
+      .reverse()
+      .find((t) => t.targetSessionKey === sessionKey && t.worktreePath);
+    const worktreePath =
+      session?.isWorktree && session.effectiveCwd ? session.effectiveCwd : matchingTask?.worktreePath;
+    if (!worktreePath) {
+      throw new Error("该会话未启用独立的 git worktree，或 worktree 已被清理");
+    }
+    const groupId = session?.groupId ?? matchingTask?.groupId;
+    const baseCwd =
+      session?.baseCwd ||
+      (groupId ? this.groups.get(groupId)?.cwd : undefined) ||
+      this.baseCwd;
+    return { session, baseCwd, worktreePath };
+  }
+
+  private async cleanupSessionWorktree(
+    sessionKey: string,
+    baseCwd: string,
+    worktreePath: string,
+  ): Promise<void> {
+    const existing = this.pool.getSession(sessionKey) ?? this.archivedSessions.get(sessionKey);
+    const nextRecord: SessionRecord | undefined = existing
+      ? {
+          ...existing,
+          status: "closed",
+          pid: undefined,
+          isWorktree: false,
+          effectiveCwd: baseCwd,
+          branch: undefined,
+          updatedAt: Date.now(),
+        }
+      : undefined;
+
+    if (nextRecord) {
+      this.archivedSessions.set(sessionKey, nextRecord);
+    }
+    if (this.pool.getSession(sessionKey)) {
+      await this.pool.closeSession(sessionKey);
+    }
+
+    removeSessionWorktree(baseCwd, worktreePath);
+
+    if (nextRecord) {
+      this.broadcast({
+        type: "session_updated",
+        session: { ...nextRecord },
+        timestamp: Date.now(),
+      });
+    }
+    for (const task of this.tasks.values()) {
+      if (task.targetSessionKey === sessionKey && task.worktreePath) {
+        task.worktreePath = undefined;
+        task.branch = undefined;
+        task.updatedAt = Date.now();
+        this.broadcast({
+          type: "task_updated",
+          task: { ...task },
+          timestamp: Date.now(),
+        });
+      }
+    }
+    this.stateStore?.schedule();
   }
 
   getMessages(filter?: { groupId?: string; streamKey?: string }): ChatMessageRecord[] {
@@ -2287,11 +2673,129 @@ export class AgentHubServer {
     return { ok: true, sessionKey: warm.sessionKey, skipped: warm.skipped };
   }
 
+  private deleteMessage(msgId: string): void {
+    const existing = this.messages.get(msgId);
+    if (!existing) return;
+    this.messages.delete(msgId);
+    this.broadcast({
+      type: "message_deleted",
+      groupId: existing.groupId,
+      streamKey: existing.streamKey,
+      messageId: existing.messageId,
+      timestamp: Date.now(),
+    });
+  }
+
+  private resolveTurnInputForChat(
+    streamKey: string,
+    input: {
+      prompt?: string;
+      images?: Array<{ name?: string; mimeType: string; data: string }>;
+      files?: Array<{ name: string; mimeType?: string; data: string }>;
+      reuseMessageId?: string;
+      replaceAssistantMessageId?: string;
+    },
+  ): {
+    reusedUserMessage: boolean;
+    savedImages: Array<{
+      attachment: ChatImageAttachment;
+      name: string;
+      mimeType: string;
+      data: string;
+      localPath: string;
+    }>;
+    savedFiles: ChatFileAttachment[];
+    displayUserText: string;
+    effectiveUserPrompt: string;
+    promptForAgent: string;
+  } {
+    const reuseMsg = input.reuseMessageId?.trim()
+      ? this.messages.get(input.reuseMessageId.trim())
+      : undefined;
+    const validReuse =
+      reuseMsg &&
+      reuseMsg.streamKey === streamKey &&
+      (reuseMsg.role === "user" || reuseMsg.role === "caller")
+        ? reuseMsg
+        : undefined;
+
+    let savedImages = this.persistUploadedImages(input.images);
+    if (savedImages.length === 0 && validReuse?.images?.length) {
+      savedImages = [];
+      for (const att of validReuse.images) {
+        try {
+          const fileName = path.basename(decodeURIComponent(att.url.replace(/^\/uploads\//, "")));
+          const localPath = path.join(UPLOADS_DIR, fileName);
+          if (!fs.existsSync(localPath)) continue;
+          const data = fs.readFileSync(localPath).toString("base64");
+          savedImages.push({
+            attachment: { ...att },
+            name: att.name,
+            mimeType: att.mimeType,
+            data,
+            localPath,
+          });
+        } catch {
+          // Ignore missing historical image on disk during retry
+        }
+      }
+    }
+
+    let savedFiles = this.persistUploadedFiles(input.files);
+    if (savedFiles.length === 0 && validReuse?.files?.length) {
+      savedFiles = validReuse.files.map((f) => ({ ...f }));
+    }
+
+    if (input.replaceAssistantMessageId?.trim()) {
+      const oldAssistant = this.messages.get(input.replaceAssistantMessageId.trim());
+      if (oldAssistant && oldAssistant.streamKey === streamKey && oldAssistant.role === "assistant") {
+        this.deleteMessage(oldAssistant.messageId);
+      }
+    }
+
+    const displayUserText = (input.prompt ?? "").trim() || (validReuse?.text ?? "").trim();
+    const effectiveUserPrompt =
+      displayUserText ||
+      (savedFiles.length > 0 ? "请查看附带的文件。" : savedImages.length > 0 ? "请查看并分析附带的图片。" : "");
+    if (!effectiveUserPrompt) {
+      throw new Error("请输入消息内容，或至少附带一张图片或一个文件");
+    }
+    const promptForAgent = `${effectiveUserPrompt}${buildAttachedFilesBlock(savedFiles)}`;
+
+    return {
+      reusedUserMessage: Boolean(validReuse),
+      savedImages,
+      savedFiles,
+      displayUserText,
+      effectiveUserPrompt,
+      promptForAgent,
+    };
+  }
+
+  private markAssistantError(assistantMsg: ChatMessageRecord, errMsg: string): void {
+    const errorTag = `[Error] ${errMsg}`;
+    assistantMsg.status = "error";
+    const prefix = assistantMsg.text ? `\n\n${errorTag}` : errorTag;
+    assistantMsg.text = assistantMsg.text ? `${assistantMsg.text}${prefix}` : errorTag;
+    if (assistantMsg.parts && assistantMsg.parts.length > 0) {
+      const last = assistantMsg.parts[assistantMsg.parts.length - 1];
+      if (last && last.type === "text") {
+        last.text += prefix;
+      } else {
+        assistantMsg.parts.push({ type: "text", text: errorTag });
+      }
+    }
+    assistantMsg.completedAt = Date.now();
+    this.upsertMessage(assistantMsg);
+  }
+
   async runLeadChat(input: {
     groupId?: string;
     prompt?: string;
     images?: Array<{ name?: string; mimeType: string; data: string }>;
     files?: Array<{ name: string; mimeType?: string; data: string }>;
+    reuseMessageId?: string;
+    replaceAssistantMessageId?: string;
     leadAgent?: AgentId;
     cwd?: string;
     session?: string;
@@ -2312,22 +2816,18 @@ export class AgentHubServer {
     if (input.leadAgent) {
       this.setGroupLeadAgent(group.groupId, input.leadAgent);
     }
-
-    const savedImages = this.persistUploadedImages(input.images);
-    const savedFiles = this.persistUploadedFiles(input.files);
-    const displayUserText = (input.prompt ?? "").trim();
-    const effectiveUserPrompt =
-      displayUserText ||
-      (savedFiles.length > 0 ? "请查看附带的文件。" : savedImages.length > 0 ? "请查看并分析附带的图片。" : "");
-    if (!effectiveUserPrompt) {
-      throw new Error("请输入消息内容，或至少附带一张图片或一个文件");
-    }
-    const promptForAgent = `${effectiveUserPrompt}${buildAttachedFilesBlock(savedFiles)}`;
-
     if (group.archived) {
       throw new Error("这个任务已归档，先恢复再发消息");
     }
+
     const lead = group.leadAgent;
+    const sessionName = input.session ?? `${group.groupId}__lead`;
+    const sessionKey = buildSessionKey(lead, sessionName);
+    const streamKey = `lead:${group.groupId}`;
+
+    const prepared = this.resolveTurnInputForChat(streamKey, input);
+    const { savedImages, savedFiles, displayUserText, effectiveUserPrompt, promptForAgent } = prepared;
+
     const ledger = this.getOrCreateLedger(group.groupId);
     let promptDerivedTitle: string | undefined;
     if (/^(任务\s*\d+|新任务|默认任务)$/.test(group.title) && ledger.getAllTurns().length === 0) {
@@ -2343,9 +2843,6 @@ export class AgentHubServer {
       });
     }
 
-    const sessionName = input.session ?? `${group.groupId}__lead`;
-    const sessionKey = buildSessionKey(lead, sessionName);
-    const streamKey = `lead:${group.groupId}`;
     // A lead session that died or was closed starts blank; hand it the history again.
     const existingLead = this.pool.getSession(sessionKey);
     if (!existingLead || existingLead.status === "closed" || existingLead.status === "error") {
@@ -2362,23 +2859,25 @@ export class AgentHubServer {
         : "";
     const leadPromptMeta = ledger.buildLeadPromptWithMeta(lead, `${promptForAgent}${extraDirsNote}`);
 
-    const now = Date.now();
-    this.upsertMessage({
-      messageId: `msg-${randomUUID().slice(0, 8)}`,
-      groupId: group.groupId,
-      streamKey,
-      sessionKey,
-      role: "user",
-      senderLabel: "你",
-      text: displayUserText,
-      thoughtText: "",
-      toolCalls: [],
-      status: "done",
-      timestamp: now,
-      completedAt: now,
-      images: savedImages.length > 0 ? savedImages.map((s) => s.attachment) : undefined,
-      files: savedFiles.length > 0 ? savedFiles : undefined,
-    });
+    if (!prepared.reusedUserMessage) {
+      const now = Date.now();
+      this.upsertMessage({
+        messageId: `msg-${randomUUID().slice(0, 8)}`,
+        groupId: group.groupId,
+        streamKey,
+        sessionKey,
+        role: "user",
+        senderLabel: "你",
+        text: displayUserText,
+        thoughtText: "",
+        toolCalls: [],
+        status: "done",
+        timestamp: now,
+        completedAt: now,
+        images: savedImages.length > 0 ? savedImages.map((s) => s.attachment) : undefined,
+        files: savedFiles.length > 0 ? savedFiles : undefined,
+      });
+    }
 
     const assistantMsg: ChatMessageRecord = {
       messageId: `msg-${randomUUID().slice(0, 8)}`,
@@ -2391,6 +2890,7 @@ export class AgentHubServer {
       text: "",
       thoughtText: "",
       toolCalls: [],
+      parts: [],
       status: "streaming",
       timestamp: Date.now(),
     };
@@ -2414,6 +2914,9 @@ export class AgentHubServer {
       assistantMsg.status = result.stopReason === "cancelled" ? "cancelled" : "done";
       if (!assistantMsg.text && result.outputText) {
         assistantMsg.text = result.outputText;
+        if (assistantMsg.parts && assistantMsg.parts.length === 0) {
+          assistantMsg.parts.push({ type: "text", text: result.outputText });
+        }
       }
       assistantMsg.usage = result.usage;
       assistantMsg.injectedTokens = result.injectedTokens;
@@ -2466,12 +2969,7 @@ export class AgentHubServer {
           peerToolsCalled: [],
         };
       }
-      assistantMsg.status = "error";
-      assistantMsg.text = assistantMsg.text
-        ? `${assistantMsg.text}\n\n[Error] ${errMsg}`
-        : `[Error] ${errMsg}`;
-      assistantMsg.completedAt = Date.now();
-      this.upsertMessage(assistantMsg);
+      this.markAssistantError(assistantMsg, errMsg);
       throw err;
     } finally {
       if (this.activeAssistantBySession.get(sessionKey)?.messageId === assistantMsg.messageId) {
@@ -2485,6 +2983,8 @@ export class AgentHubServer {
     prompt?: string;
     images?: Array<{ name?: string; mimeType: string; data: string }>;
     files?: Array<{ name: string; mimeType?: string; data: string }>;
+    reuseMessageId?: string;
+    replaceAssistantMessageId?: string;
     model?: string;
     effort?: string;
   }): Promise<{
@@ -2501,35 +3001,29 @@ export class AgentHubServer {
       throw new Error("这个任务已归档，先恢复再发消息");
     }
 
-    const savedImages = this.persistUploadedImages(input.images);
-    const savedFiles = this.persistUploadedFiles(input.files);
-    const displayUserText = (input.prompt ?? "").trim();
-    const effectiveUserPrompt =
-      displayUserText ||
-      (savedFiles.length > 0 ? "请查看附带的文件。" : savedImages.length > 0 ? "请查看并分析附带的图片。" : "");
-    if (!effectiveUserPrompt) {
-      throw new Error("请输入消息内容，或至少附带一张图片或一个文件");
-    }
-    const promptForAgent = `${effectiveUserPrompt}${buildAttachedFilesBlock(savedFiles)}`;
-
     const streamKey = `sub:${session.sessionKey}`;
-    const now = Date.now();
-    this.upsertMessage({
-      messageId: `msg-${randomUUID().slice(0, 8)}`,
-      groupId: session.groupId,
-      streamKey,
-      sessionKey: session.sessionKey,
-      role: "user",
-      senderLabel: "你",
-      text: displayUserText,
-      thoughtText: "",
-      toolCalls: [],
-      status: "done",
-      timestamp: now,
-      completedAt: now,
-      images: savedImages.length > 0 ? savedImages.map((s) => s.attachment) : undefined,
-      files: savedFiles.length > 0 ? savedFiles : undefined,
-    });
+    const prepared = this.resolveTurnInputForChat(streamKey, input);
+    const { savedImages, savedFiles, displayUserText, effectiveUserPrompt, promptForAgent } = prepared;
+
+    if (!prepared.reusedUserMessage) {
+      const now = Date.now();
+      this.upsertMessage({
+        messageId: `msg-${randomUUID().slice(0, 8)}`,
+        groupId: session.groupId,
+        streamKey,
+        sessionKey: session.sessionKey,
+        role: "user",
+        senderLabel: "你",
+        text: displayUserText,
+        thoughtText: "",
+        toolCalls: [],
+        status: "done",
+        timestamp: now,
+        completedAt: now,
+        images: savedImages.length > 0 ? savedImages.map((s) => s.attachment) : undefined,
+        files: savedFiles.length > 0 ? savedFiles : undefined,
+      });
+    }
 
     const assistantMsg: ChatMessageRecord = {
       messageId: `msg-${randomUUID().slice(0, 8)}`,
@@ -2542,6 +3036,7 @@ export class AgentHubServer {
       text: "",
       thoughtText: "",
       toolCalls: [],
+      parts: [],
       status: "streaming",
       timestamp: Date.now(),
     };
@@ -2576,6 +3071,9 @@ export class AgentHubServer {
       assistantMsg.status = result.stopReason === "cancelled" ? "cancelled" : "done";
       if (!assistantMsg.text && result.outputText) {
         assistantMsg.text = result.outputText;
+        if (assistantMsg.parts && assistantMsg.parts.length === 0) {
+          assistantMsg.parts.push({ type: "text", text: result.outputText });
+        }
       }
       assistantMsg.usage = result.usage;
       assistantMsg.injectedTokens = result.injectedTokens;
@@ -2611,12 +3109,7 @@ export class AgentHubServer {
           stopReason: "cancelled",
         };
       }
-      assistantMsg.status = "error";
-      assistantMsg.text = assistantMsg.text
-        ? `${assistantMsg.text}\n\n[Error] ${errMsg}`
-        : `[Error] ${errMsg}`;
-      assistantMsg.completedAt = Date.now();
-      this.upsertMessage(assistantMsg);
+      this.markAssistantError(assistantMsg, errMsg);
       throw err;
     } finally {
       if (this.activeAssistantBySession.get(session.sessionKey)?.messageId === assistantMsg.messageId) {
@@ -2913,50 +3406,6 @@ export class AgentHubServer {
         return;
       }
 
-      if (method === "GET" && pathname === "/ui/styles.css") {
-        const css = fs.readFileSync(this.getUiAssetPath("styles.css"), "utf8");
-        res.writeHead(200, { "Content-Type": "text/css; charset=utf-8", "Cache-Control": "no-store" });
-        res.end(css);
-        return;
-      }
-
-      if (method === "GET" && pathname === "/ui/panels.css") {
-        const css = fs.readFileSync(this.getUiAssetPath("panels.css"), "utf8");
-        res.writeHead(200, { "Content-Type": "text/css; charset=utf-8", "Cache-Control": "no-store" });
-        res.end(css);
-        return;
-      }
-
-      if (method === "GET" && pathname === "/ui/app.js") {
-        const js = fs.readFileSync(this.getUiAssetPath("app.js"), "utf8");
-        res.writeHead(200, {
-          "Content-Type": "application/javascript; charset=utf-8",
-          "Cache-Control": "no-store",
-        });
-        res.end(js);
-        return;
-      }
-
-      if (method === "GET" && pathname === "/ui/panels.js") {
-        const js = fs.readFileSync(this.getUiAssetPath("panels.js"), "utf8");
-        res.writeHead(200, {
-          "Content-Type": "application/javascript; charset=utf-8",
-          "Cache-Control": "no-store",
-        });
-        res.end(js);
-        return;
-      }
-
-      if (method === "GET" && pathname === "/ui/interactive.js") {
-        const js = fs.readFileSync(this.getUiAssetPath("interactive.js"), "utf8");
-        res.writeHead(200, {
-          "Content-Type": "application/javascript; charset=utf-8",
-          "Cache-Control": "no-store",
-        });
-        res.end(js);
-        return;
-      }
-
       if (method === "GET" && pathname.startsWith("/artifacts/")) {
         const artifactId = decodeURIComponent(pathname.slice("/artifacts/".length));
         const artifact = this.artifacts.get(artifactId);
@@ -2965,12 +3414,33 @@ export class AgentHubServer {
           res.end(`Artifact not found: ${artifactId}`);
           return;
         }
-        const html = buildArtifactHtmlDocument(artifact);
+        const theme = reqUrl.searchParams.get("theme") || undefined;
+        const skin = reqUrl.searchParams.get("skin") || undefined;
+        const html = buildArtifactHtmlDocument(artifact, { theme, skin });
         res.writeHead(200, {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox allow-scripts",
         });
         res.end(html);
+        return;
+      }
+
+      if (method === "GET" && /^\/ui\/([a-z0-9_-]+\.(js|css))$/i.test(pathname)) {
+        const fileName = pathname.slice("/ui/".length);
+        const assetPath = this.getUiAssetPath(fileName);
+        if (!fs.existsSync(assetPath)) {
+          res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end(`Not found: ${pathname}`);
+          return;
+        }
+        const isCss = fileName.toLowerCase().endsWith(".css");
+        const content = fs.readFileSync(assetPath, "utf8");
+        res.writeHead(200, {
+          "Content-Type": `${isCss ? "text/css" : "application/javascript"}; charset=utf-8`,
+          "Cache-Control": "no-store",
+        });
+        res.end(content);
         return;
       }
 
@@ -3286,9 +3756,13 @@ export class AgentHubServer {
       }
 
       if (method === "GET" && pathname === "/api/resources") {
-        const cwd = reqUrl.searchParams.get("cwd") || this.baseCwd;
+        const cwd = this.resolveResourceCwd(
+          reqUrl.searchParams.get("cwd") || undefined,
+          reqUrl.searchParams.get("groupId") || undefined,
+        );
         sendJson(res, 200, {
           ok: true,
+          cwd,
           resources: this.resources.discover(cwd),
           budgets: this.resources.getAgentBudgets(cwd),
         });
@@ -3298,7 +3772,10 @@ export class AgentHubServer {
       if (method === "GET" && pathname === "/api/resources/content") {
         const id = reqUrl.searchParams.get("id") || undefined;
         const skillName = reqUrl.searchParams.get("skill") || undefined;
-        const cwd = reqUrl.searchParams.get("cwd") || this.baseCwd;
+        const cwd = this.resolveResourceCwd(
+          reqUrl.searchParams.get("cwd") || undefined,
+          reqUrl.searchParams.get("groupId") || undefined,
+        );
         const result = this.resources.readResourceContent({ id, skillName, cwd });
         sendJson(res, 200, { ok: true, ...result });
         return;
@@ -3306,39 +3783,99 @@ export class AgentHubServer {
 
       if (method === "POST" && pathname === "/api/resources/toggle") {
         const body = ResourceToggleSchema.parse(await readJsonBody(req));
-        this.resources.setResourceEnabled(body.id, body.enabled);
-        const resources = this.resources.discover(this.baseCwd);
-        const budgets = this.resources.getAgentBudgets(this.baseCwd);
+        const cwd = this.resolveResourceCwd(body.cwd, body.groupId);
+        this.resources.setResourceEnabled(body.id, body.enabled, cwd);
+        const resources = this.resources.discover(cwd);
+        const budgets = this.resources.getAgentBudgets(cwd);
         this.broadcast({ type: "resources_updated", budgets, timestamp: Date.now() });
-        sendJson(res, 200, { ok: true, resources, budgets });
+        sendJson(res, 200, { ok: true, cwd, resources, budgets });
         return;
       }
 
       if (method === "POST" && pathname === "/api/resources/rules") {
         const body = ResourceSaveRuleSchema.parse(await readJsonBody(req));
-        const item = this.resources.saveHubRule(body);
-        const resources = this.resources.discover(this.baseCwd);
-        const budgets = this.resources.getAgentBudgets(this.baseCwd);
+        const cwd = this.resolveResourceCwd(body.cwd, body.groupId);
+        const item = this.resources.saveHubRule({ ...body, cwd });
+        const resources = this.resources.discover(cwd);
+        const budgets = this.resources.getAgentBudgets(cwd);
         this.broadcast({ type: "resources_updated", budgets, timestamp: Date.now() });
-        sendJson(res, 200, { ok: true, item, resources, budgets });
+        sendJson(res, 200, { ok: true, cwd, item, resources, budgets });
         return;
       }
 
       if (method === "POST" && pathname === "/api/resources/rules/delete") {
         const body = ResourceDeleteRuleSchema.parse(await readJsonBody(req));
-        const deleted = this.resources.deleteHubRule(body.id);
-        const resources = this.resources.discover(this.baseCwd);
-        const budgets = this.resources.getAgentBudgets(this.baseCwd);
+        const cwd = this.resolveResourceCwd(body.cwd, body.groupId);
+        const deleted = this.resources.deleteHubRule(body.id, cwd);
+        const resources = this.resources.discover(cwd);
+        const budgets = this.resources.getAgentBudgets(cwd);
         this.broadcast({ type: "resources_updated", budgets, timestamp: Date.now() });
-        sendJson(res, 200, { ok: true, deleted, resources, budgets });
+        sendJson(res, 200, { ok: true, cwd, deleted, resources, budgets });
         return;
       }
 
       if (method === "POST" && pathname === "/api/resources/sync-project") {
-        const updatedFiles = this.resources.syncProjectRuleFiles(this.baseCwd);
-        const budgets = this.resources.getAgentBudgets(this.baseCwd);
+        const body = ResourceSyncSchema.parse(await readJsonBody(req));
+        const cwd = this.resolveResourceCwd(body.cwd, body.groupId);
+        const updatedFiles = this.resources.syncProjectRuleFiles(cwd);
+        const budgets = this.resources.getAgentBudgets(cwd);
         this.broadcast({ type: "resources_updated", budgets, timestamp: Date.now() });
-        sendJson(res, 200, { ok: true, updatedFiles });
+        sendJson(res, 200, { ok: true, cwd, updatedFiles });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/workspace/files") {
+        const cwd = this.resolveResourceCwd(
+          reqUrl.searchParams.get("cwd") || undefined,
+          reqUrl.searchParams.get("groupId") || undefined,
+        );
+        const q = reqUrl.searchParams.get("q") || "";
+        const files = this.listWorkspaceFiles(cwd, q);
+        sendJson(res, 200, { ok: true, cwd, files });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/worktrees/diff") {
+        const sessionKey = reqUrl.searchParams.get("sessionKey")?.trim();
+        if (!sessionKey) {
+          throw new Error("缺少 sessionKey 参数");
+        }
+        const resolved = this.resolveSessionWorktreeTarget(sessionKey);
+        const inspection = inspectWorktreeChanges(resolved.baseCwd, resolved.worktreePath);
+        sendJson(res, 200, {
+          ok: true,
+          sessionKey,
+          worktreePath: resolved.worktreePath,
+          baseCwd: resolved.baseCwd,
+          ...inspection,
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/worktrees/merge") {
+        const body = WorktreeMergeBodySchema.parse(await readJsonBody(req));
+        const resolved = this.resolveSessionWorktreeTarget(body.sessionKey);
+        if (resolved.session?.status === "busy" || resolved.session?.status === "starting") {
+          throw new Error("该子会话仍在运行，请先停止或等它完成后再合入");
+        }
+        const mergeResult = mergeSessionWorktree(resolved.baseCwd, resolved.worktreePath);
+        let cleaned = false;
+        if (body.cleanup) {
+          await this.cleanupSessionWorktree(body.sessionKey, resolved.baseCwd, resolved.worktreePath);
+          cleaned = true;
+        }
+        sendJson(res, 200, { ok: true, cleaned, ...mergeResult });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/worktrees/discard") {
+        const body = WorktreeDiscardBodySchema.parse(await readJsonBody(req));
+        const resolved = this.resolveSessionWorktreeTarget(body.sessionKey);
+        if (resolved.session?.status === "busy" || resolved.session?.status === "starting") {
+          throw new Error("该子会话仍在运行，请先停止后再丢弃 worktree");
+        }
+        await this.cleanupSessionWorktree(body.sessionKey, resolved.baseCwd, resolved.worktreePath);
+        sendJson(res, 200, { ok: true, discarded: true });
         return;
       }
 
@@ -3525,6 +4062,12 @@ export class AgentHubServer {
       if (method === "POST" && pathname === "/api/workflows/run") {
         const body = WorkflowGroupSchema.parse(await readJsonBody(req));
         sendJson(res, 200, { ok: true, workflow: this.workflows.run(body.groupId) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/workflows/retry") {
+        const body = WorkflowGroupSchema.parse(await readJsonBody(req));
+        sendJson(res, 200, { ok: true, workflow: this.workflows.retryFailed(body.groupId) });
         return;
       }
 
@@ -3781,6 +4324,7 @@ export class AgentHubServer {
       this.wss = undefined;
     }
     if (this.server) {
+      this.server.closeAllConnections?.();
       await new Promise<void>((resolve) => this.server!.close(() => resolve()));
       this.server = undefined;
     }

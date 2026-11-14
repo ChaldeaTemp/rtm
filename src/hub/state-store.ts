@@ -51,6 +51,8 @@ export interface PersistedHubState {
 export class HubStateStore {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private lastWritten = "";
+  private writingPromise: Promise<void> = Promise.resolve();
+  private flushEpoch = 0;
 
   constructor(
     private readonly filePath: string,
@@ -69,37 +71,69 @@ export class HubStateStore {
     }
   }
 
-  /** Called after any change; many calls in a row cost one write. */
+  /** Called after any change; many calls in a row cost one async write. */
   schedule(): void {
     if (this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      this.flush();
+      void this.flushAsync();
     }, SAVE_DEBOUNCE_MS);
     this.timer.unref?.();
   }
 
-  /** Writes now. Used on shutdown, where a pending debounce would be lost. */
+  private prepareSerialized(): { body: string; payload: string } | undefined {
+    const state = this.collect();
+    const messages =
+      state.messages.length > MAX_PERSISTED_MESSAGES
+        ? state.messages.slice(-MAX_PERSISTED_MESSAGES)
+        : state.messages;
+    const body = JSON.stringify({ ...state, messages });
+    // savedAt is left out of the comparison so an idle hub does not rewrite the file.
+    if (body === this.lastWritten) return undefined;
+    const payload = body.startsWith("{")
+      ? `{"version":${STATE_VERSION},"savedAt":${Date.now()}${body.length > 2 ? `,${body.slice(1)}` : "}"}`
+      : JSON.stringify({ version: STATE_VERSION, savedAt: Date.now(), ...state, messages });
+    return { body, payload };
+  }
+
+  /** Debounced background persistence without blocking the main event loop. */
+  flushAsync(): Promise<void> {
+    const epoch = this.flushEpoch;
+    this.writingPromise = this.writingPromise
+      .catch(() => {})
+      .then(async () => {
+        if (epoch !== this.flushEpoch) return;
+        const prepared = this.prepareSerialized();
+        if (!prepared) return;
+        await fs.promises.mkdir(path.dirname(this.filePath), { recursive: true });
+        if (epoch !== this.flushEpoch) return;
+        const tmp = `${this.filePath}.tmp`;
+        await fs.promises.writeFile(tmp, prepared.payload, "utf8");
+        if (epoch !== this.flushEpoch) return;
+        await fs.promises.rename(tmp, this.filePath);
+        this.lastWritten = prepared.body;
+      })
+      .catch(() => {
+        // Persistence is best effort; the hub keeps running on its in-memory state.
+      });
+    return this.writingPromise;
+  }
+
+  /** Writes synchronously now. Used on shutdown, where a pending debounce would be lost. */
   flush(): void {
+    this.flushEpoch += 1;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;
     }
     try {
-      const state = this.collect();
-      const messages =
-        state.messages.length > MAX_PERSISTED_MESSAGES
-          ? state.messages.slice(-MAX_PERSISTED_MESSAGES)
-          : state.messages;
-      const body = JSON.stringify({ ...state, messages });
-      // savedAt is left out of the comparison so an idle hub does not rewrite the file.
-      if (body === this.lastWritten) return;
-      const payload = JSON.stringify({ version: STATE_VERSION, savedAt: Date.now(), ...state, messages });
+      const prepared = this.prepareSerialized();
+      if (!prepared) return;
       fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
       const tmp = `${this.filePath}.tmp`;
-      fs.writeFileSync(tmp, payload, "utf8");
+      fs.writeFileSync(tmp, prepared.payload, "utf8");
       fs.renameSync(tmp, this.filePath);
-      this.lastWritten = body;
+      this.lastWritten = prepared.body;
     } catch {
       // Persistence is best effort; the hub keeps running on its in-memory state.
     }

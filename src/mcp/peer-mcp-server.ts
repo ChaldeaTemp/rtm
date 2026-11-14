@@ -430,6 +430,7 @@ async function main(): Promise<void> {
       inputSchema: {},
     },
     async () => {
+      const qs = cfg.groupId ? `?groupId=${encodeURIComponent(cfg.groupId)}` : "";
       const res = await callHub<{
         resources: Array<{
           id: string;
@@ -440,7 +441,7 @@ async function main(): Promise<void> {
           primaryPath: string;
           enabled: boolean;
         }>;
-      }>(cfg.hubUrl, "/api/resources");
+      }>(cfg.hubUrl, `/api/resources${qs}`);
       const enabled = res.resources
         .filter((r) => r.enabled)
         .map(({ id, kind, scope, name, description, primaryPath }) => ({
@@ -467,6 +468,9 @@ async function main(): Promise<void> {
     },
     async ({ skill_name }) => {
       const params = new URLSearchParams({ skill: skill_name });
+      if (cfg.groupId) {
+        params.set("groupId", cfg.groupId);
+      }
       const res = await callHub<{
         item: { name: string; scope: string; primaryPath: string };
         content: string;
