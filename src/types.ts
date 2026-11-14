@@ -170,6 +170,8 @@ export interface AdapterHealth {
   available: boolean;
   authReady: boolean;
   authHint?: string;
+  authHintKey?: string;
+  authHintArgs?: string[];
   /** The hub knows this agent's sign-in command and can open it in a terminal window. */
   canLogin?: boolean;
   command: string[];
@@ -220,6 +222,8 @@ export interface PendingUserQuestion {
 }
 
 export interface TaskGroup {
+  /** Default title number, or null once a title has been assigned. Older tasks omit this. */
+  defaultTitleNumber?: number | null;
   groupId: string;
   title: string;
   leadAgent: AgentId;
@@ -375,6 +379,7 @@ export interface ChatMessageRecord {
   sessionKey: string;
   role: "user" | "caller" | "assistant" | "system";
   senderLabel: string;
+  leadHandoff?: [previousLead: string, nextLead: string];
   agent?: AgentId;
   text: string;
   thoughtText: string;
@@ -490,6 +495,7 @@ export interface WorkflowStep {
   sessionKey?: string;
   output?: string;
   error?: string;
+  errorKind?: "reviewVerdictMissing" | "reviewAttemptsExhausted" | "serviceRestarted";
 }
 
 /** A task group's workflow: sub-session steps drafted first, then published. */

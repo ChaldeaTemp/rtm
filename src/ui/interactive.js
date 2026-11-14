@@ -1,3 +1,5 @@
+import { apiFetch, th, t } from "./i18n.js";
+
 const app = window.HUB_APP;
 
 const INTERACTIVE_STATE = {
@@ -24,7 +26,7 @@ const INTERACTIVE_STATE = {
 // 预设（已知支持 ACP 的 CLI）由 hub 提供，并带上本机是否已安装
 async function loadAgentPresets() {
   try {
-    const res = await fetch("/api/agents/presets");
+    const res = await apiFetch("/api/agents/presets");
     const data = await res.json();
     if (res.ok && Array.isArray(data.presets)) {
       INTERACTIVE_STATE.presets = data.presets;
@@ -37,14 +39,14 @@ async function loadAgentPresets() {
 
 async function addAgentPreset(id) {
   try {
-    const res = await fetch("/api/agents/presets/add", {
+    const res = await apiFetch("/api/agents/presets/add", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
     });
     const data = await res.json();
     if (!res.ok || data.ok === false) {
-      app.appendLog(`添加 ${id} 失败: ${data.error || res.status}`);
+      app.appendLog(t("couldNotAdd", id, data.error || res.status));
       return;
     }
     app.STATE.agents = data.agents || app.STATE.agents;
@@ -56,16 +58,16 @@ async function addAgentPreset(id) {
     const added = (app.STATE.agents || []).find((a) => a.agent === id);
     if (added && added.available && !added.authReady && added.canLogin) {
       const go = await app.showConfirmModal({
-        title: `${added.label || id} 还没有登录`,
-        message: "登录后才能使用。现在打开登录窗口吗？",
-        confirmText: "去登录",
-        cancelText: "稍后",
+        title: t("agentNotSignedIn", added.label || id),
+        message: t("openSignInPrompt"),
+        confirmText: t("signIn"),
+        cancelText: t("later"),
       });
       if (go) await loginAgent(id);
     }
     void probeAgentHandshake(id);
   } catch (err) {
-    app.appendLog(`添加 ${id} 异常: ${err.message}`);
+    app.appendLog(t("errorAdding", id, err.message));
   }
 }
 
@@ -73,25 +75,25 @@ async function addAgentPreset(id) {
 async function loginAgent(id) {
   const label = (app.STATE.agents || []).find((a) => a.agent === id)?.label || id;
   try {
-    const res = await fetch("/api/agents/login", {
+    const res = await apiFetch("/api/agents/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
     });
     const data = await res.json();
     if (!res.ok || data.ok === false) {
-      await app.showConfirmModal({ title: "没能打开登录窗口", message: data.error || `HTTP ${res.status}`, confirmText: "知道了" });
+      await app.showConfirmModal({ title: t("couldNotOpenSignIn"), message: data.error || `HTTP ${res.status}`, confirmText: t("ok") });
       return;
     }
     for (;;) {
       const done = await app.showConfirmModal({
-        title: `正在登录 ${label}`,
-        message: "已经打开一个终端窗口，按里面的提示完成登录（通常会跳转到浏览器）。完成后回到这里。",
-        confirmText: "我已登录",
-        cancelText: "稍后再说",
+        title: t("signingInAgent", label),
+        message: t("signInTerminalInstructions"),
+        confirmText: t("signedInConfirmation"),
+        cancelText: t("later"),
       });
       if (!done) return;
-      const check = await (await fetch("/api/agents/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).json();
+      const check = await (await apiFetch("/api/agents/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).json();
       app.STATE.agents = check.agents || app.STATE.agents;
       app.renderAgentControls?.();
       renderAgentsView();
@@ -101,15 +103,15 @@ async function loginAgent(id) {
         return;
       }
       const again = await app.showConfirmModal({
-        title: "还没有检测到登录",
-        message: now?.authHint || "登录窗口里的流程可能还没走完。",
-        confirmText: "再检查一次",
-        cancelText: "关闭",
+        title: t("signInNotDetected"),
+        message: now?.authHintKey ? t(now.authHintKey, ...(now.authHintArgs || [])) : now?.authHint || t("signInIncomplete"),
+        confirmText: t("checkAgain"),
+        cancelText: t("close"),
       });
       if (!again) return;
     }
   } catch (err) {
-    app.appendLog(`登录 ${id} 异常: ${err.message}`);
+    app.appendLog(t("agentSignInError", id, err.message));
   }
 }
 
@@ -130,7 +132,7 @@ async function askAgentToRegister(rawName) {
     "只需要调用上面两个接口，不要阅读 RTM 的源码，也不要修改任何文件。",
   ].join("\n");
   INTERACTIVE_STATE.showForm = false;
-  await app.createTaskGroup({ title: `接入 ${name}`, leadAgent: lead });
+  await app.createTaskGroup({ title: t("connect", name), leadAgent: lead });
   app.closeSettings?.();
   app.setStageView("chat");
   void app.sendStreamPrompt(prompt, app.STATE.activeStreamKey);
@@ -220,7 +222,7 @@ function renderQuestions() {
     head.innerHTML = `
       <div class="question-card-title">
         ${tagHtml}
-        <span>${esc(q.title || "需要你确认问题")}</span>
+        <span>${esc(q.title || t("questionsForYou"))}</span>
       </div>
       <span class="mono" style="font-size:11px;color:var(--faint)">${app.formatTime(q.createdAt)}</span>
     `;
@@ -271,7 +273,7 @@ function renderQuestions() {
           const extraInput = document.createElement("input");
           extraInput.type = "text";
           extraInput.className = "question-text-input";
-          extraInput.placeholder = field.placeholder || "或输入其他补充说明...";
+          extraInput.placeholder = field.placeholder || t("orEnterAdditionalDetails");
           const knownOption = field.options.includes(currentVal);
           extraInput.value = !knownOption && typeof currentVal === "string" ? currentVal : "";
           extraInput.oninput = (e) => {
@@ -284,7 +286,7 @@ function renderQuestions() {
         const input = document.createElement("input");
         input.type = "text";
         input.className = "question-text-input";
-        input.placeholder = field.placeholder || "请输入回答...";
+        input.placeholder = field.placeholder || t("enterYourAnswer");
         input.value = typeof draft.get(field.id) === "string" ? draft.get(field.id) : "";
         input.oninput = (e) => {
           draft.set(field.id, e.target.value);
@@ -301,13 +303,13 @@ function renderQuestions() {
     const cancelBtn = document.createElement("button");
     cancelBtn.type = "button";
     cancelBtn.className = "alma-btn alma-btn-outline alma-btn-sm";
-    cancelBtn.textContent = "跳过 / 取消";
+    cancelBtn.textContent = t("skipCancel");
     cancelBtn.onclick = () => void submitQuestionResponse(q.questionId, true);
 
     const submitBtn = document.createElement("button");
     submitBtn.type = "button";
     submitBtn.className = "alma-btn alma-btn-primary alma-btn-sm";
-    submitBtn.textContent = "提交回答";
+    submitBtn.textContent = t("submitAnswer");
     submitBtn.onclick = () => void submitQuestionResponse(q.questionId, false);
 
     actions.appendChild(cancelBtn);
@@ -329,27 +331,27 @@ async function submitQuestionResponse(questionId, cancelled) {
     }
   }
   try {
-    const res = await fetch("/api/questions/resolve", {
+    const res = await apiFetch("/api/questions/resolve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ questionId, answers, cancelled }),
     });
     const data = await res.json();
     if (!res.ok || data.ok === false) {
-      app.appendLog(`提交问题失败: ${data.error || res.status}`);
+      app.appendLog(t("couldNotSubmitAnswer", data.error || res.status));
       return;
     }
     INTERACTIVE_STATE.questionDrafts.delete(questionId);
     app.STATE.pendingQuestions.delete(questionId);
     renderQuestions();
   } catch (err) {
-    app.appendLog(`提交问题异常: ${err.message}`);
+    app.appendLog(t("answerSubmissionError", err.message));
   }
 }
 
 async function refreshAgentsList() {
   try {
-    const res = await fetch("/api/agents");
+    const res = await apiFetch("/api/agents");
     const data = await res.json();
     if (res.ok && Array.isArray(data.agents)) {
       app.STATE.agents = data.agents;
@@ -361,21 +363,21 @@ async function refreshAgentsList() {
       renderAgentsView();
     }
   } catch (err) {
-    app.appendLog(`刷新 Agent 列表失败: ${err.message}`);
+    app.appendLog(t("couldNotRefreshAgentList", err.message));
   }
 }
 
 // id 为空表示恢复自动（取第一个就绪的 Agent）
 async function setDefaultLeadAgent(id) {
   try {
-    const res = await fetch("/api/agents/default-lead", {
+    const res = await apiFetch("/api/agents/default-lead", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id: id || null }),
     });
     const data = await res.json();
     if (!res.ok || data.ok === false) {
-      app.appendLog(`设置默认主导失败: ${data.error || res.status}`);
+      app.appendLog(t("couldNotSetDefaultLead", data.error || res.status));
       return;
     }
     app.STATE.defaultLead = data.defaultLead || "";
@@ -383,9 +385,9 @@ async function setDefaultLeadAgent(id) {
     if (data.defaultLead) app.STATE.newTaskLead = data.defaultLead;
     app.renderAgentControls?.();
     renderAgentsView();
-    app.appendLog(id ? `默认主导已设为 ${id}，新任务生效` : `默认主导已恢复自动（当前为 ${data.defaultLead}）`);
+    app.appendLog(id ? t("setAsTheDefaultLeadForNew", id) : t("defaultLeadSetToAutomaticCurrently", data.defaultLead));
   } catch (err) {
-    app.appendLog(`设置默认主导异常: ${err.message}`);
+    app.appendLog(t("defaultLeadError", err.message));
   }
 }
 
@@ -393,7 +395,7 @@ async function probeAgentHandshake(id) {
   INTERACTIVE_STATE.probeResults.set(id, { testing: true });
   renderAgentsView();
   try {
-    const res = await fetch("/api/agents/test", {
+    const res = await apiFetch("/api/agents/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
@@ -406,8 +408,8 @@ async function probeAgentHandshake(id) {
     const modelCount = data.modelCatalog?.models?.length || 0;
     app.appendLog(
       data.ok
-        ? `ACP 握手成功 [${id}] (${data.latencyMs}ms, 发现 ${modelCount} 个模型, session=${data.sessionId || "-"})`
-        : `ACP 握手失败 [${id}]: ${data.error || "unknown"}`,
+        ? t("acpHandshakeSucceededMsModelsSession", id, data.latencyMs, modelCount, data.sessionId || "-")
+        : t("acpHandshakeFailed", id, data.error || "unknown"),
     );
   } catch (err) {
     INTERACTIVE_STATE.probeResults.set(id, { testing: false, ok: false, error: err.message });
@@ -417,50 +419,50 @@ async function probeAgentHandshake(id) {
 
 async function toggleAgentEnabled(id, enabled) {
   try {
-    const res = await fetch("/api/agents/toggle", {
+    const res = await apiFetch("/api/agents/toggle", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id, enabled }),
     });
     const data = await res.json();
     if (!res.ok || data.ok === false) {
-      app.appendLog(`切换 Agent 状态失败: ${data.error || res.status}`);
+      app.appendLog(t("couldNotChangeAgentStatus", data.error || res.status));
       return;
     }
     app.STATE.agents = data.agents || app.STATE.agents;
     app.renderAgentControls?.();
     renderAgentsView();
   } catch (err) {
-    app.appendLog(`切换 Agent 状态异常: ${err.message}`);
+    app.appendLog(t("agentStatusError", err.message));
   }
 }
 
 async function deleteCustomAgent(id) {
   const ok = await (app.showConfirmModal
     ? app.showConfirmModal({
-        title: "移除自定义 Agent",
-        message: `确认移除自定义 Agent「${id}」？`,
-        confirmText: "确认移除",
+        title: t("removeCustomAgent"),
+        message: t("removeTheCustomAgent", id),
+        confirmText: t("removeAgent"),
         danger: true,
       })
     : Promise.resolve(false));
   if (!ok) return;
   try {
-    const res = await fetch("/api/agents/delete", {
+    const res = await apiFetch("/api/agents/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
     });
     const data = await res.json();
     if (!res.ok || data.ok === false) {
-      app.appendLog(`移除 Agent 失败: ${data.error || res.status}`);
+      app.appendLog(t("couldNotRemoveAgent", data.error || res.status));
       return;
     }
     app.STATE.agents = data.agents || app.STATE.agents;
     app.renderAgentControls?.();
     renderAgentsView();
   } catch (err) {
-    app.appendLog(`移除 Agent 异常: ${err.message}`);
+    app.appendLog(t("agentRemovalError", err.message));
   }
 }
 
@@ -490,14 +492,14 @@ async function saveAgentForm(e) {
   if (!payload.id) return;
 
   try {
-    const res = await fetch("/api/agents/save", {
+    const res = await apiFetch("/api/agents/save", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
     const data = await res.json();
     if (!res.ok || data.ok === false) {
-      app.appendLog(`保存 Agent 配置失败: ${data.error || res.status}`);
+      app.appendLog(t("couldNotSaveAgentSettings", data.error || res.status));
       return;
     }
     INTERACTIVE_STATE.showForm = false;
@@ -510,9 +512,9 @@ async function saveAgentForm(e) {
     app.renderAgentControls?.();
     app.renderModelSelectorBar?.();
     renderAgentsView();
-    app.appendLog(`已保存 Agent 配置: ${payload.id}`);
+    app.appendLog(t("savedSettingsForAgent", payload.id));
   } catch (err) {
-    app.appendLog(`保存 Agent 异常: ${err.message}`);
+    app.appendLog(t("agentSettingsError", err.message));
   }
 }
 
@@ -582,7 +584,7 @@ function renderAgentsView() {
   const installedPresets = addable.filter((p) => p.installed);
   const otherPresets = addable.filter((p) => !p.installed);
   const assistLead = app.STATE.defaultLead || app.STATE.newTaskLead;
-  const presetTitle = (p) => esc(`${p.description}：${p.command} ${p.args.join(" ")}`);
+  const presetTitle = (p) => `${p.description}: ${p.command} ${p.args.join(" ")}`;
   const addPanelHtml =
     INTERACTIVE_STATE.showForm && !editing
       ? `
@@ -590,31 +592,31 @@ function renderAgentsView() {
         ${
           installedPresets.length > 0
             ? `<div class="agent-add-row">
-                <span class="agent-add-label">本机已安装</span>
+                <span class="agent-add-label">${th("installedLocally")}</span>
                 <div class="agent-add-chips">${installedPresets
                   .map(
                     (p) =>
-                      `<button type="button" class="filter-pill preset-ready" data-add-preset="${esc(p.id)}" title="${presetTitle(p)}">添加 ${esc(p.label)}</button>`,
+                      `<button type="button" class="filter-pill preset-ready" data-add-preset="${esc(p.id)}" title="${esc(presetTitle(p))}">${th("add2", p.label)}</button>`,
                   )
                   .join("")}</div>
               </div>`
             : ""
         }
         <div class="agent-add-row">
-          <span class="agent-add-label">交给 Agent</span>
+          <span class="agent-add-label">${th("delegateToAnAgent")}</span>
           <div class="agent-add-chips">
-            <input id="agentAssistInput" class="text-input" type="text" placeholder="工具名或安装路径" autocomplete="off" />
-            <button id="agentAssistBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="新建一个任务，由 ${esc(assistLead)} 找到启动命令、登记并验证">让 ${esc(assistLead)} 接入</button>
+            <input id="agentAssistInput" class="text-input" type="text" placeholder="${th("toolNameOrInstallationPath")}" autocomplete="off" />
+            <button id="agentAssistBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="${th("createATaskForToFindThe", assistLead)}">${th("askToConnectIt", assistLead)}</button>
           </div>
         </div>
         ${
           otherPresets.length > 0
             ? `<div class="agent-add-row">
-                <span class="agent-add-label">预设</span>
+                <span class="agent-add-label">${th("presets")}</span>
                 <div class="agent-add-chips">${otherPresets
                   .map(
                     (p) =>
-                      `<button type="button" class="filter-pill" data-fill-preset="${esc(p.id)}" title="${presetTitle(p)}（本机未检测到）">${esc(p.label)}</button>`,
+                      `<button type="button" class="filter-pill" data-fill-preset="${esc(p.id)}" title="${th("notDetectedLocally", presetTitle(p))}">${esc(p.label)}</button>`,
                   )
                   .join("")}</div>
               </div>`
@@ -630,36 +632,34 @@ function renderAgentsView() {
     ? `
         <div class="agent-form-grid">
           <div class="agent-form-field">
-            <label>显示名称</label>
+            <label>${th("displayName")}</label>
             <input id="agentCfgLabel" class="text-input" type="text" value="${esc(fv.label)}" />
           </div>
           <div class="agent-form-field">
-            <label>默认模型</label>
-            <input id="agentCfgDefaultModel" class="text-input" type="text" ${modelDatalist ? 'list="agentModelChoices"' : ""} placeholder="跟随 CLI" value="${esc(fv.defaultModel || "")}" />
+            <label>${th("defaultModel")}</label>
+            <input id="agentCfgDefaultModel" class="text-input" type="text" ${modelDatalist ? 'list="agentModelChoices"' : ""} placeholder="${th("useCliDefault")}" value="${esc(fv.defaultModel || "")}" />
           </div>
           <div class="agent-form-field">
-            <label>默认思考强度</label>
-            <input id="agentCfgDefaultEffort" class="text-input" type="text" ${effortDatalist ? 'list="agentEffortChoices"' : ""} placeholder="跟随 CLI" value="${esc(fv.defaultEffort || "")}" />
+            <label>${th("defaultReasoningEffort")}</label>
+            <input id="agentCfgDefaultEffort" class="text-input" type="text" ${effortDatalist ? 'list="agentEffortChoices"' : ""} placeholder="${th("useCliDefault")}" value="${esc(fv.defaultEffort || "")}" />
           </div>
           <div class="agent-form-field">
-            <label>颜色</label>
+            <label>${th("color")}</label>
             <input id="agentCfgColor" class="text-input" type="text" placeholder="#3f6212" value="${esc(fv.color)}" />
           </div>
           <div class="agent-form-field">
-            <label>备注</label>
+            <label>${th("notes")}</label>
             <input id="agentCfgDesc" class="text-input" type="text" value="${esc(fv.description)}" />
           </div>
         </div>
         <div class="agent-form-field">
-          <label>可用模型（每行一个；留空表示 CLI 报告的全部模型）${
-            discoveredIds.length > 0
-              ? ` <button type="button" id="fillDiscoveredModelsBtn" class="link-btn">填入已发现的 ${discoveredIds.length} 个</button>`
-              : ""
-          }</label>
-          <textarea id="agentCfgModels" class="rule-editor-textarea" style="min-height:72px" placeholder="模型选择框只显示这里列出的模型">${esc(fv.modelsText || "")}</textarea>
+          <label>${th("modelsListLabel")}${discoveredIds.length > 0
+              ? ` <button type="button" id="fillDiscoveredModelsBtn" class="link-btn">${th("fillFromDetectedModels", discoveredIds.length)}</button>`
+              : ""}</label>
+          <textarea id="agentCfgModels" class="rule-editor-textarea" style="min-height:72px" placeholder="${th("showOnlyTheseModelsInTheModel")}">${esc(fv.modelsText || "")}</textarea>
         </div>
         <div class="agent-form-field">
-          <label>环境变量（每行 KEY=VALUE）</label>
+          <label>${th("environmentVariablesOneKeyValuePerLine")}</label>
           <textarea id="agentCfgEnv" class="rule-editor-textarea" style="min-height:64px">${esc(fv.envText)}</textarea>
         </div>`
     : "";
@@ -670,10 +670,10 @@ function renderAgentsView() {
       <form id="agentRegistryForm" class="rule-editor-box">
         ${modelDatalist}${effortDatalist}
         <div class="panel-toolbar agent-form-head">
-          <span class="agent-form-title">${editing ? `配置 ${esc(fv.label || fv.id)}` : "手动添加"}</span>
+          <span class="agent-form-title">${editing ? t("configure", esc(fv.label || fv.id)) : t("addManually")}</span>
           <div class="settings-seg" id="agentFormModeSeg">
-            <button type="button" data-form-mode="simple" class="${fullMode ? "" : "active"}">简化</button>
-            <button type="button" data-form-mode="full" class="${fullMode ? "active" : ""}">完整</button>
+            <button type="button" data-form-mode="simple" class="${fullMode ? "" : "active"}">${th("basic")}</button>
+            <button type="button" data-form-mode="full" class="${fullMode ? "active" : ""}">${th("advanced")}</button>
           </div>
         </div>
         <div class="agent-form-grid">
@@ -682,20 +682,20 @@ function renderAgentsView() {
             <input id="agentCfgId" class="text-input" type="text" placeholder="gemini" value="${esc(fv.id)}" ${editing ? "readonly" : ""} required />
           </div>
           <div class="agent-form-field">
-            <label>启动命令</label>
-            <input id="agentCfgCommand" class="text-input" type="text" placeholder="${editingItem?.builtin ? "内置默认" : "gemini"}" value="${esc(fv.command)}" />
+            <label>${th("launchCommand")}</label>
+            <input id="agentCfgCommand" class="text-input" type="text" placeholder="${editingItem?.builtin ? t("builtInDefault") : "gemini"}" value="${esc(fv.command)}" />
           </div>
           <div class="agent-form-field">
-            <label>参数</label>
-            <input id="agentCfgArgs" class="text-input" type="text" placeholder="${editingItem?.builtin ? "内置默认" : "acp"}" value="${esc(fv.argsText)}" />
+            <label>${th("arguments")}</label>
+            <input id="agentCfgArgs" class="text-input" type="text" placeholder="${editingItem?.builtin ? t("builtInDefault") : "acp"}" value="${esc(fv.argsText)}" />
           </div>
         </div>
         ${fullFieldsHtml}
         <div class="panel-toolbar">
           <span></span>
           <div style="display:flex;gap:8px">
-            <button id="cancelAgentFormBtn" class="alma-btn alma-btn-sm" type="button">取消</button>
-            <button class="alma-btn alma-btn-primary alma-btn-sm" type="submit">保存</button>
+            <button id="cancelAgentFormBtn" class="alma-btn alma-btn-sm" type="button">${th("cancel")}</button>
+            <button class="alma-btn alma-btn-primary alma-btn-sm" type="submit">${th("save")}</button>
           </div>
         </div>
       </form>`
@@ -709,28 +709,28 @@ function renderAgentsView() {
       const tagHtml = app.agentTagHtml
         ? app.agentTagHtml(item.agent, item.label || item.agent)
         : `<span class="agent-tag" data-agent="${esc(item.agent)}">${esc(item.label || item.agent)}</span>`;
-      const cmdDisplay = Array.isArray(item.command) && item.command.length > 0 ? item.command.join(" ") : "未解析到命令";
-      let statusBadge = `<span class="cov-pill off">已停用</span>`;
+      const cmdDisplay = Array.isArray(item.command) && item.command.length > 0 ? item.command.join(" ") : t("commandNotFound");
+      let statusBadge = `<span class="cov-pill off">${th("disabled2")}</span>`;
       if (item.enabled !== false) {
-        if (item.available && item.authReady) statusBadge = `<span class="cov-pill native">就绪</span>`;
-        else if (item.available) statusBadge = `<span class="cov-pill bridged">未登录</span>`;
-        else statusBadge = `<span class="cov-pill off">未安装</span>`;
+        if (item.available && item.authReady) statusBadge = `<span class="cov-pill native">${th("ready")}</span>`;
+        else if (item.available) statusBadge = `<span class="cov-pill bridged">${th("notSignedIn")}</span>`;
+        else statusBadge = `<span class="cov-pill off">${th("notInstalled")}</span>`;
       }
 
       const catalog = item.modelCatalog || app.STATE.modelCatalogs?.get(item.agent);
       const modelCount = Array.isArray(catalog?.models) ? catalog.models.length : 0;
-      const defaultModelText = item.defaultModel || catalog?.currentModelId || "跟随 CLI";
+      const defaultModelText = item.defaultModel || catalog?.currentModelId || t("useCliDefault");
       // 只在有内容可说时才占一行：握手结果，或未就绪的原因
       let probeClass = "agent-probe-status";
-      let probeText = item.authHint || item.reason || "";
+      let probeText = item.authHintKey ? t(item.authHintKey, ...(item.authHintArgs || [])) : item.authHint || item.reason || "";
       if (probe?.testing) {
-        probeText = "正在握手…";
+        probeText = t("connecting");
       } else if (probe && probe.ok === true) {
         probeClass += " ok";
-        probeText = `握手成功，${(probe.latencyMs / 1000).toFixed(1)} 秒`;
+        probeText = t("handshakeSucceededInS", (probe.latencyMs / 1000).toFixed(1));
       } else if (probe && probe.ok === false) {
         probeClass += " err";
-        probeText = `握手失败：${probe.error || "未知错误"}`;
+        probeText = t("handshakeFailed", probe.error || t("unknownError"));
       }
 
       return `
@@ -739,23 +739,23 @@ function renderAgentsView() {
             <div class="agent-cfg-title">
               ${tagHtml}
               ${statusBadge}
-              ${isConfiguredLead ? `<span class="cov-pill native" title="新任务默认由它主导">默认主导</span>` : isAutoLead ? `<span class="cov-pill bridged" title="未指定默认主导，自动选中第一个就绪的 Agent">默认主导 · 自动</span>` : ""}
+              ${isConfiguredLead ? `<span class="cov-pill native" title="${th("leadsNewTasksByDefault")}">${th("defaultLead")}</span>` : isAutoLead ? `<span class="cov-pill bridged" title="${th("withAutomaticSelectionTheFirstReadyAgent")}">${th("defaultLeadAutomatic")}</span>` : ""}
             </div>
-            <label class="toggle-wrap" title="启用或停用">
+            <label class="toggle-wrap" title="${th("enableOrDisable")}">
               <input type="checkbox" data-toggle-agent="${esc(item.agent)}" ${item.enabled === false ? "" : "checked"} />
             </label>
           </div>
-          <div class="res-meta">${esc(defaultModelText)}${item.defaultEffort ? ` · ${esc(item.defaultEffort)}` : ""}${modelCount > 0 ? `　${modelCount} 个模型可选${item.models?.length ? "（已限定）" : ""}` : ""}</div>
+          <div class="res-meta">${esc(defaultModelText)}${item.defaultEffort ? ` · ${esc(item.defaultEffort)}` : ""}${modelCount > 0 ? t("availableModels", modelCount, item.models?.length ? t("restricted") : "") : ""}</div>
           <div class="agent-cmd-line" title="${esc(cmdDisplay)}">${esc(cmdDisplay)}</div>
           ${probeText ? `<div class="${probeClass}">${esc(probeText)}</div>` : ""}
           <div class="agent-cfg-actions">
             <div style="display:flex;gap:6px;flex-wrap:wrap">
-              ${item.enabled !== false && item.available && !item.authReady && item.canLogin ? `<button type="button" class="alma-btn alma-btn-primary alma-btn-sm" data-login-agent="${esc(item.agent)}">登录</button>` : ""}
-              <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-test-agent="${esc(item.agent)}" ${probe?.testing ? "disabled" : ""}>测试</button>
-              <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-edit-agent="${esc(item.agent)}">配置</button>
-              ${item.enabled === false ? "" : isConfiguredLead ? `<button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-default-lead="" title="恢复为自动选择第一个就绪的 Agent">取消默认主导</button>` : `<button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-default-lead="${esc(item.agent)}">设为默认主导</button>`}
+              ${item.enabled !== false && item.available && !item.authReady && item.canLogin ? `<button type="button" class="alma-btn alma-btn-primary alma-btn-sm" data-login-agent="${esc(item.agent)}">${th("signIn")}</button>` : ""}
+              <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-test-agent="${esc(item.agent)}" ${probe?.testing ? "disabled" : ""}>${th("test")}</button>
+              <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-edit-agent="${esc(item.agent)}">${th("configure2")}</button>
+              ${item.enabled === false ? "" : isConfiguredLead ? `<button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-default-lead="" title="${th("chooseTheFirstReadyAgentAutomatically")}">${th("clearDefaultLead")}</button>` : `<button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-default-lead="${esc(item.agent)}">${th("setAsDefaultLead")}</button>`}
             </div>
-            ${item.builtin ? "" : `<button type="button" class="alma-btn alma-btn-danger alma-btn-sm" data-del-agent="${esc(item.agent)}">移除</button>`}
+            ${item.builtin ? "" : `<button type="button" class="alma-btn alma-btn-danger alma-btn-sm" data-del-agent="${esc(item.agent)}">${th("remove")}</button>`}
           </div>
         </div>`;
     })
@@ -765,8 +765,8 @@ function renderAgentsView() {
     <div class="panel-toolbar agents-toolbar">
       <span></span>
       <div style="display:flex;gap:8px">
-        <button id="refreshAgentsBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button">刷新</button>
-        <button id="addCustomAgentBtn" class="alma-btn alma-btn-primary alma-btn-sm" type="button">${INTERACTIVE_STATE.showForm ? "收起" : "添加 Agent"}</button>
+        <button id="refreshAgentsBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button">${th("refresh")}</button>
+        <button id="addCustomAgentBtn" class="alma-btn alma-btn-primary alma-btn-sm" type="button">${INTERACTIVE_STATE.showForm ? t("collapse") : t("addAgent")}</button>
       </div>
     </div>
     ${formHtml}

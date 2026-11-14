@@ -1,3 +1,5 @@
+import { getLocale, negotiateLocale, t, withLocale } from "./i18n.js";
+import { DEFAULT_LOCALE, matchLocale, messageSender, messageText, taskTitle, translate } from "../ui/locale.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
@@ -132,7 +134,7 @@ const ChatImageInputSchema = z.object({
     .string()
     .transform((m) => m.trim().toLowerCase())
     .refine((m) => m in ALLOWED_IMAGE_MIMES, {
-      message: "仅支持 PNG、JPEG、WEBP 或 GIF 图片格式",
+      message: t("unsupportedImageFormat"),
     }),
   data: z.string().min(1),
 });
@@ -174,7 +176,7 @@ const ChatBodySchema = z
       (v.files?.length ?? 0) > 0 ||
       Boolean(v.reuseMessageId?.trim()),
     {
-      message: "请输入消息内容，或至少附带一张图片或一个文件",
+      message: t("messageRequired"),
     },
   );
 
@@ -226,7 +228,7 @@ const SessionChatBodySchema = z
       (v.files?.length ?? 0) > 0 ||
       Boolean(v.reuseMessageId?.trim()),
     {
-      message: "请输入消息内容，或至少附带一张图片或一个文件",
+      message: t("messageRequired"),
     },
   );
 
@@ -482,7 +484,10 @@ function buildMermaidMarkup(source: string, preferDark?: boolean): string {
         var result = await mermaid.render("mmd-svg", src.textContent);
         out.innerHTML = result.svg;
       } catch (err) {
-        out.innerHTML = '<div class="mmd-error">这段 Mermaid 没能渲染：' + String(err && err.message ? err.message : err).replace(/</g, "&lt;") + '</div>';
+        var errorBox = document.createElement("div");
+        errorBox.className = "mmd-error";
+        errorBox.textContent = ${JSON.stringify(t("mermaidRenderError"))} + String(err && err.message ? err.message : err);
+        out.replaceChildren(errorBox);
         src.hidden = false;
       }
     })();
@@ -702,7 +707,7 @@ function autoTitleFromPrompt(prompt: string): string {
     .map((line) => line.trim())
     .find((line) => line.length > 0) ?? "";
   if (!firstLine) {
-    return "新任务";
+    return t("newTaskFallback");
   }
   return firstLine.length > 26 ? `${firstLine.slice(0, 26)}…` : firstLine;
 }
@@ -869,7 +874,8 @@ export class AgentHubServer {
     const now = Date.now();
     const initialGroup: TaskGroup = {
       groupId: this.defaultGroupId,
-      title: "任务 1",
+      title: translate(DEFAULT_LOCALE, "numberedTask", 1),
+      defaultTitleNumber: 1,
       leadAgent: this.registry.resolveDefaultLead(options.defaultLead),
       agentModels: {},
       agentEfforts: {},
@@ -969,7 +975,7 @@ export class AgentHubServer {
   private requireDirectory(raw: string): string {
     const resolved = path.resolve(raw.trim());
     if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
-      throw new Error(`目录不存在：${resolved}`);
+      throw new Error(t("directoryDoesNotExist", resolved));
     }
     return resolved;
   }
@@ -1324,6 +1330,7 @@ export class AgentHubServer {
       const live = this.groups.get(group.groupId);
       if (title && live && live.title === currentTitle) {
         live.title = title;
+        live.defaultTitleNumber = null;
         live.updatedAt = Date.now();
         this.broadcast({ type: "group_updated", group: { ...live }, timestamp: live.updatedAt });
       }
@@ -1468,7 +1475,7 @@ export class AgentHubServer {
     leadEffort?: string;
     cwd?: string;
     extraDirs?: string[];
-  }): TaskGroup {
+  }, defaultTitleNumber = this.groupCounter + 1): TaskGroup {
     const now = Date.now();
     const cwd = input?.cwd?.trim() ? this.requireDirectory(input.cwd) : this.baseCwd;
     const extraDirs = this.normalizeExtraDirs(input?.extraDirs, cwd);
@@ -1485,7 +1492,8 @@ export class AgentHubServer {
     }
     const group: TaskGroup = {
       groupId: `grp-${randomUUID().slice(0, 6)}`,
-      title: rawTitle && rawTitle.length > 0 ? rawTitle : `任务 ${this.groupCounter}`,
+      title: rawTitle || translate(DEFAULT_LOCALE, "numberedTask", defaultTitleNumber),
+      defaultTitleNumber: rawTitle ? null : defaultTitleNumber,
       leadAgent,
       agentModels,
       agentEfforts,
@@ -1520,8 +1528,9 @@ export class AgentHubServer {
     }
     let changed = false;
     const cleanTitle = input.title?.trim();
-    if (cleanTitle && cleanTitle !== group.title) {
+    if (cleanTitle && (cleanTitle !== group.title || typeof group.defaultTitleNumber === "number")) {
       group.title = cleanTitle;
+      group.defaultTitleNumber = null;
       changed = true;
     }
     // Directories: sessions are bound to the directories they started with, so a change
@@ -1597,6 +1606,7 @@ export class AgentHubServer {
     this.syncGroupLeadModelFields(group);
     group.updatedAt = now;
 
+    const leadHandoff: [string, string] = [this.agentLabel(previousLead), this.agentLabel(validAgent)];
     this.upsertMessage({
       messageId: `msg-${randomUUID().slice(0, 8)}`,
       groupId,
@@ -1604,7 +1614,8 @@ export class AgentHubServer {
       sessionKey: buildSessionKey(validAgent, `${groupId}__lead`),
       role: "system",
       senderLabel: "系统",
-      text: `主导已交接：${this.agentLabel(previousLead)} → ${this.agentLabel(validAgent)}`,
+      leadHandoff,
+      text: t("leadChanged", ...leadHandoff),
       thoughtText: "",
       toolCalls: [],
       status: "done",
@@ -1821,7 +1832,7 @@ export class AgentHubServer {
     });
 
     if (this.groups.size === 0) {
-      const replacement = this.createGroup({ title: "任务 1" });
+      const replacement = this.createGroup(undefined, 1);
       this.defaultGroupId = replacement.groupId;
     } else if (groupId === this.defaultGroupId) {
       const firstRemaining = this.groups.values().next().value as TaskGroup;
@@ -1841,7 +1852,7 @@ export class AgentHubServer {
     const worktreePath =
       session?.isWorktree && session.effectiveCwd ? session.effectiveCwd : matchingTask?.worktreePath;
     if (!worktreePath) {
-      throw new Error("该会话未启用独立的 git worktree，或 worktree 已被清理");
+      throw new Error(t("thisSessionHasNoIsolatedGitWorktree"));
     }
     const groupId = session?.groupId ?? matchingTask?.groupId;
     const baseCwd =
@@ -1916,26 +1927,27 @@ export class AgentHubServer {
       throw new Error(`Unknown task group: ${groupId}`);
     }
 
+    const title = taskTitle(getLocale(), group);
     const fmtTime = (ts: number) =>
       new Date(ts).toISOString().replace("T", " ").slice(0, 19) + " UTC";
 
     const formatMessagesMarkdown = (msgs: ChatMessageRecord[]): string => {
       const sorted = [...msgs].sort((a, b) => a.timestamp - b.timestamp);
       if (sorted.length === 0) {
-        return "*暂无对话记录*\n";
+        return t("noMessages");
       }
       const chunks: string[] = [];
       for (const m of sorted) {
         if (m.role === "system") {
-          chunks.push(`> *[系统]* ${m.text}`);
+          chunks.push(t("systemMessage", messageText(getLocale(), m)));
           continue;
         }
         const agentBadge = m.agent ? ` (\`${m.agent}\`)` : "";
         const modelBadge = m.usage?.modelId ? ` · \`${m.usage.modelId}\`` : "";
-        chunks.push(`#### ${m.senderLabel}${agentBadge} · ${fmtTime(m.timestamp)}${modelBadge}`);
+        chunks.push(`#### ${messageSender(getLocale(), m)}${agentBadge} · ${fmtTime(m.timestamp)}${modelBadge}`);
         if (m.usage && (m.usage.totalTokens > 0 || m.usage.inputTokens > 0)) {
           chunks.push(
-            `- **Tokens**: 输入 ${m.usage.inputTokens} / 输出 ${m.usage.outputTokens} / 总计 ${m.usage.totalTokens}`,
+            t("tokenUsageLine", m.usage.inputTokens, m.usage.outputTokens, m.usage.totalTokens),
           );
         }
         if (m.thoughtText?.trim()) {
@@ -1945,22 +1957,22 @@ export class AgentHubServer {
         }
         if (m.toolCalls?.length > 0) {
           const toolLines = m.toolCalls.map(
-            (t) => `- 工具调用: \`${t.title}\`${t.status ? ` (${t.status})` : ""}`,
+            (tool) => t("toolCallLine", tool.title, tool.status ? ` (${tool.status})` : ""),
           );
           chunks.push(toolLines.join("\n"));
         }
         if (m.images && m.images.length > 0) {
           chunks.push(
-            `- **附带图片**: ${m.images.map((img) => `\`${img.name}\` (${img.mimeType})`).join("、")}`,
+            t("attachedImagesLine", m.images.map((img) => `\`${img.name}\` (${img.mimeType})`).join("、")),
           );
         }
         const bodyText = m.text?.trim()
           ? m.text.trim()
           : m.status === "cancelled"
-            ? "*(已停止)*"
+            ? t("stopped")
             : m.images && m.images.length > 0
               ? ""
-              : "*(空内容)*";
+              : t("emptyMessage");
         if (bodyText) {
           chunks.push(bodyText);
         }
@@ -1968,8 +1980,8 @@ export class AgentHubServer {
           const artLines = m.artifactIds.map((id) => {
             const art = this.artifacts.get(id);
             return art
-              ? `- 交互组件: **${art.title}** (\`${art.kind}\`, id=\`${art.artifactId}\`)`
-              : `- 交互组件: \`${id}\``;
+              ? t("artifactDetailsLine", art.title, art.kind, art.artifactId)
+              : t("artifactLine", id);
           });
           chunks.push(artLines.join("\n"));
         }
@@ -1978,17 +1990,17 @@ export class AgentHubServer {
     };
 
     const lines: string[] = [];
-    lines.push(`# ${group.title}`);
+    lines.push(`# ${title}`);
     lines.push("");
-    lines.push(`- **任务 ID**: \`${group.groupId}\``);
-    lines.push(`- **主导 Agent**: \`${group.leadAgent}\``);
-    lines.push(`- **工作目录**: \`${group.cwd}\``);
-    lines.push(`- **状态**: ${group.archived ? "已归档" : "进行中"}`);
-    lines.push(`- **创建时间**: ${fmtTime(group.createdAt)}`);
-    lines.push(`- **导出时间**: ${fmtTime(Date.now())}`);
+    lines.push(t("taskIdLine", group.groupId));
+    lines.push(t("leadAgentLine", group.leadAgent));
+    lines.push(t("workingDirectoryLine", group.cwd));
+    lines.push(t("groupStatusLine", group.archived ? t("archived2") : t("activeTask")));
+    lines.push(t("createdAtLine", fmtTime(group.createdAt)));
+    lines.push(t("exportedAtLine", fmtTime(Date.now())));
     lines.push("");
 
-    lines.push("## 一、主导会话记录");
+    lines.push(t("leadHistoryHeading"));
     lines.push("");
     const leadMessages = this.getMessages({ groupId, streamKey: `lead:${groupId}` });
     lines.push(formatMessagesMarkdown(leadMessages));
@@ -1997,34 +2009,34 @@ export class AgentHubServer {
       .filter((t) => t.groupId === groupId)
       .sort((a, b) => a.createdAt - b.createdAt);
 
-    lines.push("## 二、委派任务记录");
+    lines.push(t("delegationsHeading"));
     lines.push("");
     if (groupTasks.length === 0) {
-      lines.push("*暂无 peer_ask / peer_dispatch 委派记录*");
+      lines.push(t("noDelegations"));
       lines.push("");
     } else {
       for (const task of groupTasks) {
         lines.push(`### ${task.callerAgent} → ${task.targetAgent} (\`${task.taskId}\`)`);
         lines.push("");
-        lines.push(`- **状态**: \`${task.status}\``);
-        lines.push(`- **目标会话**: \`${task.targetSessionKey}\``);
-        lines.push(`- **时间**: ${fmtTime(task.createdAt)}`);
+        lines.push(t("delegationStatusLine", task.status));
+        lines.push(t("targetSessionLine", task.targetSessionKey));
+        lines.push(t("delegationTimeLine", fmtTime(task.createdAt)));
         if (task.branch) {
-          lines.push(`- **Worktree 分支**: \`${task.branch}\``);
+          lines.push(t("worktreeBranchLine", task.branch));
         }
         lines.push("");
-        lines.push("**委派指令：**");
+        lines.push(t("instructionsHeading"));
         lines.push("");
         lines.push(task.prompt);
         lines.push("");
         if (task.outputText?.trim()) {
-          lines.push("**委派输出：**");
+          lines.push(t("outputHeading"));
           lines.push("");
           lines.push(task.outputText.trim());
           lines.push("");
         }
         if (task.error?.trim()) {
-          lines.push(`**错误信息**: \`${task.error.trim()}\``);
+          lines.push(t("errorLine", task.error.trim()));
           lines.push("");
         }
       }
@@ -2050,21 +2062,21 @@ export class AgentHubServer {
       }
     }
 
-    lines.push("## 三、子会话完整记录");
+    lines.push(t("subsessionsHeading"));
     lines.push("");
     if (subSessionMap.size === 0) {
-      lines.push("*暂无子会话对话记录*");
+      lines.push(t("noSubsessionMessages"));
       lines.push("");
     } else {
       for (const [streamKey, info] of subSessionMap.entries()) {
-        lines.push(`### 子会话：${info.label} (\`${info.sessionKey}\`)`);
+        lines.push(t("subsessionHeading", info.label, info.sessionKey));
         lines.push("");
         lines.push(formatMessagesMarkdown(this.getMessages({ groupId, streamKey })));
       }
     }
 
     const slug =
-      group.title
+      title
         .replace(/[\\/:*?"<>|\s]+/g, "-")
         .replace(/^-+|-+$/g, "")
         .slice(0, 48) || group.groupId;
@@ -2408,7 +2420,7 @@ export class AgentHubServer {
       groupId,
       sessionKey: resolvedSessionKey,
       agent,
-      title: input.title?.trim() || `${agent} 需要你确认以下问题`,
+      title: input.title?.trim() || t("questionForAgent", agent),
       fields,
       createdAt: now,
     };
@@ -2678,7 +2690,7 @@ export class AgentHubServer {
     return rawFiles.map((raw) => {
       const buf = Buffer.from(raw.data.replace(/^data:[^;]*;base64,/, "").replace(/\s+/g, ""), "base64");
       if (buf.byteLength === 0 || buf.byteLength > MAX_SINGLE_FILE_BYTES) {
-        throw new Error(`文件「${raw.name}」为空或超过 ${Math.round(MAX_SINGLE_FILE_BYTES / (1024 * 1024))}MB`);
+        throw new Error(t("fileIsEmptyOrExceedsMb", raw.name, Math.round(MAX_SINGLE_FILE_BYTES / (1024 * 1024))));
       }
       // Keep the original name readable for the agent, minus anything path-like.
       const safeName = path.basename(raw.name).replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").slice(0, 120) || "file";
@@ -2707,13 +2719,13 @@ export class AgentHubServer {
 
     if (req.mode !== "form") {
       const fallbackQuestion = req.url
-        ? `${req.message || "Agent 请求交互确认"} (${req.url})`
-        : req.message || "Agent 请求输入";
+        ? `${req.message || t("agentNeedsConfirmation")} (${req.url})`
+        : req.message || t("agentNeedsInput");
       const res = await this.askUserQuestion({
         agent: params.agent,
         sessionKey: params.sessionKey,
         groupId: params.groupId,
-        title: `${params.agent} 请求确认`,
+        title: t("agentConfirmation", params.agent),
         questions: [{ id: "response", question: fallbackQuestion, type: "text" }],
       });
       if (res.cancelled) {
@@ -2789,7 +2801,7 @@ export class AgentHubServer {
     if (fields.length === 0) {
       fields.push({
         id: "response",
-        question: req.message?.trim() || "请补充输入信息",
+        question: req.message?.trim() || t("provideDetails"),
         type: "text",
       });
     }
@@ -2798,7 +2810,7 @@ export class AgentHubServer {
       agent: params.agent,
       sessionKey: params.sessionKey,
       groupId: params.groupId,
-      title: req.requestedSchema?.title?.trim() || req.message?.trim() || `${params.agent} 请求输入`,
+      title: req.requestedSchema?.title?.trim() || req.message?.trim() || t("agentInput", params.agent),
       questions: fields,
     });
     if (res.cancelled) {
@@ -2849,7 +2861,7 @@ export class AgentHubServer {
       injectPeerMcp: true,
       groupId: group.groupId,
       role: "lead",
-      label: "主导会话",
+      label: t("leadSession"),
       model: overrides?.model?.trim() || group.agentModels?.[lead] || def?.defaultModel,
       effort: overrides?.effort?.trim() || group.agentEfforts?.[lead] || def?.defaultEffort,
     };
@@ -2966,7 +2978,7 @@ export class AgentHubServer {
       displayUserText ||
       (savedFiles.length > 0 ? "请查看附带的文件。" : savedImages.length > 0 ? "请查看并分析附带的图片。" : "");
     if (!effectiveUserPrompt) {
-      throw new Error("请输入消息内容，或至少附带一张图片或一个文件");
+      throw new Error(t("messageRequired"));
     }
     const promptForAgent = input.handoff
       ? buildHandoffPrompt(this.agentLabel(input.handoff.from), effectiveUserPrompt)
@@ -3031,7 +3043,7 @@ export class AgentHubServer {
       this.setGroupLeadAgent(group.groupId, input.leadAgent);
     }
     if (group.archived) {
-      throw new Error("这个任务已归档，先恢复再发消息");
+      throw new Error(t("thisTaskIsArchivedRestoreItBefore"));
     }
 
     // Escape hatch for a lead that cannot hand over by itself (it will not start, or is stuck):
@@ -3046,14 +3058,14 @@ export class AgentHubServer {
         enabled.find((d) => d.id === wanted) ?? enabled.find((d) => (d.label || "").toLowerCase() === wanted);
       if (!target) {
         throw new Error(
-          `没有名为 ${forced[1]} 的已启用 Agent。可选：${enabled
+          t("noEnabledAgentNamedAvailableAgents", forced[1], enabled
             .filter((d) => d.id !== previous)
             .map((d) => d.id)
-            .join("、")}`,
+            .join("、")),
         );
       }
       if (target.id === previous) {
-        throw new Error(`${this.agentLabel(previous)} 已经是这个任务的主导`);
+        throw new Error(t("alreadyLeadsThisTask", this.agentLabel(previous)));
       }
       this.pendingHandoffs.delete(group.groupId);
       void this.pool.cancelSession(buildSessionKey(previous, `${group.groupId}__lead`)).catch(() => false);
@@ -3078,10 +3090,13 @@ export class AgentHubServer {
 
     const ledger = this.getOrCreateLedger(group.groupId);
     let promptDerivedTitle: string | undefined;
-    if (/^(任务\s*\d+|新任务|默认任务)$/.test(group.title) && ledger.getAllTurns().length === 0) {
+    const isDefaultTitle = typeof group.defaultTitleNumber === "number" ||
+      (group.defaultTitleNumber === undefined && /^(任务\s*\d+|新任务|默认任务)$/.test(group.title));
+    if (isDefaultTitle && ledger.getAllTurns().length === 0) {
       group.title = autoTitleFromPrompt(
-        displayUserText || (savedImages[0]?.name ? `图片: ${savedImages[0].name}` : "图片分析"),
+        displayUserText || (savedImages[0]?.name ? t("imageTitle", savedImages[0].name) : t("imageAnalysis")),
       );
+      group.defaultTitleNumber = null;
       promptDerivedTitle = group.title;
       group.updatedAt = Date.now();
       this.broadcast({
@@ -3258,7 +3273,7 @@ export class AgentHubServer {
       throw new Error(`Unknown session: ${input.sessionKey}`);
     }
     if (this.groups.get(session.groupId)?.archived) {
-      throw new Error("这个任务已归档，先恢复再发消息");
+      throw new Error(t("thisTaskIsArchivedRestoreItBefore"));
     }
 
     const streamKey = `sub:${session.sessionKey}`;
@@ -3681,7 +3696,8 @@ export class AgentHubServer {
         }
         const theme = reqUrl.searchParams.get("theme") || undefined;
         const skin = reqUrl.searchParams.get("skin") || undefined;
-        const html = buildArtifactHtmlDocument(artifact, { theme, skin });
+        const locale = matchLocale(reqUrl.searchParams.get("lang") ?? undefined) ?? getLocale();
+        const html = withLocale(locale, () => buildArtifactHtmlDocument(artifact, { theme, skin }));
         res.writeHead(200, {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store",
@@ -3873,6 +3889,8 @@ export class AgentHubServer {
         }
         res.writeHead(200, {
           "Content-Type": "text/markdown; charset=utf-8",
+          "Content-Language": getLocale(),
+          Vary: "Accept-Language",
           "Content-Disposition": `attachment; filename="rtm-export.md"; filename*=UTF-8''${encodeURIComponent(exported.filename)}`,
           "Cache-Control": "no-store",
         });
@@ -4110,7 +4128,7 @@ export class AgentHubServer {
       if (method === "GET" && pathname === "/api/worktrees/diff") {
         const sessionKey = reqUrl.searchParams.get("sessionKey")?.trim();
         if (!sessionKey) {
-          throw new Error("缺少 sessionKey 参数");
+          throw new Error(t("missingSessionkeyParameter"));
         }
         const resolved = this.resolveSessionWorktreeTarget(sessionKey);
         const inspection = inspectWorktreeChanges(resolved.baseCwd, resolved.worktreePath);
@@ -4128,7 +4146,7 @@ export class AgentHubServer {
         const body = WorktreeMergeBodySchema.parse(await readJsonBody(req));
         const resolved = this.resolveSessionWorktreeTarget(body.sessionKey);
         if (resolved.session?.status === "busy" || resolved.session?.status === "starting") {
-          throw new Error("该子会话仍在运行，请先停止或等它完成后再合入");
+          throw new Error(t("thisSubsessionIsRunningStopItOr"));
         }
         const mergeResult = mergeSessionWorktree(resolved.baseCwd, resolved.worktreePath);
         let cleaned = false;
@@ -4144,7 +4162,7 @@ export class AgentHubServer {
         const body = WorktreeDiscardBodySchema.parse(await readJsonBody(req));
         const resolved = this.resolveSessionWorktreeTarget(body.sessionKey);
         if (resolved.session?.status === "busy" || resolved.session?.status === "starting") {
-          throw new Error("该子会话仍在运行，请先停止后再丢弃 worktree");
+          throw new Error(t("stopThisSubsessionBeforeDiscardingItsWorktree"));
         }
         await this.cleanupSessionWorktree(body.sessionKey, resolved.baseCwd, resolved.worktreePath);
         sendJson(res, 200, { ok: true, discarded: true });
@@ -4241,7 +4259,7 @@ export class AgentHubServer {
           const section = this.taskContext.getSection(groupId, key);
           if (!section) {
             const known = this.taskContext.get(groupId).sections.map((s) => s.key);
-            throw new Error(`没有名为「${key}」的分区。现有分区：${known.join("、") || "（无）"}`);
+            throw new Error(t("noSectionNamedAvailableSections", key, known.join("、") || t("none")));
           }
           sendJson(res, 200, { ok: true, section });
           return;
@@ -4254,7 +4272,7 @@ export class AgentHubServer {
         const body = ContextPutSchema.parse(await readJsonBody(req));
         // Sub-sessions only read: otherwise two of them could overwrite each other's context.
         if ((body.depth ?? 0) > 0) {
-          throw new Error("只有主导会话可以修改任务的共享上下文");
+          throw new Error(t("onlyTheLeadSessionCanEditShared"));
         }
         const groupId = this.resolveGroupId(body.groupId);
         const updatedBy = body.updatedBy && this.registry.isKnownAgent(body.updatedBy) ? body.updatedBy : "user";
@@ -4358,7 +4376,7 @@ export class AgentHubServer {
       if (method === "POST" && pathname === "/api/workflows/templates/apply") {
         const body = z.object({ groupId: z.string().min(1), name: z.string().min(1) }).parse(await readJsonBody(req));
         const template = this.workflowTemplates.get(body.name);
-        if (!template) throw new Error(`没有名为「${body.name}」的模板`);
+        if (!template) throw new Error(t("noTemplateNamed", body.name));
         sendJson(res, 200, { ok: true, workflow: this.workflows.save(body.groupId, template.steps, "user") });
         return;
       }
@@ -4471,7 +4489,7 @@ export class AgentHubServer {
         if (!def) throw new Error(`Unknown agent: ${input.id}`);
         const login = resolveAgentLoginCommand(def.id);
         if (!login) {
-          throw new Error(`RTM 不知道 ${def.label || def.id} 的登录命令，请按它的文档在终端里登录`);
+          throw new Error(t("unknownAgentSignInCommand", def.label || def.id));
         }
         const commandLine = openTerminalWindow(`RTM - ${def.label || def.id} login`, login.command, login.args);
         sendJson(res, 200, { ok: true, commandLine });
@@ -4537,7 +4555,7 @@ export class AgentHubServer {
 
   async start(preferredPort = 4317): Promise<string> {
     const server = http.createServer((req, res) => {
-      void this.handleRequest(req, res);
+      void withLocale(negotiateLocale(req.headers["accept-language"]), () => this.handleRequest(req, res));
     });
     this.server = server;
 

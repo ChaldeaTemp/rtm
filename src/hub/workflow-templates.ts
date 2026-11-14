@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 import fs from "node:fs";
 import path from "node:path";
 import type { WorkflowStep, WorkflowStepInput } from "../types.js";
@@ -72,10 +73,10 @@ export class WorkflowTemplateStore {
   /** Saves under `name`, replacing a template of the same name. */
   save(name: string, steps: WorkflowStep[]): WorkflowTemplateSummary[] {
     const clean = name.trim().slice(0, 60);
-    if (!clean) throw new Error("模板需要一个名称");
-    if (steps.length === 0) throw new Error("工作流还没有步骤，没有可保存的内容");
+    if (!clean) throw new Error(t("enterANameForTheTemplate"));
+    if (steps.length === 0) throw new Error(t("addAStepToTheWorkflowBefore"));
     const rest = this.load().filter((t) => t.name !== clean);
-    if (rest.length >= MAX_TEMPLATES) throw new Error(`最多保存 ${MAX_TEMPLATES} 个模板，先删掉不用的`);
+    if (rest.length >= MAX_TEMPLATES) throw new Error(t("youCanSaveUpToTemplatesDelete", MAX_TEMPLATES));
     this.store([...rest, { name: clean, steps: steps.map(stepToTemplate), updatedAt: Date.now() }]);
     return this.list();
   }

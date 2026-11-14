@@ -1,4 +1,9 @@
 import {
+  apiFetch, displayMessageSender, displayMessageText, displayTaskTitle, getLanguagePreference, getLocale,
+  localizeDocument, setLanguagePreference, th, t,
+} from "./i18n.js";
+
+import {
   renderMarkdown,
   highlightCode,
   renderUnifiedDiff,
@@ -155,7 +160,7 @@ function escapeHtml(value) {
 
 function formatTime(ts) {
   if (!ts) return "";
-  return new Date(ts).toLocaleTimeString([], {
+  return new Date(ts).toLocaleTimeString(getLocale(), {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
@@ -194,19 +199,19 @@ function refreshHeaderMetrics() {
     if (sess && sess.usage && sess.usage.maxTokens) {
       const used = sess.usage.usedTokens || 0;
       const pct = Math.min(100, Math.round((used / sess.usage.maxTokens) * 100));
-      els.liveContextPill.textContent = `上下文 ${formatTokens(used)} / ${formatTokens(sess.usage.maxTokens)} (${pct}%)`;
+      els.liveContextPill.textContent = t("context2", formatTokens(used), formatTokens(sess.usage.maxTokens), pct);
     } else if (sess && sess.contextBreakdown) {
       const inj =
         (sess.contextBreakdown.sharedRulesTokens || 0) +
         (sess.contextBreakdown.skillsIndexTokens || 0) +
         (sess.contextBreakdown.handoffTokens || 0);
       const sessTotal = sess.tokenTotals?.totalTokens || 0;
-      els.liveContextPill.textContent = `注入 ${formatTokens(inj)} · 消耗 ${formatTokens(sessTotal)} tok`;
+      els.liveContextPill.textContent = t("injectedUsedTokens", formatTokens(inj), formatTokens(sessTotal));
     } else {
       const group = getActiveGroup();
       const budget = group ? STATE.resourceBudgets.find((b) => b.agent === group.leadAgent) : null;
       els.liveContextPill.textContent = budget
-        ? `首轮约 ${formatTokens(budget.firstTurnInjectionTokens)} tok`
+        ? t("firstTurnTokens", formatTokens(budget.firstTurnInjectionTokens))
         : "0 tok";
     }
   }
@@ -253,8 +258,9 @@ function agentName(agentId) {
 // 服务端给的发送者标签以 id 开头（如 "codex 委派"），显示时换成名称
 function senderLabelText(msg) {
   const label = msg.senderLabel || "";
-  if (msg.agent && label.startsWith(msg.agent)) return agentName(msg.agent) + label.slice(msg.agent.length);
-  return label;
+  if (msg.agent && label === msg.agent) return agentName(msg.agent);
+  if (msg.agent && label === msg.agent + " 委派") return t("delegatedBy", agentName(msg.agent));
+  return displayMessageSender(msg);
 }
 
 function agentTagHtml(agentId, text) {
@@ -277,7 +283,7 @@ function applyDefaultLead(msg) {
 function renderLeadBadge(group) {
   if (!els.leadSwitcher) return;
   const lead = group?.leadAgent;
-  els.leadSwitcher.innerHTML = '<span class="lead-switch-label">主导</span>';
+  els.leadSwitcher.innerHTML = '<span class="lead-switch-label">' + th("lead") + '</span>';
   if (!lead) return;
   const badge = document.createElement("span");
   badge.className = "lead-pill active is-static";
@@ -285,7 +291,7 @@ function renderLeadBadge(group) {
   applyAgentColorVar(badge, lead);
   badge.textContent = agentName(lead);
   els.leadSwitcher.appendChild(badge);
-  els.leadSwitcher.title = `这个任务由 ${agentName(lead)} 主导。要换人，直接在对话里让它交接给其他 Agent`;
+  els.leadSwitcher.title = t("leadsThisTaskToSwitchLeadsAsk", agentName(lead));
 }
 
 function renderAgentControls() {
@@ -507,7 +513,7 @@ function warmGroupSession(groupId) {
   if (warmedGroupLeads.has(key)) return;
   warmedGroupLeads.add(key);
   try {
-    fetch("/api/sessions/warm", {
+    apiFetch("/api/sessions/warm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ groupId }),
@@ -576,9 +582,9 @@ function currentSkinName() {
 }
 
 function buildArtifactUrl(artifactId) {
-  const theme = currentThemeName();
-  const skin = currentSkinName();
-  return `/artifacts/${encodeURIComponent(artifactId)}?theme=${encodeURIComponent(theme)}&skin=${encodeURIComponent(skin)}`;
+  const query = new URLSearchParams({ theme: currentThemeName(), skin: currentSkinName() });
+  if (STATE.artifacts.get(artifactId)?.kind === "mermaid") query.set("lang", getLocale());
+  return `/artifacts/${encodeURIComponent(artifactId)}?${query}`;
 }
 
 function refreshThemeSensitiveFrames() {
@@ -636,8 +642,8 @@ function applyMemoryStatus(memory) {
   }
   const gb = memory.availableMB !== undefined ? (memory.availableMB / 1024).toFixed(1) : "?";
   chip.className = `mem-chip ${memory.level}`;
-  chip.textContent = memory.level === "critical" ? "内存告急" : "内存紧张";
-  chip.title = `系统可用内存只剩约 ${gb} GB。工作流已改为一次只跑一步，空闲的子会话会提前休眠。建议关掉不用的程序，否则后端可能被系统终止。`;
+  chip.textContent = memory.level === "critical" ? t("memoryCritical") : t("memoryLow");
+  chip.title = t("memoryWarning", gb);
 }
 
 function getMemoryStatus() {
@@ -648,6 +654,15 @@ function getMemoryStatus() {
 function applyHubSettings(settings) {
   if (!settings) return;
   STATE.settings = { ...STATE.settings, ...settings };
+  const language = document.getElementById("languageSelect");
+  language.value = getLanguagePreference();
+  language.onchange = () => {
+    setLanguagePreference(language.value);
+    applyLanguage();
+  };
+  window.addEventListener("languagechange", () => {
+    if (!getLanguagePreference()) applyLanguage();
+  });
   const toggle = document.getElementById("autoTitleToggle");
   if (toggle) toggle.checked = Boolean(STATE.settings.autoTitle);
   const parallel = document.getElementById("workflowParallelSelect");
@@ -658,16 +673,16 @@ function applyHubSettings(settings) {
 
 async function saveHubSettings(patch) {
   try {
-    const res = await fetch("/api/settings", {
+    const res = await apiFetch("/api/settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
     });
     const data = await res.json();
     if (res.ok && data.settings) applyHubSettings(data.settings);
-    else appendLog(`保存设置失败: ${data.error || res.status}`);
+    else appendLog(t("couldNotSaveSettings", data.error || res.status));
   } catch (err) {
-    appendLog(`保存设置失败: ${err.message}`);
+    appendLog(t("couldNotSaveSettings", err.message));
   }
 }
 
@@ -703,6 +718,28 @@ function closeSettings() {
   if (els.settingsBackdrop) els.settingsBackdrop.hidden = true;
 }
 
+function applyLanguage() {
+  localizeDocument();
+  document.getElementById("languageSelect").value = getLanguagePreference();
+  els.themeToggleBtn.textContent = document.body.classList.contains("dark") ? t("light") : t("dark");
+  els.wsDot.title = t(els.wsDot.classList.contains("ok")
+    ? "websocketConnected"
+    : CONN.lostAt ? "websocketReconnecting" : "websocketStatus");
+  applyMemoryStatus(STATE.memory);
+  renderConnBanner();
+  clearInterval(titleBlinkTimer);
+  titleBlinkTimer = null;
+  renderAll();
+  document.querySelectorAll("[data-art-reload]").forEach((button) => { button.textContent = t("refresh"); });
+  document.querySelectorAll("[data-art-open]").forEach((button) => { button.textContent = t("openInANewWindow"); });
+  document.querySelectorAll("iframe.artifact-frame[data-artifact-frame]").forEach((frame) => {
+    if (STATE.artifacts.get(frame.dataset.artifactFrame)?.kind === "mermaid") {
+      frame.src = buildArtifactUrl(frame.dataset.artifactFrame);
+    }
+  });
+  if (!els.quickSwitcherBackdrop.hidden) renderQuickSwitcherList();
+}
+
 function initSettingsDialog() {
   const btn = document.getElementById("settingsBtn");
   if (!btn || !els.settingsBackdrop) return;
@@ -722,6 +759,15 @@ function initSettingsDialog() {
   document.querySelectorAll("#skinSeg button").forEach((b) => {
     b.onclick = () => applySkin(b.dataset.skin);
   });
+  const language = document.getElementById("languageSelect");
+  language.value = getLanguagePreference();
+  language.onchange = () => {
+    setLanguagePreference(language.value);
+    applyLanguage();
+  };
+  window.addEventListener("languagechange", () => {
+    if (!getLanguagePreference()) applyLanguage();
+  });
   const toggle = document.getElementById("autoTitleToggle");
   if (toggle) toggle.onchange = () => void saveHubSettings({ autoTitle: toggle.checked });
   const parallel = document.getElementById("workflowParallelSelect");
@@ -733,7 +779,7 @@ function initSettingsDialog() {
 function applyTheme(dark) {
   document.body.classList.toggle("dark", dark);
   document.documentElement.dataset.theme = dark ? "dark" : "light";
-  els.themeToggleBtn.textContent = dark ? "浅色" : "深色";
+  els.themeToggleBtn.textContent = dark ? t("light") : t("dark");
   refreshThemeSensitiveFrames();
   try {
     localStorage.setItem("agent-hub-theme", dark ? "dark" : "light");
@@ -743,15 +789,15 @@ function applyTheme(dark) {
 }
 
 async function createTaskGroup(opts = {}) {
-  const res = await fetch("/api/groups", {
+  const res = await apiFetch("/api/groups", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(opts),
   });
   const data = await res.json();
   if (!res.ok || data.ok === false) {
-    appendLog(`创建任务失败: ${data.error || res.status}`);
-    void showConfirmModal({ title: "任务没有创建", message: data.error || `HTTP ${res.status}`, confirmText: "知道了" });
+    appendLog(t("couldNotCreateTask", data.error || res.status));
+    void showConfirmModal({ title: t("taskCreationFailed"), message: data.error || `HTTP ${res.status}`, confirmText: t("ok") });
     return false;
   }
   STATE.taskGroups.set(data.group.groupId, data.group);
@@ -770,7 +816,7 @@ function openAppModal(opts) {
   return new Promise((resolve) => {
     const isPrompt = opts.mode === "prompt";
     els.appModalCornerTag.textContent = isPrompt ? "input" : "confirm";
-    els.appModalTitle.textContent = opts.title || "确认操作";
+    els.appModalTitle.textContent = opts.title || t("confirmAction");
     if (opts.message) {
       els.appModalMessage.hidden = false;
       els.appModalMessage.textContent = opts.message;
@@ -788,8 +834,8 @@ function openAppModal(opts) {
       els.appModalInput.value = "";
     }
 
-    els.appModalConfirmBtn.textContent = opts.confirmText || "确定";
-    if (els.appModalCancelBtn) els.appModalCancelBtn.textContent = opts.cancelText || "取消";
+    els.appModalConfirmBtn.textContent = opts.confirmText || t("confirm");
+    if (els.appModalCancelBtn) els.appModalCancelBtn.textContent = opts.cancelText || t("cancel");
     els.appModalConfirmBtn.className = `alma-btn ${opts.danger ? "alma-btn-danger" : "alma-btn-primary"}`;
     els.appModalBackdrop.hidden = false;
 
@@ -845,14 +891,14 @@ function showConfirmModal(opts) {
 
 async function renameTaskGroup(group) {
   const next = await showPromptModal({
-    title: "重命名任务分组",
-    message: "输入新的任务名称：",
-    defaultValue: group.title,
-    placeholder: "任务名称",
-    confirmText: "保存",
+    title: t("renameTaskGroup"),
+    message: t("enterANewTaskName"),
+    defaultValue: displayTaskTitle(group),
+    placeholder: t("taskName"),
+    confirmText: t("save"),
   });
-  if (!next || !next.trim() || next.trim() === group.title) return;
-  await fetch("/api/groups/update", {
+  if (!next || !next.trim() || next.trim() === displayTaskTitle(group)) return;
+  await apiFetch("/api/groups/update", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ groupId: group.groupId, title: next.trim() }),
@@ -862,12 +908,12 @@ async function renameTaskGroup(group) {
 async function toggleArchiveTaskGroup(group) {
   if (!group) return;
   const nextArchived = !group.archived;
-  await fetch("/api/groups/update", {
+  await apiFetch("/api/groups/update", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ groupId: group.groupId, archived: nextArchived }),
   });
-  appendLog(nextArchived ? `已归档任务「${group.title}」` : `已恢复任务「${group.title}」`);
+  appendLog(nextArchived ? t("archivedTask", displayTaskTitle(group)) : t("restoredTask", displayTaskTitle(group)));
   // 恢复后回到活跃列表，否则刚恢复的任务会从眼前消失
   if (!nextArchived && STATE.showArchivedGroups) {
     STATE.showArchivedGroups = false;
@@ -885,13 +931,13 @@ async function toggleArchiveTaskGroup(group) {
 
 async function deleteTaskGroup(group) {
   const ok = await showConfirmModal({
-    title: "删除任务分组",
-    message: `确认删除任务「${group.title}」并关闭其下的所有会话？此操作不可撤销。`,
-    confirmText: "确认删除",
+    title: t("deleteTaskGroup"),
+    message: t("deleteAndCloseAllItsSessionsThis", displayTaskTitle(group)),
+    confirmText: t("deleteTask"),
     danger: true,
   });
   if (!ok) return;
-  await fetch("/api/groups/delete", {
+  await apiFetch("/api/groups/delete", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ groupId: group.groupId }),
@@ -900,7 +946,7 @@ async function deleteTaskGroup(group) {
 
 async function cancelSession(sessionKey) {
   if (!sessionKey) return;
-  await fetch("/api/peer/cancel", {
+  await apiFetch("/api/peer/cancel", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ sessionKey }),
@@ -913,7 +959,7 @@ function projectKey(dir) {
 
 function projectName(dir) {
   const norm = String(dir || "").replace(/\\/g, "/").replace(/\/+$/, "");
-  return norm.slice(norm.lastIndexOf("/") + 1) || norm || "未指定目录";
+  return norm.slice(norm.lastIndexOf("/") + 1) || norm || t("noDirectorySelected");
 }
 
 function applyProjects(projects) {
@@ -922,7 +968,7 @@ function applyProjects(projects) {
   const list = document.getElementById("projectChoices");
   if (list) {
     list.innerHTML = projects
-      .map((p) => `<option value="${escapeHtml(p.path)}">${escapeHtml(p.name)}（${p.activeTasks} 个任务）</option>`)
+      .map((p) => `<option value="${escapeHtml(p.path)}">${th("tasks2", p.name, p.activeTasks)}</option>`)
       .join("");
   }
 }
@@ -945,7 +991,7 @@ function toggleProjectCollapsed(key) {
 }
 
 async function updateTaskGroup(patch) {
-  const res = await fetch("/api/groups/update", {
+  const res = await apiFetch("/api/groups/update", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
@@ -973,41 +1019,41 @@ function openDirsDialog(group) {
 
   const render = () => {
     backdrop.innerHTML = `
-      <div class="alma-modal-card dirs-card" role="dialog" aria-modal="true" aria-label="任务目录">
-        <h3 class="alma-modal-title">「${escapeHtml(group.title)}」的目录</h3>
+      <div class="alma-modal-card dirs-card" role="dialog" aria-modal="true" aria-label="${th("taskDirectories")}">
+        <h3 class="alma-modal-title">${th("directoriesFor", displayTaskTitle(group))}</h3>
         <div class="dirs-field">
-          <label>工作目录</label>
+          <label>${th("workingDirectory")}</label>
           <div class="dirs-row">
             <input id="dirsCwdInput" class="text-input" type="text" list="projectChoices" value="${escapeHtml(draft.cwd)}" />
-            <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-dirs-pick="cwd">浏览</button>
+            <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-dirs-pick="cwd">${th("browse")}</button>
           </div>
         </div>
         <div class="dirs-field">
-          <label>附加目录<span class="dirs-hint">Agent 也可以读写这些目录，适合一个任务跨多个项目</span></label>
+          <label>${th("additionalDirectories")}<span class="dirs-hint">${th("agentsCanAlsoReadAndWriteThese")}</span></label>
           ${
             draft.extraDirs.length === 0
-              ? '<div class="insp-empty">还没有附加目录</div>'
+              ? '<div class="insp-empty">' + th("noAdditionalDirectoriesYet") + '</div>'
               : draft.extraDirs
                   .map(
                     (dir, i) => `
               <div class="dirs-row">
                 <span class="dirs-path" title="${escapeHtml(dir)}">${escapeHtml(dir)}</span>
-                <button type="button" class="mini-icon-btn" data-dirs-remove="${i}" title="移除">×</button>
+                <button type="button" class="mini-icon-btn" data-dirs-remove="${i}" title="${th("remove")}">×</button>
               </div>`,
                   )
                   .join("")
           }
           <div class="dirs-row">
-            <input id="dirsAddInput" class="text-input" type="text" list="projectChoices" placeholder="粘贴路径，或点浏览选择" />
-            <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-dirs-pick="extra">浏览</button>
-            <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" id="dirsAddBtn">添加</button>
+            <input id="dirsAddInput" class="text-input" type="text" list="projectChoices" placeholder="${th("pasteAPathOrClickBrowse")}" />
+            <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-dirs-pick="extra">${th("browse")}</button>
+            <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" id="dirsAddBtn">${th("add")}</button>
           </div>
         </div>
-        ${hasSession ? '<div class="dirs-note">保存后会关闭这个任务当前的会话；下一条消息会在新目录里重新启动，并带上之前的对话摘要。</div>' : ""}
+        ${hasSession ? '<div class="dirs-note">' + th("savingClosesThisTasksCurrentSessionsThe") + '</div>' : ""}
         <div id="dirsError" class="wf-error" hidden></div>
         <div class="alma-modal-actions">
-          <button type="button" class="alma-btn" id="dirsCancelBtn">取消</button>
-          <button type="button" class="alma-btn alma-btn-primary" id="dirsSaveBtn">保存</button>
+          <button type="button" class="alma-btn" id="dirsCancelBtn">${th("cancel")}</button>
+          <button type="button" class="alma-btn alma-btn-primary" id="dirsSaveBtn">${th("save")}</button>
         </div>
       </div>`;
     const cwdInput = backdrop.querySelector("#dirsCwdInput");
@@ -1057,7 +1103,7 @@ function openDirsDialog(group) {
         await updateTaskGroup({ groupId: group.groupId, cwd: draft.cwd.trim() || undefined, extraDirs: draft.extraDirs });
         close();
         renderAll();
-        appendLog(`任务「${group.title}」的目录已更新`);
+        appendLog(t("updatedDirectoriesFor", displayTaskTitle(group)));
       } catch (err) {
         const box = backdrop.querySelector("#dirsError");
         box.hidden = false;
@@ -1081,8 +1127,8 @@ function renderSidebarGroups() {
   if (els.toggleArchivedBtn) {
     els.toggleArchivedBtn.hidden = archivedCount === 0 && !STATE.showArchivedGroups;
     els.toggleArchivedBtn.textContent = STATE.showArchivedGroups
-      ? `活跃 ${activeCount}`
-      : `归档 ${archivedCount}`;
+      ? t("active", activeCount)
+      : t("archivedTaskCount", archivedCount);
     els.toggleArchivedBtn.classList.toggle("active", STATE.showArchivedGroups);
   }
 
@@ -1091,7 +1137,7 @@ function renderSidebarGroups() {
     if (query) {
       const subs = getGroupSubSessions(g.groupId);
       const haystack = [
-        g.title,
+        displayTaskTitle(g),
         g.leadAgent,
         g.cwd || "",
         ...subs.map((s) => `${s.agent} ${s.label || s.name}`),
@@ -1108,10 +1154,10 @@ function renderSidebarGroups() {
     const emptyNote = document.createElement("div");
     emptyNote.className = "empty-note";
     emptyNote.textContent = query
-      ? `没有匹配「${STATE.groupSearchQuery.trim()}」的任务`
+      ? t("noTasksMatch", STATE.groupSearchQuery.trim())
       : STATE.showArchivedGroups
-        ? "暂无已归档任务"
-        : "暂无活跃任务";
+        ? t("noArchivedTasks")
+        : t("noActiveTasks");
     els.groupList.appendChild(emptyNote);
     return;
   }
@@ -1151,7 +1197,7 @@ function renderSidebarGroups() {
           const add = document.createElement("button");
           add.type = "button";
           add.className = "mini-icon-btn";
-          add.title = `在 ${projectName(group.cwd)} 下新建任务`;
+          add.title = t("createATaskIn", projectName(group.cwd));
           add.textContent = "+";
           const projectCwd = group.cwd;
           add.onclick = (e) => {
@@ -1184,7 +1230,7 @@ function renderSidebarGroups() {
     statusDot.className = `dot ${busy ? "busy" : "idle"}`;
     const titleEl = document.createElement("span");
     titleEl.className = "group-title";
-    titleEl.textContent = group.title;
+    titleEl.textContent = displayTaskTitle(group);
     titleWrap.appendChild(statusDot);
     titleWrap.appendChild(titleEl);
 
@@ -1193,7 +1239,7 @@ function renderSidebarGroups() {
     const archiveBtn = document.createElement("button");
     archiveBtn.type = "button";
     archiveBtn.className = "mini-icon-btn";
-    archiveBtn.title = group.archived ? "取消归档" : "归档任务";
+    archiveBtn.title = group.archived ? t("unarchiveTask") : t("archiveTask");
     archiveBtn.textContent = group.archived ? "↺" : "▣";
     archiveBtn.onclick = (e) => {
       e.stopPropagation();
@@ -1202,7 +1248,7 @@ function renderSidebarGroups() {
     const renameBtn = document.createElement("button");
     renameBtn.type = "button";
     renameBtn.className = "mini-icon-btn";
-    renameBtn.title = "重命名任务";
+    renameBtn.title = t("renameTask");
     renameBtn.textContent = "✎";
     renameBtn.onclick = (e) => {
       e.stopPropagation();
@@ -1211,7 +1257,7 @@ function renderSidebarGroups() {
     const delBtn = document.createElement("button");
     delBtn.type = "button";
     delBtn.className = "mini-icon-btn del";
-    delBtn.title = "删除任务";
+    delBtn.title = t("deleteTask2");
     delBtn.textContent = "✕";
     delBtn.onclick = (e) => {
       e.stopPropagation();
@@ -1231,10 +1277,10 @@ function renderSidebarGroups() {
     meta.className = "group-meta";
     meta.innerHTML = `
       ${agentTagHtml(group.leadAgent, `★ ${agentName(group.leadAgent)}`)}
-      ${group.archived ? `<span class="archived-pill">归档于 ${escapeHtml(new Date(group.archivedAt || group.updatedAt).toLocaleDateString())}</span>` : ""}
-      ${(group.extraDirs || []).length > 0 ? `<span class="archived-pill" title="${escapeHtml(group.extraDirs.join("\n"))}">+${group.extraDirs.length} 个目录</span>` : ""}
-      ${activeModel ? `<span class="model-badge-pill" title="当前/预设模型">${escapeHtml(activeModel)}</span>` : ""}
-      ${subs.length > 0 ? `<span>${subs.length} 个子会话</span>` : ""}
+      ${group.archived ? `<span class="archived-pill">${th("archivedOn", new Date(group.archivedAt || group.updatedAt).toLocaleDateString(getLocale()))}</span>` : ""}
+      ${(group.extraDirs || []).length > 0 ? `<span class="archived-pill" title="${escapeHtml(group.extraDirs.join("\n"))}">${th("moreDirs", group.extraDirs.length)}</span>` : ""}
+      ${activeModel ? `<span class="model-badge-pill" title="${th("currentOrPresetModel")}">${escapeHtml(activeModel)}</span>` : ""}
+      ${subs.length > 0 ? `<span>${th("subsessions", subs.length)}</span>` : ""}
     `;
 
     card.appendChild(top);
@@ -1251,7 +1297,7 @@ function renderSidebarGroups() {
       leadNode.innerHTML = `
         <span class="tree-node-left">
           <span class="dot ${busy ? "busy" : "idle"}"></span>
-          <span class="tree-node-label">${escapeHtml(agentName(group.leadAgent))} · 主导</span>
+          <span class="tree-node-label">${th("lead2", agentName(group.leadAgent))}</span>
         </span>
       `;
       leadNode.onclick = (e) => {
@@ -1319,7 +1365,7 @@ function renderSidebarGroups() {
         const foldBtn = document.createElement("button");
         foldBtn.type = "button";
         foldBtn.className = `tree-fold-btn${isExpanded ? " expanded" : ""}`;
-        foldBtn.innerHTML = `<span class="tree-fold-arrow">${isExpanded ? "▾" : "▸"}</span><span>已完成 (${doneSubs.length})</span>`;
+        foldBtn.innerHTML = `<span class="tree-fold-arrow">${isExpanded ? "▾" : "▸"}</span><span>${th("completedSubsessions", doneSubs.length)}</span>`;
         foldBtn.onclick = (e) => {
           e.stopPropagation();
           if (STATE.expandedDoneGroups.has(group.groupId)) {
@@ -1374,7 +1420,7 @@ async function ensureAgentModelsLoaded(agentId, force = false) {
   STATE.probingModelAgents.add(agentId);
   renderModelSelectorBar();
   try {
-    const res = await fetch(
+    const res = await apiFetch(
       `/api/models?agent=${encodeURIComponent(agentId)}${force ? "&refresh=1" : ""}`,
     );
     const data = await res.json();
@@ -1382,15 +1428,15 @@ async function ensureAgentModelsLoaded(agentId, force = false) {
       STATE.modelCatalogs.set(agentId, data.catalog);
       if (force) {
         appendLog(
-          `已刷新模型 [${agentId}]: ${data.catalog.models?.length || 0} 个模型` +
-            (data.catalog.effort ? ` · 支持思考强度 (${data.catalog.effort.configId})` : ""),
+          t("refreshedModelsForAvailable", agentId, data.catalog.models?.length || 0) +
+            (data.catalog.effort ? t("reasoningEffortSupported", data.catalog.effort.configId) : ""),
         );
       }
     } else if (force) {
-      appendLog(`探测模型失败 [${agentId}]: ${data.error || res.status}`);
+      appendLog(t("modelProbeFailedFor", agentId, data.error || res.status));
     }
   } catch (err) {
-    if (force) appendLog(`探测模型异常 [${agentId}]: ${err.message}`);
+    if (force) appendLog(t("modelProbeErrorFor", agentId, err.message));
   } finally {
     STATE.probingModelAgents.delete(agentId);
     renderModelSelectorBar();
@@ -1413,7 +1459,7 @@ function renderModelSelectorBar() {
 
   if (subMode) {
     if (!subSession) {
-      els.modelSelect.innerHTML = '<option value="">子会话未就绪</option>';
+      els.modelSelect.innerHTML = '<option value="">' + th("subsessionIsNotReady") + '</option>';
       els.modelSelect.disabled = true;
       els.effortSelect.hidden = true;
       if (els.refreshModelsBtn) els.refreshModelsBtn.disabled = true;
@@ -1458,14 +1504,14 @@ function renderModelSelectorBar() {
   if (!isSubTarget) {
     const defOpt = document.createElement("option");
     defOpt.value = "";
-    const autoHint = agentMeta?.defaultModel || catalog?.currentModelId || "跟随 CLI";
+    const autoHint = agentMeta?.defaultModel || catalog?.currentModelId || t("useCliDefault");
     defOpt.textContent =
-      isProbing && models.length === 0 ? "加载模型列表中..." : `默认 (${autoHint})`;
+      isProbing && models.length === 0 ? t("loadingModels") : t("default", autoHint);
     els.modelSelect.appendChild(defOpt);
   } else if (models.length === 0) {
     const singleOpt = document.createElement("option");
     singleOpt.value = selectedModel || "";
-    singleOpt.textContent = selectedModel || (isProbing ? "加载模型列表中..." : "默认模型");
+    singleOpt.textContent = selectedModel || (isProbing ? t("loadingModels") : t("defaultModel"));
     els.modelSelect.appendChild(singleOpt);
   }
 
@@ -1494,7 +1540,7 @@ function renderModelSelectorBar() {
     if (!isSubTarget) {
       const defEff = document.createElement("option");
       defEff.value = "";
-      defEff.textContent = `思考: 默认 (${agentMeta?.defaultEffort || effortCfg.currentValue || "auto"})`;
+      defEff.textContent = t("effortDefault", agentMeta?.defaultEffort || effortCfg.currentValue || "auto");
       els.effortSelect.appendChild(defEff);
     }
     const seenEff = new Set();
@@ -1503,13 +1549,13 @@ function renderModelSelectorBar() {
       seenEff.add(o.id);
       const opt = document.createElement("option");
       opt.value = o.id;
-      opt.textContent = `思考: ${o.name || o.id}`;
+      opt.textContent = t("effort", o.name || o.id);
       els.effortSelect.appendChild(opt);
     }
     if (selectedEffort && !seenEff.has(selectedEffort)) {
       const extraEff = document.createElement("option");
       extraEff.value = selectedEffort;
-      extraEff.textContent = `思考: ${selectedEffort}`;
+      extraEff.textContent = t("effort", selectedEffort);
       els.effortSelect.appendChild(extraEff);
     }
     els.effortSelect.value = selectedEffort;
@@ -1532,22 +1578,22 @@ function renderStageHeaderAndTabs() {
   const subSessionKey = subMode ? STATE.activeStreamKey.slice(4) : null;
   const subSession = subSessionKey ? STATE.sessions.get(subSessionKey) : null;
 
-  els.stageTaskTitle.textContent = group.title;
+  els.stageTaskTitle.textContent = displayTaskTitle(group);
   if (subMode && subSession) {
-    els.streamBadge.textContent = `子会话 · ${agentName(subSession.agent)} (${subSession.label || subSession.name})`;
+    els.streamBadge.textContent = t("subsession", agentName(subSession.agent), subSession.label || subSession.name);
     els.streamBadge.className = "stream-badge sub";
     els.leadSwitcher.hidden = true;
     els.backToLeadBtn.hidden = false;
-    els.composerLabel.textContent = `直连子会话 · ${agentName(subSession.agent)}:${subSession.label || subSession.name}`;
-    els.promptInput.placeholder = `给子会话 ${agentName(subSession.agent)} 发消息（输入 / 查命令，@ 引用文件）`;
+    els.composerLabel.textContent = t("directSubsession", agentName(subSession.agent), subSession.label || subSession.name);
+    els.promptInput.placeholder = t("messageSubsessionForCommandsForFiles", agentName(subSession.agent));
   } else {
     // 主导是谁已由旁边的主导标记表明，这里不再重复
     els.streamBadge.textContent = "";
     els.streamBadge.className = "stream-badge";
     els.leadSwitcher.hidden = false;
     els.backToLeadBtn.hidden = true;
-    els.composerLabel.textContent = `${group.title} · 主导 ${agentName(group.leadAgent)}`;
-    els.promptInput.placeholder = `给 ${agentName(group.leadAgent)} 发消息（输入 / 查命令，@ 引用文件）`;
+    els.composerLabel.textContent = t("lead3", displayTaskTitle(group), agentName(group.leadAgent));
+    els.promptInput.placeholder = t("messageForCommandsForFiles", agentName(group.leadAgent));
   }
 
   renderLeadBadge(group);
@@ -1572,7 +1618,7 @@ function renderStageHeaderAndTabs() {
     const leadTab = document.createElement("button");
     leadTab.type = "button";
     leadTab.className = `session-tab${STATE.activeStreamKey === leadStreamKey ? " active" : ""}`;
-    leadTab.innerHTML = `<span class="dot ${isGroupBusy(group.groupId) ? "busy" : "idle"}"></span>${escapeHtml(agentName(group.leadAgent))} · 主导`;
+    leadTab.innerHTML = `<span class="dot ${isGroupBusy(group.groupId) ? "busy" : "idle"}"></span>${th("lead2", agentName(group.leadAgent))}`;
     leadTab.onclick = () => selectGroup(group.groupId, leadStreamKey);
     els.sessionTabs.appendChild(leadTab);
 
@@ -1617,8 +1663,8 @@ function renderStageHeaderAndTabs() {
     Boolean(activeKey && isSessionRunning(activeKey));
   // 忙的时候仍然可以发：默认排队，等这一轮结束再送出；「引导」则打断当前这一轮
   els.sendBtn.disabled = false;
-  els.sendBtn.textContent = isBusy ? "排队" : "发送";
-  els.sendBtn.title = isBusy ? "这一轮结束后自动发送（Enter）" : "";
+  els.sendBtn.textContent = isBusy ? t("queue") : t("send");
+  els.sendBtn.title = isBusy ? t("sendAutomaticallyAfterThisTurnEnter") : "";
   els.stopSessionBtn.hidden = !isBusy;
   if (els.steerBtn) els.steerBtn.hidden = !isBusy;
   // 页面级的「正在工作」提示：对话区顶部一条流动的细线
@@ -1682,9 +1728,9 @@ function syncAttentionIndicators(notifyPayload = null) {
   }
 
   const parts = [];
-  if (permCount > 0) parts.push(`${permCount} 权限`);
-  if (qCount > 0) parts.push(`${qCount} 问题`);
-  const summary = `⚠️ [${parts.join(" · ")}待确认]`;
+  if (permCount > 0) parts.push(t("permissions", permCount));
+  if (qCount > 0) parts.push(t("questions", qCount));
+  const summary = t("pending", parts.join(" · "));
   const isBackground = document.hidden || !document.hasFocus();
 
   if (isBackground) {
@@ -1694,7 +1740,7 @@ function syncAttentionIndicators(notifyPayload = null) {
       titleBlinkTimer = setInterval(() => {
         titleBlinkPhase = !titleBlinkPhase;
         document.title = titleBlinkPhase
-          ? "⚠️ Agent 正在等待你确认！"
+          ? t("anAgentIsWaitingForYourConfirmation")
           : `${summary} ${BASE_DOC_TITLE}`;
       }, 1000);
     }
@@ -1702,7 +1748,7 @@ function syncAttentionIndicators(notifyPayload = null) {
       playSoftAlertChime();
       if ("Notification" in window && Notification.permission === "granted") {
         try {
-          const n = new Notification("RoundTable Meeting 需要你的确认", {
+          const n = new Notification(t("roundtableMeetingNeedsYourConfirmation"), {
             body: notifyPayload.body,
             tag: "agent-hub-pending",
             renotify: true,
@@ -1750,10 +1796,10 @@ function renderPermissions() {
     row.className = "perm-row";
     row.innerHTML = `
       <div>
-        <strong class="mono">[需要确认]</strong>
-        ${grp ? `<span class="mono">${escapeHtml(grp.title)}</span> · ` : ""}
+        <strong class="mono">${th("confirmationRequired")}</strong>
+        ${grp ? `<span class="mono">${escapeHtml(displayTaskTitle(grp))}</span> · ` : ""}
         <span class="agent-tag" data-agent="${escapeHtml(p.agent)}">${escapeHtml(p.sessionKey)}</span>
-        请求执行：<strong>${escapeHtml(p.toolTitle)}</strong>
+        ${th("requestedAction")} <strong>${escapeHtml(p.toolTitle)}</strong>
       </div>
     `;
     const actions = document.createElement("div");
@@ -1764,14 +1810,14 @@ function renderPermissions() {
     const allowBtn = document.createElement("button");
     allowBtn.type = "button";
     allowBtn.className = "alma-btn alma-btn-primary alma-btn-sm";
-    allowBtn.textContent = allowOpt ? allowOpt.name : "允许";
+    allowBtn.textContent = allowOpt ? allowOpt.name : t("allow");
     allowBtn.onclick = () => resolvePerm(p.requestId, allowOpt ? allowOpt.optionId : "cancel");
     actions.appendChild(allowBtn);
 
     const denyBtn = document.createElement("button");
     denyBtn.type = "button";
     denyBtn.className = "alma-btn alma-btn-danger alma-btn-sm";
-    denyBtn.textContent = rejectOpt ? rejectOpt.name : "拒绝";
+    denyBtn.textContent = rejectOpt ? rejectOpt.name : t("deny");
     denyBtn.onclick = () => resolvePerm(p.requestId, rejectOpt ? rejectOpt.optionId : "cancel");
     actions.appendChild(denyBtn);
 
@@ -1781,7 +1827,7 @@ function renderPermissions() {
 }
 
 async function resolvePerm(requestId, optionId) {
-  await fetch("/api/permissions/resolve", {
+  await apiFetch("/api/permissions/resolve", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ requestId, optionId }),
@@ -1793,17 +1839,17 @@ function renderEmptyStage(group) {
   box.className = "alma-box empty-stage";
   box.innerHTML = `
     <div class="empty-inner">
-      <h2>${escapeHtml(agentName(group?.leadAgent || "claude"))} 已就绪</h2>
-      <p>直接发消息开始，或从下面选一个。</p>
+      <h2>${th("isReady", agentName(group?.leadAgent || "claude"))}</h2>
+      <p>${th("sendAMessageToGetStartedOr")}</p>
       <div class="starter-list">
-        <button type="button" class="starter-btn" data-starter="列出当前项目目录核心文件，并委派 codex 检查主要入口逻辑是否存在边界问题">
-          <span>梳理项目核心文件，并委派另一个 Agent 审查</span>
+        <button type="button" class="starter-btn" data-starter="${th("starterReviewPrompt")}">
+          <span>${th("identifyTheKeyProjectFilesAndHave")}</span>
         </button>
-        <button type="button" class="starter-btn" data-starter="调用 peer_list_agents 查看当前已接入的本地 Agent，并汇总状态报告">
-          <span>查看已接入的 Agent 状态</span>
+        <button type="button" class="starter-btn" data-starter="${th("starterStatusPrompt")}">
+          <span>${th("checkTheStatusOfConnectedAgents")}</span>
         </button>
-        <button type="button" class="starter-btn" data-starter="调用 ui_render_artifact 生成一个交互式的项目模块结构与 Token 消耗估算看板（HTML）">
-          <span>生成一个可交互的项目结构看板</span>
+        <button type="button" class="starter-btn" data-starter="${th("starterArtifactPrompt")}">
+          <span>${th("createAnInteractiveOverviewOfTheProject")}</span>
         </button>
       </div>
     </div>
@@ -1817,7 +1863,7 @@ function renderEmptyStage(group) {
   return box;
 }
 
-const WORKFLOW_STATUS_TEXT = { draft: "草稿，待发布", running: "运行中", completed: "已完成", failed: "未全部完成" };
+const WORKFLOW_STATUS_TEXT = { draft: "draftAwaitingPublication", running: "running", completed: "completed", failed: "incomplete" };
 
 // 主导调用 workflow_propose 之后，在那条回复下面放一张工作流预览；点一下去工作流页
 function buildWorkflowCardElement(msg) {
@@ -1829,17 +1875,17 @@ function buildWorkflowCardElement(msg) {
   const done = workflow.steps.filter((s) => s.status === "completed").length;
   const statusText =
     workflow.status === "running"
-      ? `运行中 ${done}/${workflow.steps.length}`
-      : WORKFLOW_STATUS_TEXT[workflow.status] || workflow.status;
+      ? t("workflowRunProgress", done, workflow.steps.length)
+      : t(WORKFLOW_STATUS_TEXT[workflow.status] || workflow.status);
   const agents = [...new Set(workflow.steps.map((s) => s.agent))];
   const shown = workflow.steps.slice(0, 5);
   const card = document.createElement("button");
   card.type = "button";
   card.className = `wf-card status-${workflow.status}`;
-  card.title = "打开工作流";
+  card.title = t("openWorkflow");
   card.innerHTML = `
     <div class="wf-card-head">
-      <span class="wf-card-title">工作流 · ${workflow.steps.length} 步</span>
+      <span class="wf-card-title">${th("workflowSteps", workflow.steps.length)}</span>
       <span class="wf-card-status">${escapeHtml(statusText)}</span>
     </div>
     <div class="wf-card-steps">
@@ -1848,11 +1894,11 @@ function buildWorkflowCardElement(msg) {
           (s) => `<span class="wf-card-step status-${escapeHtml(s.status)}"><span class="dot ${s.status === "running" ? "busy" : s.status === "completed" ? "completed" : s.status === "failed" ? "failed" : "idle"}"></span>${escapeHtml(s.name)}</span>`,
         )
         .join('<span class="wf-card-arrow">›</span>')}
-      ${workflow.steps.length > shown.length ? `<span class="wf-card-more">还有 ${workflow.steps.length - shown.length} 步</span>` : ""}
+      ${workflow.steps.length > shown.length ? `<span class="wf-card-more">${th("remainingSteps", workflow.steps.length - shown.length)}</span>` : ""}
     </div>
     <div class="wf-card-foot">
       <span class="wf-card-agents">${agents.map((a) => agentTagHtml(a)).join("")}</span>
-      <span class="wf-card-open">查看并发布 ›</span>
+      <span class="wf-card-open">${th("reviewAndPublish")}</span>
     </div>
   `;
   const groupId = msg.groupId;
@@ -1863,8 +1909,8 @@ function buildWorkflowCardElement(msg) {
   return card;
 }
 
-const TOOL_STATUS_TEXT = { pending: "等待中", in_progress: "进行中", completed: "完成", failed: "失败" };
-const TASK_STATUS_TEXT = { queued: "排队中", running: "进行中", completed: "已完成", failed: "失败", cancelled: "已取消" };
+const TOOL_STATUS_TEXT = { pending: "waiting", in_progress: "inProgress", completed: "complete", failed: "failed" };
+const TASK_STATUS_TEXT = { queued: "queued", running: "inProgress", completed: "completed", failed: "failed", cancelled: "cancelled" };
 
 function matchTasksForAssistantMessage(msg, nextAssistantTimestamp) {
   if (msg.role !== "assistant" || isSubStream(msg.streamKey)) return [];
@@ -1950,8 +1996,8 @@ function buildArtifactCardElement(artifact) {
         <span title="${escapeHtml(artifact.title)}">${escapeHtml(artifact.title)}</span>
       </div>
       <div class="artifact-actions">
-        <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-art-reload>刷新</button>
-        <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-art-open>独立窗口 ↗</button>
+        <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-art-reload>${th("refresh")}</button>
+        <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-art-open>${th("openInANewWindow")}</button>
       </div>
     </div>
     <iframe
@@ -2008,12 +2054,12 @@ function findPrecedingPromptForMessage(streamKey, messageId) {
 
 async function regenerateAssistantMessage(streamKey, messageId) {
   if (!streamKey || STATE.sendingStreams.has(streamKey)) {
-    appendLog("当前会话正在执行中，请先停止或等待本轮结束");
+    appendLog(t("thisSessionIsRunningStopItOr"));
     return;
   }
   const sourcePrompt = findPrecedingPromptForMessage(streamKey, messageId);
   if (!sourcePrompt) {
-    appendLog("未找到该回复对应的用户指令，无法重新生成");
+    appendLog(t("couldNotFindTheUserPromptFor"));
     return;
   }
   await sendStreamPrompt((sourcePrompt.text || "").trim(), streamKey, [], {
@@ -2026,21 +2072,21 @@ function classifyToolSemantic(tool) {
   const kind = String(tool?.kind || "").toLowerCase();
   const title = String(tool?.title || "").toLowerCase();
   if ((Array.isArray(tool?.diffs) && tool.diffs.length > 0) || /edit|write|create|delete|remove|move|rename|apply_patch|patch/.test(kind) || /\b(write|edit|patch|replace|delete)\b/.test(title)) {
-    return { badge: "修改", cls: "is-edit" };
+    return { badge: t("edit"), cls: "is-edit" };
   }
   if (/execute|bash|command|terminal|shell/.test(kind) || /\b(run_command|bash|sh|powershell|pwsh|cmd|exec)\b/.test(title)) {
-    return { badge: "命令", cls: "is-exec" };
+    return { badge: t("command"), cls: "is-exec" };
   }
   if (/read/.test(kind) || /\b(read_file|view_file|read)\b/.test(title)) {
-    return { badge: "读取", cls: "is-read" };
+    return { badge: t("read"), cls: "is-read" };
   }
   if (/search|grep|glob|find/.test(kind) || /\b(grep|search|glob|find|rg|select-string)\b/.test(title)) {
-    return { badge: "搜索", cls: "is-search" };
+    return { badge: t("search"), cls: "is-search" };
   }
   if (/peer|subagent/.test(kind) || /\bpeer_|dispatch|subagent/.test(title)) {
-    return { badge: "子代理", cls: "is-peer" };
+    return { badge: t("subagents"), cls: "is-peer" };
   }
-  return { badge: "工具", cls: "is-other" };
+  return { badge: t("tool"), cls: "is-other" };
 }
 
 function appendRenderedMarkdown(container, rawText) {
@@ -2089,8 +2135,8 @@ function buildToolGroupElement(tools, isMsgStreaming, groupKey) {
   const summary = document.createElement("summary");
   const badgeSummary = [...catCounts.entries()].map(([k, n]) => `${k} ${n}`).join(" · ");
   const summaryLabel = running
-    ? `正在执行 · ${running.title || "工具"}（第 ${tools.length} 步）`
-    : `${badgeSummary}${failedCount > 0 ? ` · ${failedCount} 失败` : ""}`;
+    ? t("runningStep", running.title || t("tool"), tools.length)
+    : `${badgeSummary}${failedCount > 0 ? t("failed2", failedCount) : ""}`;
   const diffPill =
     totalAdded > 0 || totalRemoved > 0
       ? `<span class="tool-diff-stats"><span class="stat-add">+${totalAdded}</span><span class="stat-del">-${totalRemoved}</span></span>`
@@ -2125,7 +2171,7 @@ function buildToolGroupElement(tools, isMsgStreaming, groupKey) {
       <span class="tool-sem-badge ${sem.cls}">${escapeHtml(sem.badge)}</span>
       <span class="tool-row-title" title="${escapeHtml((tool.title || "") + locHint)}">${escapeHtml(tool.title || "")}</span>
       ${toolAdded > 0 || toolRemoved > 0 ? `<span class="tool-diff-stats"><span class="stat-add">+${toolAdded}</span><span class="stat-del">-${toolRemoved}</span></span>` : ""}
-      <span class="tool-row-status">${escapeHtml(TOOL_STATUS_TEXT[tool.status] || tool.status || "")}</span>
+      <span class="tool-row-status">${escapeHtml(t(TOOL_STATUS_TEXT[tool.status] || tool.status || ""))}</span>
     `;
     row.appendChild(head);
 
@@ -2135,7 +2181,7 @@ function buildToolGroupElement(tools, isMsgStreaming, groupKey) {
       diffDet.className = "tool-diff-details";
       diffDet.dataset.toolKey = `${tool.toolCallId}:diff:${di}`;
       diffDet.innerHTML = `
-        <summary>${escapeHtml(d.path || "文件变更")} (+${st.added} -${st.removed})${d.truncated ? " [截断]" : ""}</summary>
+        <summary>${escapeHtml(d.path || t("fileChanges"))} (+${st.added} -${st.removed})${d.truncated ? t("truncated") : ""}</summary>
         ${renderUnifiedDiff(d.oldText || "", d.newText || "", d.path || "")}
       `;
       row.appendChild(diffDet);
@@ -2146,7 +2192,7 @@ function buildToolGroupElement(tools, isMsgStreaming, groupKey) {
       outDet.className = "tool-output-details";
       outDet.dataset.toolKey = `${tool.toolCallId}:out`;
       outDet.innerHTML = `
-        <summary>执行输出${tool.outputTruncated ? "（已截断）" : ""}</summary>
+        <summary>${th("output", tool.outputTruncated ? t("truncated2") : "")}</summary>
         <pre class="tool-output-pre"><code>${escapeHtml(tool.outputText)}</code></pre>
       `;
       row.appendChild(outDet);
@@ -2166,7 +2212,7 @@ function buildMessageElement(msg, linkedTasks) {
   if (msg.role === "system") {
     const div = document.createElement("div");
     div.className = "system-divider";
-    div.textContent = msg.text;
+    div.textContent = displayMessageText(msg);
     entry.appendChild(div);
     return entry;
   }
@@ -2179,11 +2225,11 @@ function buildMessageElement(msg, linkedTasks) {
       const estMark = msg.usage.isEstimated ? "~" : "";
       // 只显示模型和输入/输出量；缓存、思考、首轮注入放进悬停提示
       const detail = [
-        `输入 ${msg.usage.inputTokens}`,
-        `缓存 ${msg.usage.cachedReadTokens}`,
-        `输出 ${msg.usage.outputTokens}`,
-        `思考 ${msg.usage.thoughtTokens}`,
-        msg.injectedTokens > 0 ? `首轮注入 ${msg.injectedTokens}` : "",
+        t("input", msg.usage.inputTokens),
+        t("cached", msg.usage.cachedReadTokens),
+        t("output2", msg.usage.outputTokens),
+        t("reasoning", msg.usage.thoughtTokens),
+        msg.injectedTokens > 0 ? t("firstTurnInjection", msg.injectedTokens) : "",
       ]
         .filter(Boolean)
         .join(" / ");
@@ -2192,7 +2238,7 @@ function buildMessageElement(msg, linkedTasks) {
     }
     meta.innerHTML = `${agentTagHtml(msg.agent, senderLabelText(msg))}<span>${formatTime(msg.timestamp)}</span>${usageHtml}`;
   } else {
-    meta.innerHTML = `<span>${escapeHtml(`${msg.senderLabel} · ${formatTime(msg.timestamp)}`)}</span>`;
+    meta.innerHTML = `<span>${escapeHtml(`${senderLabelText(msg)} · ${formatTime(msg.timestamp)}`)}</span>`;
   }
 
   const canCopy = Boolean(msg.text && msg.text.trim() && msg.status !== "streaming");
@@ -2208,7 +2254,7 @@ function buildMessageElement(msg, linkedTasks) {
       copyBtn.type = "button";
       copyBtn.className = "msg-action-btn";
       copyBtn.dataset.copyMsg = msg.messageId;
-      copyBtn.textContent = "复制整条";
+      copyBtn.textContent = t("copyMessage");
       actionWrap.appendChild(copyBtn);
     }
     if (canRegen) {
@@ -2216,7 +2262,7 @@ function buildMessageElement(msg, linkedTasks) {
       regenBtn.type = "button";
       regenBtn.className = "msg-action-btn";
       regenBtn.dataset.regenMsg = msg.messageId;
-      regenBtn.textContent = "重新生成";
+      regenBtn.textContent = t("regenerate");
       actionWrap.appendChild(regenBtn);
     }
     meta.appendChild(actionWrap);
@@ -2267,7 +2313,7 @@ function buildMessageElement(msg, linkedTasks) {
           const details = document.createElement("details");
           details.className = "thought-box";
           details.dataset.thoughtIdx = String(thoughtIdx++);
-          details.innerHTML = `<summary>思考过程</summary><div class="thought-body">${escapeHtml(part.text)}</div>`;
+          details.innerHTML = `<summary>${th("reasoning2")}</summary><div class="thought-body">${escapeHtml(part.text)}</div>`;
           bubble.appendChild(details);
           renderedBlocks++;
         } else if (part.type === "text" && part.text && part.text.trim()) {
@@ -2284,7 +2330,7 @@ function buildMessageElement(msg, linkedTasks) {
         const details = document.createElement("details");
         details.className = "thought-box";
         details.dataset.thoughtIdx = "0";
-        details.innerHTML = `<summary>思考过程</summary><div class="thought-body">${escapeHtml(msg.thoughtText)}</div>`;
+        details.innerHTML = `<summary>${th("reasoning2")}</summary><div class="thought-body">${escapeHtml(msg.thoughtText)}</div>`;
         bubble.appendChild(details);
         renderedBlocks++;
       }
@@ -2310,11 +2356,11 @@ function buildMessageElement(msg, linkedTasks) {
     if (failed) {
       const errCard = document.createElement("div");
       errCard.className = "msg-error-card";
-      const errDisplayText = (msg.text || "").trim() || "会话执行失败";
+      const errDisplayText = (msg.text || "").trim() || t("sessionFailed");
       errCard.innerHTML = `
         <div class="msg-error-head">
-          <span>执行失败</span>
-          ${canRegen ? `<button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-regen-msg="${escapeHtml(msg.messageId)}">重试</button>` : ""}
+          <span>${th("runFailed")}</span>
+          ${canRegen ? `<button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-regen-msg="${escapeHtml(msg.messageId)}">${th("retry")}</button>` : ""}
         </div>
         <pre class="msg-error-text">${escapeHtml(errDisplayText)}</pre>
       `;
@@ -2327,12 +2373,12 @@ function buildMessageElement(msg, linkedTasks) {
       body.className = "md-body";
       if (msg.status === "streaming") {
         // 高思考强度下第一句话可能要等几分钟；显示已等多久，免得看起来像卡住
-        body.innerHTML = `<span class="msg-waiting is-thinking"><span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>思考中 <span class="msg-elapsed" data-since="${Number(msg.timestamp) || Date.now()}"></span></span>`;
+        body.innerHTML = `<span class="msg-waiting is-thinking"><span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>${th("thinking")} <span class="msg-elapsed" data-since="${Number(msg.timestamp) || Date.now()}"></span></span>`;
       } else {
         body.innerHTML =
           msg.status === "cancelled"
-            ? '<span class="msg-waiting">已停止，没有输出</span>'
-            : '<span class="msg-waiting">没有文字输出</span>';
+            ? '<span class="msg-waiting">' + th("stoppedWithNoOutput") + '</span>'
+            : '<span class="msg-waiting">' + th("noTextOutput") + '</span>';
       }
       bubble.appendChild(body);
     }
@@ -2366,7 +2412,7 @@ function buildMessageElement(msg, linkedTasks) {
             <span class="dot ${escapeHtml(status)}"></span>
             ${agentTagHtml(latest.targetAgent)}
             <span class="delegation-label">${escapeHtml(label)}</span>
-            <span class="delegation-status">${escapeHtml(TASK_STATUS_TEXT[status] || status)}${tasks.length > 1 ? `，共 ${tasks.length} 次调用` : ""}</span>
+            <span class="delegation-status">${escapeHtml(t(TASK_STATUS_TEXT[status] || status))}${tasks.length > 1 ? t("calls", tasks.length) : ""}</span>
           </div>
         `;
         const delActions = document.createElement("div");
@@ -2375,14 +2421,14 @@ function buildMessageElement(msg, linkedTasks) {
           const stopTaskBtn = document.createElement("button");
           stopTaskBtn.type = "button";
           stopTaskBtn.className = "alma-btn alma-btn-danger alma-btn-sm";
-          stopTaskBtn.textContent = "停止";
+          stopTaskBtn.textContent = t("stop");
           stopTaskBtn.onclick = () => void cancelSession(sessionKey);
           delActions.appendChild(stopTaskBtn);
         }
         const openBtn = document.createElement("button");
         openBtn.type = "button";
         openBtn.className = "alma-btn alma-btn-sm";
-        openBtn.textContent = "查看";
+        openBtn.textContent = t("view");
         openBtn.onclick = () => selectGroup(latest.groupId, `sub:${sessionKey}`);
         delActions.appendChild(openBtn);
         row.appendChild(delActions);
@@ -2404,7 +2450,7 @@ function buildMessageElement(msg, linkedTasks) {
         link.target = "_blank";
         link.rel = "noopener";
         link.className = "msg-image-link";
-        link.title = img.name || "查看原图";
+        link.title = img.name || t("viewFullImage");
         const elImg = document.createElement("img");
         elImg.src = img.url;
         elImg.alt = img.name || "uploaded image";
@@ -2447,7 +2493,7 @@ function formatElapsed(ms) {
   const total = Math.max(0, Math.floor(ms / 1000));
   const m = Math.floor(total / 60);
   const sec = total % 60;
-  return m > 0 ? `${m} 分 ${String(sec).padStart(2, "0")} 秒` : `${sec} 秒`;
+  return m > 0 ? t("elapsedMinutesSeconds", m, String(sec).padStart(2, "0")) : t("elapsedSeconds", sec);
 }
 
 function tickElapsedLabels() {
@@ -2540,8 +2586,8 @@ function renderMessages() {
       empty.innerHTML = `
         <span class="alma-box-label">sub-session</span>
         <div class="empty-inner">
-          <h2>子会话尚无消息记录</h2>
-          <p>该子会话被委派或发送消息后，完整工具调用与对话轨迹会实时显示在此处。</p>
+          <h2>${th("noMessagesInThisSubsessionYet")}</h2>
+          <p>${th("toolCallsAndMessagesWillAppearHere")}</p>
         </div>
       `;
       els.messages.appendChild(empty);
@@ -2571,11 +2617,11 @@ function renderMessages() {
       foldEl.className = "retry-fold";
       foldEl.dataset.foldKey = item.key;
       if (retryFoldStates.get(item.key)) foldEl.open = true;
-      const agentsText = item.agents.length > 0 ? item.agents.map((a) => agentName(a)).join(" / ") : "会话";
+      const agentsText = item.agents.length > 0 ? item.agents.map((a) => agentName(a)).join(" / ") : t("session");
       const summaryEl = document.createElement("summary");
       summaryEl.className = "retry-fold-summary";
       summaryEl.innerHTML = `
-        <span class="retry-fold-badge">已自动折叠 ${item.attempts} 次失败重试</span>
+        <span class="retry-fold-badge">${th("collapsedFailedRetries", item.attempts)}</span>
         <span class="retry-fold-meta">${escapeHtml(`${agentsText} · ${item.lastErrorSummary}`)}</span>
       `;
       const bodyEl = document.createElement("div");
@@ -2643,10 +2689,10 @@ function collectSessionFiles(streamKey, cwd) {
 }
 
 const PROGRESS_STATUS = {
-  completed: { mark: "✓", text: "完成" },
-  in_progress: { mark: "●", text: "进行中" },
-  blocked: { mark: "!", text: "受阻" },
-  pending: { mark: "○", text: "未开始" },
+  completed: { mark: "✓", text: "complete" },
+  in_progress: { mark: "●", text: "inProgress" },
+  blocked: { mark: "!", text: "blocked" },
+  pending: { mark: "○", text: "notStarted" },
 };
 
 // 进度：Agent 用 progress_update 维护的目标和步骤；没有时退回显示当前会话自己上报的计划
@@ -2663,7 +2709,7 @@ function renderInspectorProgress(group, activeSession) {
   els.inspProgressCount.textContent = items.length > 0 ? `${done}/${items.length}` : "";
 
   if (!progress?.goal && !progress?.summary && items.length === 0) {
-    els.inspProgress.appendChild(inspEmpty("任务分成多步时，Agent 会在这里更新目标和进度"));
+    els.inspProgress.appendChild(inspEmpty(t("whenATaskHasMultipleStepsThe")));
     return;
   }
 
@@ -2691,7 +2737,7 @@ function renderInspectorProgress(group, activeSession) {
     const meta = PROGRESS_STATUS[item.status] || PROGRESS_STATUS.pending;
     const row = document.createElement("div");
     row.className = `insp-step status-${item.status}`;
-    row.title = meta.text;
+    row.title = t(meta.text);
     const mark = document.createElement("span");
     mark.className = "insp-step-mark";
     mark.textContent = meta.mark;
@@ -2714,8 +2760,8 @@ function renderInspectorProgress(group, activeSession) {
   const foot = document.createElement("div");
   foot.className = "insp-meta";
   foot.textContent = progress
-    ? `${progress.updatedBy && progress.updatedBy !== "user" ? `${progress.updatedBy} ` : ""}更新于 ${formatTime(progress.updatedAt)}`
-    : "来自这个会话自己的计划";
+    ? t("updatedAt", progress.updatedBy && progress.updatedBy !== "user" ? `${progress.updatedBy} ` : "", formatTime(progress.updatedAt))
+    : t("fromThisSessionsPlan");
   box.appendChild(foot);
   els.inspProgress.appendChild(box);
 }
@@ -2741,8 +2787,8 @@ function renderInspector() {
   // 标题：正在看的是谁
   els.inspHead.innerHTML = `
     ${agentTagHtml(active?.agent || group.leadAgent)}
-    <span class="insp-head-name">${escapeHtml(subMode ? active?.label || active?.name || "子会话" : "主导会话")}</span>
-    <span class="insp-head-status">${active ? escapeHtml(isSessionRunning(activeKey) ? "进行中" : sessionStatusText(active)) : "未启动"}</span>
+    <span class="insp-head-name">${escapeHtml(subMode ? active?.label || active?.name || t("subsession2") : t("leadSession"))}</span>
+    <span class="insp-head-status">${active ? escapeHtml(isSessionRunning(activeKey) ? t("inProgress") : sessionStatusText(active)) : t("notLaunched")}</span>
   `;
 
   renderInspectorProgress(group, active);
@@ -2750,7 +2796,7 @@ function renderInspector() {
   // 上下文
   els.inspContext.innerHTML = "";
   if (!active) {
-    els.inspContext.appendChild(inspEmpty("发出第一条消息后显示"));
+    els.inspContext.appendChild(inspEmpty(t("availableAfterTheFirstMessage")));
   } else {
     const cb = active.contextBreakdown || {};
     const rules = cb.sharedRulesTokens || 0;
@@ -2765,11 +2811,11 @@ function renderInspector() {
     const scale = winMax > 0 ? winMax : Math.max(1, used);
     const seg = (cls, v) => (v > 0 ? `<div class="${cls}" style="width:${((v / scale) * 100).toFixed(2)}%"></div>` : "");
     const rows = [
-      ["seg-rules", "规则", rules],
-      ["seg-skills", "技能索引", skills],
-      ["seg-handoff", "交接", handoff],
-      ["seg-dialog", "对话", dialog],
-      ["seg-other", "工具与其他", other],
+      ["seg-rules", t("rules"), rules],
+      ["seg-skills", t("skillIndex"), skills],
+      ["seg-handoff", t("handoff"), handoff],
+      ["seg-dialog", t("chat"), dialog],
+      ["seg-other", t("toolsAndOther"), other],
     ].filter(([, , v]) => v > 0);
     const box = document.createElement("div");
     box.className = "insp-ctx";
@@ -2781,12 +2827,12 @@ function renderInspector() {
       <div class="stacked-bar">${seg("seg-rules", rules)}${seg("seg-skills", skills)}${seg("seg-handoff", handoff)}${seg("seg-dialog", dialog)}${seg("seg-other", other)}</div>
       <div class="insp-ctx-legend">${rows.map(([cls, label, v]) => `<span><i class="legend-dot ${cls}"></i>${label}</span><span>${formatTokens(v)}</span>`).join("")}</div>
       ${active.currentModelId ? `<div class="insp-meta">${escapeHtml(active.currentModelId)}${active.currentEffort ? ` · ${escapeHtml(active.currentEffort)}` : ""}</div>` : ""}
-      ${active.branch ? `<div class="insp-meta">分支 ${escapeHtml(active.branch)}</div>` : ""}
+      ${active.branch ? `<div class="insp-meta">${th("branch", active.branch)}</div>` : ""}
     `;
     const more = document.createElement("button");
     more.type = "button";
     more.className = "insp-link-row";
-    more.innerHTML = '<span>上下文分析</span><span class="insp-link-arrow">›</span>';
+    more.innerHTML = '<span>' + th("contextBreakdown") + '</span><span class="insp-link-arrow">›</span>';
     more.onclick = () => setStageView("telemetry");
     box.appendChild(more);
     els.inspContext.appendChild(box);
@@ -2796,7 +2842,7 @@ function renderInspector() {
   els.inspSessionCount.textContent = String(subs.length);
   els.inspSessions.innerHTML = "";
   if (subs.length === 0) {
-    els.inspSessions.appendChild(inspEmpty("主导还没有委派子代理"));
+    els.inspSessions.appendChild(inspEmpty(t("theLeadHasNotDelegatedToA")));
   } else {
     const tasksBySession = new Map();
     for (const t of getGroupTasks(group.groupId)) {
@@ -2807,7 +2853,7 @@ function renderInspector() {
     const leadRow = document.createElement("button");
     leadRow.type = "button";
     leadRow.className = `insp-agent-row${subMode ? "" : " active"}`;
-    leadRow.innerHTML = `<span class="dot ${isGroupBusy(group.groupId) ? "busy" : "idle"}"></span>${agentTagHtml(group.leadAgent)}<span class="insp-agent-name">主导</span>`;
+    leadRow.innerHTML = `<span class="dot ${isGroupBusy(group.groupId) ? "busy" : "idle"}"></span>${agentTagHtml(group.leadAgent)}<span class="insp-agent-name">${th("lead")}</span>`;
     leadRow.onclick = () => selectGroup(group.groupId, `lead:${group.groupId}`);
     els.inspSessions.appendChild(leadRow);
     for (const sub of subs) {
@@ -2822,7 +2868,7 @@ function renderInspector() {
           <span class="dot ${running ? "busy" : escapeHtml(sub.status)}"></span>
           ${agentTagHtml(sub.agent)}
           <span class="insp-agent-name">${escapeHtml(sub.label || sub.name)}</span>
-          <span class="insp-agent-status">${escapeHtml(running ? "进行中" : sessionStatusText(sub))}${tasks.length > 1 ? ` · ${tasks.length} 次` : ""}</span>
+          <span class="insp-agent-status">${escapeHtml(running ? t("inProgress") : sessionStatusText(sub))}${tasks.length > 1 ? t("calls2", tasks.length) : ""}</span>
         </div>
         ${last?.prompt ? `<div class="insp-agent-prompt">${escapeHtml(last.prompt)}</div>` : ""}
       `;
@@ -2831,7 +2877,7 @@ function renderInspector() {
         const stop = document.createElement("button");
         stop.type = "button";
         stop.className = "alma-btn alma-btn-danger alma-btn-sm";
-        stop.textContent = "停止";
+        stop.textContent = t("stop");
         stop.onclick = (e) => {
           e.stopPropagation();
           void cancelSession(sub.sessionKey);
@@ -2847,25 +2893,25 @@ function renderInspector() {
   els.inspFileCount.textContent = String(files.length);
   els.inspFiles.innerHTML = "";
   if (files.length === 0) {
-    els.inspFiles.appendChild(inspEmpty("这个会话还没有读写文件"));
+    els.inspFiles.appendChild(inspEmpty(t("noFilesReadOrWrittenInThis")));
   } else {
     for (const f of files.slice(0, 60)) {
       const row = document.createElement("button");
       row.type = "button";
       row.className = `insp-file${f.changed ? " changed" : ""}`;
-      row.title = `${f.path}\n点击复制路径`;
+      row.title = t("nclickToCopyPath", f.path);
       const slash = f.rel.lastIndexOf("/");
       row.innerHTML = `
-        <span class="insp-file-mark">${f.changed ? "改" : "读"}</span>
+        <span class="insp-file-mark">${f.changed ? t("edit2") : t("read2")}</span>
         <span class="insp-file-name">${escapeHtml(slash >= 0 ? f.rel.slice(slash + 1) : f.rel)}</span>
         <span class="insp-file-dir">${escapeHtml(slash >= 0 ? f.rel.slice(0, slash) : "")}</span>
       `;
       row.onclick = () => {
-        void navigator.clipboard?.writeText(f.path).then(() => appendLog(`已复制路径: ${f.path}`));
+        void navigator.clipboard?.writeText(f.path).then(() => appendLog(t("copiedPath", f.path)));
       };
       els.inspFiles.appendChild(row);
     }
-    if (files.length > 60) els.inspFiles.appendChild(inspEmpty(`还有 ${files.length - 60} 个文件未列出`));
+    if (files.length > 60) els.inspFiles.appendChild(inspEmpty(t("moreFiles", files.length - 60)));
   }
 
   // 产物：这个任务里 Agent 生成的交互组件
@@ -2875,7 +2921,7 @@ function renderInspector() {
   els.inspArtifactCount.textContent = String(artifacts.length);
   els.inspArtifacts.innerHTML = "";
   if (artifacts.length === 0) {
-    els.inspArtifacts.appendChild(inspEmpty("还没有产物"));
+    els.inspArtifacts.appendChild(inspEmpty(t("noArtifactsYet")));
   } else {
     for (const art of artifacts) {
       const link = document.createElement("a");
@@ -2883,7 +2929,7 @@ function renderInspector() {
       link.href = buildArtifactUrl(art.artifactId);
       link.target = "_blank";
       link.rel = "noopener";
-      link.title = "在新窗口打开";
+      link.title = t("openInANewWindow2");
       link.innerHTML = `
         <span class="insp-file-mark">${escapeHtml(String(art.kind || "html").toUpperCase().slice(0, 4))}</span>
         <span class="insp-file-name">${escapeHtml(art.title || art.artifactId)}</span>
@@ -2893,12 +2939,12 @@ function renderInspector() {
   }
 }
 
-const SESSION_STATUS_TEXT = { starting: "启动中", idle: "空闲", busy: "进行中", error: "出错", closed: "已关闭" };
+const SESSION_STATUS_TEXT = { starting: "starting", idle: "idle", busy: "inProgress", error: "error", closed: "closed" };
 
 // 空闲太久被后端释放进程的子会话显示为「已休眠」：再发消息会自动唤醒并带回之前的对话
 function sessionStatusText(session) {
-  if (session.status === "closed" && session.closedReason === "idle") return "已休眠";
-  return SESSION_STATUS_TEXT[session.status] || session.status;
+  if (session.status === "closed" && session.closedReason === "idle") return t("asleep");
+  return t(SESSION_STATUS_TEXT[session.status] || session.status);
 }
 
 function renderDesktopControls() {
@@ -2910,8 +2956,8 @@ function renderDesktopControls() {
   const activePort = STATE.port || (location.port ? Number(location.port) : 0);
   if (els.portBadge) {
     els.portBadge.textContent = activePort ? `:${activePort}` : "";
-    els.portBadge.title = activePort ? `当前监听端口 ${activePort}` : "";
-    if (els.portBadge.parentElement) els.portBadge.parentElement.title = activePort ? `当前监听端口 ${activePort}` : "";
+    els.portBadge.title = activePort ? t("listeningOnPort", activePort) : "";
+    if (els.portBadge.parentElement) els.portBadge.parentElement.title = activePort ? t("listeningOnPort", activePort) : "";
   }
   if (els.quitHubBtn) {
     els.quitHubBtn.hidden = !STATE.desktopMode;
@@ -2919,14 +2965,14 @@ function renderDesktopControls() {
 }
 
 async function pickDirectoryDialog(initialDir) {
-  const res = await fetch("/api/workspace/pick-directory", {
+  const res = await apiFetch("/api/workspace/pick-directory", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ initialDir: initialDir || undefined }),
   });
   const data = await res.json();
   if (!res.ok || data.ok === false) {
-    appendLog(`选择目录失败: ${data.error || res.status}`);
+    appendLog(t("couldNotSelectADirectory", data.error || res.status));
     return null;
   }
   if (data.cancelled || data.canceled || !data.path) {
@@ -2940,7 +2986,7 @@ async function changeActiveWorkspaceCwd() {
   const initialDir = activeGroup?.cwd || STATE.baseCwd;
   const picked = await pickDirectoryDialog(initialDir);
   if (!picked) return;
-  const res = await fetch("/api/workspace/cwd", {
+  const res = await apiFetch("/api/workspace/cwd", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -2950,7 +2996,7 @@ async function changeActiveWorkspaceCwd() {
   });
   const data = await res.json();
   if (!res.ok || data.ok === false) {
-    appendLog(`切换工作区失败: ${data.error || res.status}`);
+    appendLog(t("couldNotSwitchWorkspace", data.error || res.status));
     return;
   }
   if (data.baseCwd) STATE.baseCwd = data.baseCwd;
@@ -2958,7 +3004,7 @@ async function changeActiveWorkspaceCwd() {
   renderDesktopControls();
   renderSidebarGroups();
   renderStageHeaderAndTabs();
-  appendLog(`工作区已切换至: ${data.group?.cwd || data.baseCwd || picked}`);
+  appendLog(t("switchedWorkspaceTo", data.group?.cwd || data.baseCwd || picked));
 }
 
 function renderAll() {
@@ -3123,7 +3169,7 @@ function renderComposerAttachments() {
     const rm = document.createElement("button");
     rm.type = "button";
     rm.className = "composer-img-remove";
-    rm.title = "移除";
+    rm.title = t("remove");
     rm.textContent = "×";
     rm.onclick = () => {
       const next = getActiveImageDrafts().filter((item) => item.id !== img.id);
@@ -3143,7 +3189,7 @@ function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(reader.error || new Error("读取图片失败"));
+    reader.onerror = () => reject(reader.error || new Error(t("couldNotReadImage")));
     reader.readAsDataURL(file);
   });
 }
@@ -3158,11 +3204,11 @@ async function addImageFilesToComposer(fileList) {
     if (!ALLOWED_COMPOSER_IMAGE_MIMES.has(mimeType)) {
       // 不是图片：作为文件附件，Agent 会从本地路径读取
       if (current.filter((d) => d.isFile).length >= MAX_COMPOSER_FILES) {
-        skipped.push(`${file.name}（一次最多 ${MAX_COMPOSER_FILES} 个文件）`);
+        skipped.push(t("upToFilesAtATime", file.name, MAX_COMPOSER_FILES));
         continue;
       }
       if (file.size === 0 || file.size > MAX_COMPOSER_FILE_BYTES) {
-        skipped.push(`${file.name}（${file.size === 0 ? "空文件或文件夹" : "超过 12MB"}）`);
+        skipped.push(`${file.name}（${file.size === 0 ? t("emptyFileOrDirectory") : t("largerThan12Mb")}）`);
         continue;
       }
       try {
@@ -3182,11 +3228,11 @@ async function addImageFilesToComposer(fileList) {
       continue;
     }
     if (current.filter((d) => !d.isFile).length >= MAX_COMPOSER_IMAGES) {
-      skipped.push(`${file.name}（一次最多 ${MAX_COMPOSER_IMAGES} 张图片）`);
+      skipped.push(t("upToImagesAtATime", file.name, MAX_COMPOSER_IMAGES));
       continue;
     }
     if (file.size > MAX_COMPOSER_IMAGE_BYTES) {
-      appendLog(`图片 "${file.name}" 超过 10MB 上限，已跳过`);
+      appendLog(t("skippedImageBecauseItExceeds10Mb", file.name));
       continue;
     }
     try {
@@ -3202,16 +3248,16 @@ async function addImageFilesToComposer(fileList) {
         sizeBytes: file.size,
       });
     } catch (err) {
-      appendLog(`读取图片失败: ${err.message}`);
+      appendLog(t("couldNotReadImage2", err.message));
     }
   }
   STATE.imageDraftsByStream.set(STATE.activeStreamKey, current);
   renderComposerAttachments();
   if (skipped.length > 0) {
     void showConfirmModal({
-      title: "有文件没有加上",
+      title: t("someFilesCouldNotBeAttached"),
       message: skipped.join("\n"),
-      confirmText: "知道了",
+      confirmText: t("ok"),
     });
   }
 }
@@ -3269,17 +3315,17 @@ async function sendStreamPrompt(prompt, targetStreamKey, images = [], options = 
       payload.files = cleanFiles.map((f) => ({ name: f.name, mimeType: f.mimeType || undefined, data: f.base64 }));
     }
     if (options.steer) payload.steer = true;
-    const res = await fetch(endpoint, {
+    const res = await apiFetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
     const data = await res.json();
     if (!res.ok || data.ok === false) {
-      appendLog(`发送失败 [${targetStreamKey}]: ${data.error || res.status}`);
+      appendLog(t("sendFailed", targetStreamKey, data.error || res.status));
     }
   } catch (err) {
-    appendLog(`网络错误 [${targetStreamKey}]: ${err.message}`);
+    appendLog(t("networkError", targetStreamKey, err.message));
   } finally {
     STATE.sendingStreams.delete(targetStreamKey);
     renderStageHeaderAndTabs();
@@ -3317,24 +3363,24 @@ function renderComposerQueue() {
     row.className = `queue-item${item.steer ? " is-steer" : ""}`;
     const tag = document.createElement("span");
     tag.className = "queue-tag";
-    tag.textContent = item.steer ? "引导" : `排队 ${index + 1}`;
+    tag.textContent = item.steer ? t("steer") : t("queued2", index + 1);
     const text = document.createElement("span");
     text.className = "queue-text";
-    text.textContent = item.prompt || `${item.attachments.length} 个附件`;
+    text.textContent = item.prompt || t("attachments", item.attachments.length);
     text.title = item.prompt;
     row.appendChild(tag);
     row.appendChild(text);
     if (item.attachments.length > 0 && item.prompt) {
       const att = document.createElement("span");
       att.className = "queue-att";
-      att.textContent = `${item.attachments.length} 个附件`;
+      att.textContent = t("attachments", item.attachments.length);
       row.appendChild(att);
     }
     if (!item.steer) {
       const steer = document.createElement("button");
       steer.type = "button";
       steer.className = "mini-icon-btn";
-      steer.title = "不等了：打断当前这一轮，立刻用这条消息引导";
+      steer.title = t("interruptThisTurnAndSteerWithThis");
       steer.textContent = "↑";
       steer.onclick = () => steerWithQueued(STATE.activeStreamKey, item.id);
       row.appendChild(steer);
@@ -3342,7 +3388,7 @@ function renderComposerQueue() {
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "mini-icon-btn";
-    remove.title = "取消这条";
+    remove.title = t("removeFromQueue");
     remove.textContent = "×";
     remove.onclick = () => {
       STATE.queuedByStream.set(STATE.activeStreamKey, getQueue(STATE.activeStreamKey).filter((q) => q.id !== item.id));
@@ -3410,7 +3456,7 @@ async function sendPrompt(options = {}) {
 
 async function loadAdapterHealth() {
   try {
-    const res = await fetch("/api/agents");
+    const res = await apiFetch("/api/agents");
     const data = await res.json();
     if (Array.isArray(data.agents)) {
       STATE.agents = data.agents;
@@ -3421,7 +3467,7 @@ async function loadAdapterHealth() {
     // fallback to /api/health
   }
   try {
-    const res = await fetch("/api/health");
+    const res = await apiFetch("/api/health");
     const data = await res.json();
     if (typeof data.desktopMode === "boolean") STATE.desktopMode = data.desktopMode;
     if (typeof data.port === "number") STATE.port = data.port;
@@ -3456,8 +3502,8 @@ function renderConnBanner() {
   const secs = Math.round((Date.now() - CONN.lostAt) / 1000);
   banner.textContent =
     secs < 60
-      ? `与后端的连接断开了，正在重连（${secs} 秒）。后端如果是意外退出，会自动重启并恢复任务记录。`
-      : `已经 ${Math.floor(secs / 60)} 分钟连不上后端。请重新启动 RoundTable Meeting，任务记录会保留；原因可查看数据目录下的 crash.log。`;
+      ? t("disconnectedFromTheServiceReconnectingSIf", secs)
+      : t("theServiceHasBeenUnreachableForMin", Math.floor(secs / 60));
 }
 
 // 主导回复完成而窗口不在前台时，发一条桌面通知：长任务跑完不用守着看。
@@ -3476,8 +3522,8 @@ function notifyLeadTurnFinished(message) {
   if (!("Notification" in window) || Notification.permission !== "granted") return;
   try {
     const group = STATE.taskGroups.get(message.groupId);
-    const title = message.status === "error" ? "任务出错了" : "主导已回复";
-    const n = new Notification(`${title} · ${group?.title || "RoundTable Meeting"}`, {
+    const title = message.status === "error" ? t("taskFailed") : t("theLeadReplied");
+    const n = new Notification(`${title} · ${group ? displayTaskTitle(group) : BASE_DOC_TITLE}`, {
       body: String(message.text || "").replace(/\s+/g, " ").trim().slice(0, 140) || agentName(message.agent),
       tag: `rtm-turn-${message.groupId}`,
     });
@@ -3500,11 +3546,11 @@ function connectWs() {
   const ws = new WebSocket(`${proto}//${location.host}/ws`);
   ws.onopen = () => {
     els.wsDot.classList.add("ok");
-    els.wsDot.title = "WebSocket 已连接";
+    els.wsDot.title = t("websocketConnected");
     if (CONN.lostAt) {
-      appendLog(`已重新连接后端（中断 ${Math.round((Date.now() - CONN.lostAt) / 1000)} 秒）`);
+      appendLog(t("reconnectedToTheServiceAfterS", Math.round((Date.now() - CONN.lostAt) / 1000)));
     } else {
-      appendLog("WebSocket 已连接");
+      appendLog(t("websocketConnected"));
     }
     CONN.lostAt = 0;
     clearInterval(CONN.bannerTimer);
@@ -3513,10 +3559,10 @@ function connectWs() {
   };
   ws.onclose = () => {
     els.wsDot.classList.remove("ok");
-    els.wsDot.title = "WebSocket 断开，正在重连...";
+    els.wsDot.title = t("websocketReconnecting");
     if (!CONN.lostAt) {
       CONN.lostAt = Date.now();
-      appendLog("与后端的连接断开，正在重连...");
+      appendLog(t("disconnectedFromTheServiceReconnecting"));
       CONN.bannerTimer = setInterval(() => {
         if (Date.now() - CONN.lostAt >= 4000) renderConnBanner();
       }, 1000);
@@ -3613,7 +3659,7 @@ function connectWs() {
         msg.workflow.proposedBy !== "user" &&
         (!prev || prev.updatedAt !== msg.workflow.updatedAt)
       ) {
-        appendLog(`${msg.workflow.proposedBy} 起草了一个 ${msg.workflow.steps.length} 步的工作流，等待发布`);
+        appendLog(t("draftedAStepWorkflowReadyToPublish", msg.workflow.proposedBy, msg.workflow.steps.length));
         document.querySelector('.mode-tab[data-stage-view="workflow"]')?.classList.add("has-news");
       }
       // 对话里的工作流预览卡片要跟着状态变
@@ -3637,23 +3683,23 @@ function connectWs() {
         if (msg.artifact.groupId === STATE.activeGroupId) {
           renderMessages();
         }
-        appendLog(`生成交互组件: ${msg.artifact.title} (${msg.artifact.kind})`);
+        appendLog(t("createdInteractiveArtifact", msg.artifact.title, msg.artifact.kind));
       }
     } else if (msg.type === "question_requested") {
       if (msg.question) {
         STATE.pendingQuestions.set(msg.question.questionId, msg.question);
         window.HUB_INTERACTIVE?.renderQuestions?.();
         syncAttentionIndicators({
-          body: `${msg.question.agent || "Agent"} 发起提问：${msg.question.title}`,
+          body: t("asked", msg.question.agent || "Agent", msg.question.title),
           groupId: STATE.sessions.get(msg.question.sessionKey)?.groupId,
         });
-        appendLog(`待确认问题: ${msg.question.title}`);
+        appendLog(t("pendingQuestion", msg.question.title));
       }
     } else if (msg.type === "question_resolved") {
       STATE.pendingQuestions.delete(msg.questionId);
       window.HUB_INTERACTIVE?.renderQuestions?.();
       syncAttentionIndicators();
-      appendLog(msg.cancelled ? `已取消问题 ${msg.questionId}` : `已提交问题回答 ${msg.questionId}`);
+      appendLog(msg.cancelled ? t("cancelledQuestion", msg.questionId) : t("submittedAnswerToQuestion", msg.questionId));
     } else if (msg.type === "telemetry_updated") {
       STATE.telemetry = msg.telemetry;
       refreshHeaderMetrics();
@@ -3676,7 +3722,7 @@ function connectWs() {
       renderSidebarGroups();
       renderStageHeaderAndTabs();
       window.HUB_APP?.onStateChange?.();
-      appendLog(`工作区目录已更新: ${msg.group?.cwd || msg.baseCwd}`);
+      appendLog(t("updatedWorkspaceDirectory", msg.group?.cwd || msg.baseCwd));
     } else if (msg.type === "group_deleted") {
       STATE.taskGroups.delete(msg.groupId);
       for (const key of STATE.messagesByStream.keys()) {
@@ -3692,14 +3738,14 @@ function connectWs() {
         }
       }
       renderAll();
-      appendLog(`已删除任务分组 ${msg.groupId}`);
+      appendLog(t("deletedTaskGroup", msg.groupId));
     } else if (msg.type === "group_lead_changed") {
       const grp = STATE.taskGroups.get(msg.groupId);
       if (grp) {
         grp.leadAgent = msg.leadAgent;
       }
       renderAll();
-      appendLog(`任务 [${msg.groupId}] 主导切换: ${msg.previousLead} -> ${msg.leadAgent}`);
+      appendLog(t("leadChangedForTask", msg.groupId, msg.previousLead, msg.leadAgent));
     } else if (msg.type === "message_upserted") {
       notifyLeadTurnFinished(msg.message);
       upsertMessageRecord(msg.message);
@@ -3796,13 +3842,13 @@ function connectWs() {
         regions |= UI_REGION.messages;
       }
       scheduleUiRender(regions);
-      appendLog(`委派 ${msg.task.taskId} [${msg.task.targetAgent}] -> ${msg.task.status}`);
+      appendLog(t("delegated", msg.task.taskId, msg.task.targetAgent, msg.task.status));
     } else if (msg.type === "permission_requested") {
       STATE.pendingPermissions.set(msg.permission.requestId, msg.permission);
       renderPermissions();
       const permSess = STATE.sessions.get(msg.permission.sessionKey);
       syncAttentionIndicators({
-        body: `${msg.permission.agent} 请求确认：${msg.permission.toolTitle}`,
+        body: t("requestsConfirmation", msg.permission.agent, msg.permission.toolTitle),
         groupId: permSess?.groupId,
         streamKey: permSess
           ? permSess.role === "lead"
@@ -3810,14 +3856,14 @@ function connectWs() {
             : `sub:${permSess.sessionKey}`
           : undefined,
       });
-      appendLog(`权限请求: ${msg.permission.sessionKey} (${msg.permission.toolTitle})`);
+      appendLog(t("permissionRequest", msg.permission.sessionKey, msg.permission.toolTitle));
     } else if (msg.type === "permission_resolved") {
       STATE.pendingPermissions.delete(msg.requestId);
       renderPermissions();
     } else if (msg.type === "permission_mode_changed") {
       STATE.permissionMode = msg.permissionMode;
       els.permSelect.value = msg.permissionMode;
-      appendLog(`权限策略已变更为: ${msg.permissionMode}`);
+      appendLog(t("approvalPolicyChangedTo", msg.permissionMode));
     }
   };
 }
@@ -3839,7 +3885,7 @@ if (els.quitHubBtn) {
   els.quitHubBtn.onclick = async () => {
     els.quitHubBtn.disabled = true;
     try {
-      await fetch("/api/system/shutdown", { method: "POST" });
+      await apiFetch("/api/system/shutdown", { method: "POST" });
     } catch {
       // backend may close before response flushes
     }
@@ -3851,7 +3897,7 @@ els.toggleNewTaskBtn.onclick = () => {
   els.newTaskPopover.hidden = !els.newTaskPopover.hidden;
   if (!els.newTaskPopover.hidden) {
     if (els.newTaskCwdInput && !els.newTaskCwdInput.value.trim()) {
-      els.newTaskCwdInput.placeholder = getActiveGroup()?.cwd || STATE.baseCwd || "默认工作区目录（可留空）";
+      els.newTaskCwdInput.placeholder = getActiveGroup()?.cwd || STATE.baseCwd || t("defaultWorkingDirectoryOptional");
     }
     els.newTaskTitleInput.focus();
   }
@@ -3908,7 +3954,7 @@ let lastEscStopAt = 0;
 
 function setStopHint(text) {
   if (!els.stopSessionBtn) return;
-  els.stopSessionBtn.textContent = text || "停止";
+  els.stopSessionBtn.textContent = text || t("stop");
   els.stopSessionBtn.classList.toggle("is-armed", Boolean(text));
 }
 
@@ -3918,7 +3964,7 @@ els.stopSessionBtn.onclick = () => {
 };
 
 els.permSelect.onchange = async () => {
-  await fetch("/api/permissions/mode", {
+  await apiFetch("/api/permissions/mode", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mode: els.permSelect.value }),
@@ -3929,14 +3975,14 @@ async function applyComposerModelOrEffortChange(patch) {
   const subMode = isSubStream(STATE.activeStreamKey);
   if (subMode) {
     const sessionKey = STATE.activeStreamKey.slice(4);
-    const res = await fetch("/api/sessions/model", {
+    const res = await apiFetch("/api/sessions/model", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sessionKey, ...patch }),
     });
     const data = await res.json();
     if (!res.ok || data.ok === false) {
-      appendLog(`切换子会话模型失败: ${data.error || res.status}`);
+      appendLog(t("couldNotSwitchSubsessionModel", data.error || res.status));
       renderModelSelectorBar();
       return;
     }
@@ -3946,20 +3992,20 @@ async function applyComposerModelOrEffortChange(patch) {
       renderStageHeaderAndTabs();
       renderInspector();
     }
-    appendLog(`子会话 [${sessionKey}] 模型配置已更新`);
+    appendLog(t("updatedModelSettingsForSubsession", sessionKey));
     return;
   }
 
   const group = getActiveGroup();
   if (!group) return;
-  const res = await fetch("/api/groups/model", {
+  const res = await apiFetch("/api/groups/model", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ groupId: group.groupId, agent: group.leadAgent, ...patch }),
   });
   const data = await res.json();
   if (!res.ok || data.ok === false) {
-    appendLog(`切换任务模型失败: ${data.error || res.status}`);
+    appendLog(t("couldNotSwitchTaskModel", data.error || res.status));
     renderModelSelectorBar();
     return;
   }
@@ -3972,8 +4018,8 @@ async function applyComposerModelOrEffortChange(patch) {
   renderSidebarGroups();
   renderStageHeaderAndTabs();
   renderInspector();
-  const label = data.session?.currentModelId || data.group?.leadModel || "默认";
-  appendLog(`任务 [${group.title}] (${group.leadAgent}) 模型设为: ${label}`);
+  const label = data.session?.currentModelId || data.group?.leadModel || t("default2");
+  appendLog(t("modelForTaskSetTo", displayTaskTitle(group), group.leadAgent, label));
 }
 
 if (els.modelSelect) {
@@ -4080,7 +4126,7 @@ async function refreshWorkspaceFileSuggest(groupId, query, tokenStart, tokenEnd)
   let files = SUGGEST_STATE.fileCache.get(cacheKey);
   if (!files) {
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/workspace/files?groupId=${encodeURIComponent(groupId)}&q=${encodeURIComponent(query)}`,
       );
       const data = await res.json();
@@ -4102,7 +4148,7 @@ async function refreshWorkspaceFileSuggest(groupId, query, tokenStart, tokenEnd)
   SUGGEST_STATE.index = 0;
   SUGGEST_STATE.items = files.slice(0, 12).map((f) => ({
     label: `@${f}`,
-    desc: "工作区文件",
+    desc: t("workspaceFiles"),
     insertText: `@${f} `,
   }));
   renderComposerSuggestList();
@@ -4168,7 +4214,7 @@ function setInspectorCollapsed(collapsed, opts = {}) {
   els.workbench.classList.toggle("inspector-collapsed", collapsed);
   els.toggleInspectorBtn.classList.toggle("is-on", !collapsed);
   els.toggleInspectorBtn.setAttribute("aria-pressed", String(!collapsed));
-  els.toggleInspectorBtn.title = collapsed ? "展开右侧会话面板" : "收起右侧面板";
+  els.toggleInspectorBtn.title = collapsed ? t("openSessionInspector") : t("closeInspector");
   syncInspectorBackdrop();
   if (opts.persist !== false && !isNarrowDrawerViewport()) {
     try {
@@ -4300,12 +4346,12 @@ if (els.jumpLatestBtn) {
 async function exportGroupMarkdown(group = getActiveGroup()) {
   if (!group) return;
   try {
-    const res = await fetch(
+    const res = await apiFetch(
       `/api/groups/export?groupId=${encodeURIComponent(group.groupId)}&format=json`,
     );
     const data = await res.json();
     if (!res.ok || data.ok === false || !data.markdown) {
-      appendLog(`导出失败: ${data.error || res.status}`);
+      appendLog(t("exportFailed", data.error || res.status));
       return;
     }
     const blob = new Blob([data.markdown], { type: "text/markdown;charset=utf-8" });
@@ -4317,9 +4363,9 @@ async function exportGroupMarkdown(group = getActiveGroup()) {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    appendLog(`已导出 Markdown: ${a.download}`);
+    appendLog(t("exportedMarkdown", a.download));
   } catch (err) {
-    appendLog(`导出失败: ${err.message}`);
+    appendLog(t("exportFailed", err.message));
   }
 }
 
@@ -4329,7 +4375,7 @@ function openNewTaskPopover() {
   }
   els.newTaskPopover.hidden = false;
   if (els.newTaskCwdInput && !els.newTaskCwdInput.value.trim()) {
-    els.newTaskCwdInput.placeholder = getActiveGroup()?.cwd || STATE.baseCwd || "默认工作区目录（可留空）";
+    els.newTaskCwdInput.placeholder = getActiveGroup()?.cwd || STATE.baseCwd || t("defaultWorkingDirectoryOptional");
   }
   els.newTaskTitleInput.focus();
 }
@@ -4346,20 +4392,20 @@ function buildQuickSwitcherItems(queryRaw) {
     const busy = isGroupBusy(g.groupId);
     items.push({
       id: `grp:${g.groupId}`,
-      title: g.title,
-      meta: `${g.leadAgent}${g.archived ? " · 已归档" : ""}${busy ? " · 运行中" : ""}`,
+      title: displayTaskTitle(g),
+      meta: `${g.leadAgent}${g.archived ? t("archived") : ""}${busy ? t("running2") : ""}`,
       dotClass: busy ? "busy" : "idle",
-      searchText: `${g.title} ${g.leadAgent} ${g.cwd || ""}`.toLowerCase(),
+      searchText: `${displayTaskTitle(g)} ${g.leadAgent} ${g.cwd || ""}`.toLowerCase(),
       run: () => selectGroup(g.groupId, `lead:${g.groupId}`),
     });
     for (const sub of getGroupSubSessions(g.groupId)) {
       const running = isSessionRunning(sub.sessionKey);
       items.push({
         id: `sub:${sub.sessionKey}`,
-        title: `${g.title} / ↳ ${sub.agent} · ${sub.label || sub.name}`,
-        meta: running ? "子会话 · 运行中" : `子会话 · ${sub.status}`,
+        title: `${displayTaskTitle(g)} / ↳ ${sub.agent} · ${sub.label || sub.name}`,
+        meta: running ? t("subsessionRunning") : t("subsession3", sessionStatusText(sub)),
         dotClass: running ? "busy" : sub.status,
-        searchText: `${g.title} ${sub.agent} ${sub.label || sub.name}`.toLowerCase(),
+        searchText: `${displayTaskTitle(g)} ${sub.agent} ${sub.label || sub.name}`.toLowerCase(),
         run: () => selectGroup(g.groupId, `sub:${sub.sessionKey}`),
       });
     }
@@ -4369,24 +4415,24 @@ function buildQuickSwitcherItems(queryRaw) {
   items.push(
     {
       id: "cmd:new-task",
-      title: "+ 新建并行任务",
-      meta: "快捷键 Ctrl+N",
+      title: t("newParallelTask"),
+      meta: t("shortcutCtrlN"),
       dotClass: "idle",
       searchText: "新建 并行 任务 new task",
       run: () => openNewTaskPopover(),
     },
     {
       id: "cmd:export-md",
-      title: "导出当前任务为 Markdown",
-      meta: activeGroup ? activeGroup.title : "",
+      title: t("exportCurrentTaskAsMarkdown"),
+      meta: activeGroup ? displayTaskTitle(activeGroup) : "",
       dotClass: "idle",
       searchText: "导出 markdown md export",
       run: () => void exportGroupMarkdown(),
     },
     {
       id: "cmd:toggle-archived",
-      title: STATE.showArchivedGroups ? "切回活跃任务列表" : "查看已归档任务",
-      meta: "侧边栏筛选",
+      title: STATE.showArchivedGroups ? t("showActiveTasksAgain") : t("showArchivedTasks"),
+      meta: t("sidebarFilter"),
       dotClass: "idle",
       searchText: "归档 archive 任务列表",
       run: () => {
@@ -4396,16 +4442,16 @@ function buildQuickSwitcherItems(queryRaw) {
     },
     {
       id: "cmd:open-resources",
-      title: "打开资源管理（规则与技能）",
-      meta: "设置 · 资源",
+      title: t("openResourceManagement"),
+      meta: t("settingsResources"),
       dotClass: "idle",
       searchText: "资源 规则 技能 设置 resources rules skills",
       run: () => openSettings("resources"),
     },
     {
       id: "cmd:toggle-theme",
-      title: document.body.classList.contains("dark") ? "切换为浅色主题" : "切换为深色主题",
-      meta: "外观",
+      title: document.body.classList.contains("dark") ? t("switchToLightTheme") : t("switchToDarkTheme"),
+      meta: t("appearance"),
       dotClass: "idle",
       searchText: "主题 深色 浅色 theme dark light",
       run: () => {
@@ -4430,7 +4476,7 @@ function renderQuickSwitcherList() {
   if (items.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty-note";
-    empty.textContent = "未找到匹配的任务或命令";
+    empty.textContent = t("noMatchingTasksOrCommands");
     els.quickSwitcherList.appendChild(empty);
     return;
   }
@@ -4623,10 +4669,10 @@ document.addEventListener("keydown", (e) => {
           lastEscStopAt = 0;
           setStopHint("");
           void cancelSession(activeKey);
-          appendLog("已按 Esc 停止当前会话");
+          appendLog(t("stoppedTheCurrentSessionWithEsc"));
         } else {
           lastEscStopAt = now;
-          setStopHint("再按一次 Esc 停止");
+          setStopHint(t("pressEscAgainToStop"));
           setTimeout(() => {
             if (Date.now() - lastEscStopAt >= 1500) setStopHint("");
           }, 1600);
@@ -4655,7 +4701,7 @@ els.messages.addEventListener("click", (e) => {
       void copyTextToClipboard(msg.text).then((ok) => {
         if (!ok) return;
         const orig = copyMsgBtn.textContent;
-        copyMsgBtn.textContent = "已复制";
+        copyMsgBtn.textContent = t("copied");
         setTimeout(() => {
           copyMsgBtn.textContent = orig;
         }, 1200);
@@ -4682,7 +4728,7 @@ els.messages.addEventListener("click", (e) => {
       preEl.hidden = !showingPreview;
       toggleBtn.classList.toggle("active", !showingPreview);
       if (toggleBtn.hasAttribute("data-preview-toggle")) {
-        toggleBtn.textContent = showingPreview ? "实时预览" : "查看源码";
+        toggleBtn.textContent = showingPreview ? t("livePreview") : t("viewSource");
       }
     }
     return;
@@ -4697,7 +4743,7 @@ els.messages.addEventListener("click", (e) => {
   if (!codeText) return;
   void navigator.clipboard?.writeText(codeText);
   const orig = btn.textContent;
-  btn.textContent = "✓ 已复制";
+  btn.textContent = t("copied2");
   setTimeout(() => {
     btn.textContent = orig;
   }, 1400);
@@ -4705,13 +4751,13 @@ els.messages.addEventListener("click", (e) => {
 
 async function openWorktreeDiffModal(sessionKey) {
   try {
-    const res = await fetch(`/api/worktrees/diff?sessionKey=${encodeURIComponent(sessionKey)}`);
+    const res = await apiFetch(`/api/worktrees/diff?sessionKey=${encodeURIComponent(sessionKey)}`);
     const data = await res.json();
     if (!res.ok || data.ok === false) {
       await showConfirmModal({
-        title: "读取 Worktree 改动失败",
+        title: t("couldNotReadWorktreeChanges"),
         message: data.error || `HTTP ${res.status}`,
-        confirmText: "知道了",
+        confirmText: t("ok"),
       });
       return;
     }
@@ -4721,32 +4767,32 @@ async function openWorktreeDiffModal(sessionKey) {
     const statusText = Array.isArray(data.statusLines) && data.statusLines.length > 0
       ? data.statusLines.join("\n")
       : data.clean
-        ? "工作区干净，与基线分支相比暂无增量提交或未暂存改动。"
+        ? t("theWorktreeIsCleanThereAreNo")
         : "";
     const diffHtml = data.diff && data.diff.trim()
-      ? `<div class="md-code-block"><div class="md-code-head"><span class="md-code-lang">diff${data.truncated ? " (已截断)" : ""}</span></div><pre class="md-code-pre"><code>${highlightCode("diff", data.diff)}</code></pre></div>`
-      : `<div class="empty-note">暂无文本 Diff（可能是新增空目录或无实质改动）。</div>`;
+      ? `<div class="md-code-block"><div class="md-code-head"><span class="md-code-lang">diff${data.truncated ? t("truncated3") : ""}</span></div><pre class="md-code-pre"><code>${highlightCode("diff", data.diff)}</code></pre></div>`
+      : `<div class="empty-note">${th("noTextDiffToDisplayThisCan")}</div>`;
     backdrop.innerHTML = `
       <div class="wt-diff-dialog" role="dialog" aria-modal="true">
         <div class="wt-diff-head">
           <div>
-            <strong>Worktree 改动对比</strong>
+            <strong>${th("worktreeDiff")}</strong>
             <span class="worktree-branch" style="margin-left:8px">${escapeHtml(data.branch || sessionKey)}</span>
           </div>
-          <button type="button" class="mini-icon-btn" data-wt-modal-close title="关闭">×</button>
+          <button type="button" class="mini-icon-btn" data-wt-modal-close title="${th("close")}">×</button>
         </div>
         <div class="wt-diff-body">
-          <div class="mono" style="font-size:12px;color:var(--muted)">基线目录: ${escapeHtml(data.baseCwd || "-")}</div>
+          <div class="mono" style="font-size:12px;color:var(--muted)">${th("baseDirectory", data.baseCwd || "-")}</div>
           ${data.diffStat ? `<pre class="tool-output-pre">${escapeHtml(data.diffStat)}</pre>` : ""}
           ${statusText ? `<pre class="tool-output-pre">${escapeHtml(statusText)}</pre>` : ""}
           ${diffHtml}
         </div>
         <div class="wt-diff-foot">
           <div style="display:flex;gap:8px">
-            <button type="button" class="alma-btn alma-btn-danger alma-btn-sm" data-wt-modal-discard>丢弃 Worktree</button>
-            <button type="button" class="alma-btn alma-btn-primary alma-btn-sm" data-wt-modal-merge>合入主工作区</button>
+            <button type="button" class="alma-btn alma-btn-danger alma-btn-sm" data-wt-modal-discard>${th("discardWorktree")}</button>
+            <button type="button" class="alma-btn alma-btn-primary alma-btn-sm" data-wt-modal-merge>${th("mergeIntoMainWorkspace")}</button>
           </div>
-          <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-wt-modal-close>关闭</button>
+          <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-wt-modal-close>${th("close")}</button>
         </div>
       </div>
     `;
@@ -4772,19 +4818,19 @@ async function openWorktreeDiffModal(sessionKey) {
     };
     document.body.appendChild(backdrop);
   } catch (err) {
-    appendLog(`读取 Worktree 改动异常: ${err.message}`);
+    appendLog(t("couldNotReadWorktreeChanges2", err.message));
   }
 }
 
 async function mergeWorktreeSession(sessionKey) {
   const ok = await showConfirmModal({
-    title: "合入主工作区",
-    message: `确认将子会话 worktree (${sessionKey}) 的改动快照并合入主工作区？合并成功后会自动移除临时 worktree。`,
-    confirmText: "确认合入",
+    title: t("mergeIntoMainWorkspace"),
+    message: t("snapshotTheChangesInSubsessionWorktreeAnd", sessionKey),
+    confirmText: t("mergeChanges"),
   });
   if (!ok) return;
   try {
-    const res = await fetch("/api/worktrees/merge", {
+    const res = await apiFetch("/api/worktrees/merge", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sessionKey, cleanup: true }),
@@ -4792,28 +4838,28 @@ async function mergeWorktreeSession(sessionKey) {
     const data = await res.json();
     if (!res.ok || data.ok === false) {
       await showConfirmModal({
-        title: "合入主工作区失败",
+        title: t("couldNotMergeIntoTheMainWorkspace"),
         message: data.error || `HTTP ${res.status}`,
-        confirmText: "知道了",
+        confirmText: t("ok"),
       });
       return;
     }
-    appendLog(`Worktree 已合入主工作区 (${data.branch || sessionKey}): ${data.summary || "done"}`);
+    appendLog(t("mergedWorktreeIntoTheMainWorkspace", data.branch || sessionKey, data.summary || "done"));
   } catch (err) {
-    appendLog(`合入 Worktree 异常: ${err.message}`);
+    appendLog(t("worktreeMergeError", err.message));
   }
 }
 
 async function discardWorktreeSession(sessionKey) {
   const ok = await showConfirmModal({
-    title: "丢弃 Worktree",
-    message: `确认丢弃子会话 worktree (${sessionKey}) 及其未合入改动？此操作不可撤销。`,
-    confirmText: "确认丢弃",
+    title: t("discardWorktree"),
+    message: t("discardSubsessionWorktreeAndItsUnmergedChanges", sessionKey),
+    confirmText: t("discardChanges"),
     danger: true,
   });
   if (!ok) return;
   try {
-    const res = await fetch("/api/worktrees/discard", {
+    const res = await apiFetch("/api/worktrees/discard", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sessionKey }),
@@ -4821,15 +4867,15 @@ async function discardWorktreeSession(sessionKey) {
     const data = await res.json();
     if (!res.ok || data.ok === false) {
       await showConfirmModal({
-        title: "丢弃 Worktree 失败",
+        title: t("couldNotDiscardWorktree"),
         message: data.error || `HTTP ${res.status}`,
-        confirmText: "知道了",
+        confirmText: t("ok"),
       });
       return;
     }
-    appendLog(`已丢弃 Worktree: ${sessionKey}`);
+    appendLog(t("discardedWorktree", sessionKey));
   } catch (err) {
-    appendLog(`丢弃 Worktree 异常: ${err.message}`);
+    appendLog(t("worktreeDiscardError", err.message));
   }
 }
 
@@ -4840,9 +4886,9 @@ function buildWorktreeBarElement(sessionKey, branchLabel) {
     <span class="wt-pill">worktree</span>
     <span class="worktree-branch">${escapeHtml(branchLabel || sessionKey)}</span>
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-left:auto">
-      <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-wt-diff="${escapeHtml(sessionKey)}">查看改动 Diff</button>
-      <button type="button" class="alma-btn alma-btn-primary alma-btn-sm" data-wt-merge="${escapeHtml(sessionKey)}">合入主工作区</button>
-      <button type="button" class="alma-btn alma-btn-danger alma-btn-sm" data-wt-discard="${escapeHtml(sessionKey)}">丢弃 Worktree</button>
+      <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-wt-diff="${escapeHtml(sessionKey)}">${th("viewChanges")}</button>
+      <button type="button" class="alma-btn alma-btn-primary alma-btn-sm" data-wt-merge="${escapeHtml(sessionKey)}">${th("mergeIntoMainWorkspace")}</button>
+      <button type="button" class="alma-btn alma-btn-danger alma-btn-sm" data-wt-discard="${escapeHtml(sessionKey)}">${th("discardWorktree")}</button>
     </div>
   `;
   return bar;
@@ -4909,6 +4955,7 @@ window.HUB_APP = {
 };
 
 // Init theme & connections
+localizeDocument();
 try {
   applyTheme(localStorage.getItem("agent-hub-theme") === "dark");
 } catch {
