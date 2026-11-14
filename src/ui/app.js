@@ -948,12 +948,13 @@ async function deleteTaskGroup(group) {
   });
 }
 
-async function cancelSession(sessionKey) {
+// steer：打断是为了改方向而不是停下来，后面紧跟着一条引导消息；后端据此让被打断的委派任务继续算数
+async function cancelSession(sessionKey, steer = false) {
   if (!sessionKey) return;
   await apiFetch("/api/peer/cancel", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionKey }),
+    body: JSON.stringify({ sessionKey, steer: steer || undefined }),
   });
 }
 
@@ -2411,8 +2412,10 @@ function buildMessageElement(msg, linkedTasks) {
       delegEl.className = "delegation-strip";
       for (const [sessionKey, tasks] of bySession) {
         const latest = tasks[tasks.length - 1];
-        const active = tasks.some((t) => t.status === "running" || t.status === "queued");
-        const status = active ? (tasks.some((t) => t.status === "running") ? "running" : "queued") : latest.status;
+        // 状态按会话算，不按某一次调用算：会话还在干活（比如被引导后继续）就是进行中，
+        // 否则才看最近一次调用的结果
+        const active = tasks.some((t) => t.status === "running" || t.status === "queued") || isSessionRunning(sessionKey);
+        const status = active ? (tasks.some((t) => t.status === "queued") && !tasks.some((t) => t.status === "running") && !isSessionRunning(sessionKey) ? "queued" : "running") : latest.status;
         const subSess = STATE.sessions.get(sessionKey);
         const label = subSess?.label || sessionKey.split("__sub__")[1] || sessionKey;
         const row = document.createElement("div");
@@ -3438,7 +3441,7 @@ function steerWithQueued(streamKey, itemId) {
   STATE.queuedByStream.set(streamKey, [item, ...queue.filter((q) => q.id !== itemId && !q.steer)]);
   renderComposerQueue();
   if (isStreamBusy(streamKey)) {
-    void cancelSession(streamSessionKey(streamKey));
+    void cancelSession(streamSessionKey(streamKey), true);
   } else {
     flushQueue(streamKey);
   }
@@ -3460,7 +3463,7 @@ async function sendPrompt(options = {}) {
 
   if (isStreamBusy(targetStreamKey)) {
     enqueuePrompt(targetStreamKey, prompt, images, Boolean(options.steer));
-    if (options.steer) void cancelSession(streamSessionKey(targetStreamKey));
+    if (options.steer) void cancelSession(streamSessionKey(targetStreamKey), true);
     return;
   }
   await sendStreamPrompt(prompt, targetStreamKey, images);

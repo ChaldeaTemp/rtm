@@ -285,6 +285,52 @@ async function main(): Promise<void> {
     await sleep(1200);
     check("a run the user stopped is not reported as a failure", updates().length === beforeStop, String(updates().length - beforeStop));
 
+    console.log("=== 5c. Redirecting a session is not cancelling its task ===");
+    const g5 = (await post("/api/groups", { title: "steer", leadAgent: "mock-a", cwd })).group;
+    const leadKey5 = `mock-a:${g5.groupId}__lead`;
+    const taskOf = (id: string): Json => (hub as unknown as { tasks: Map<string, Json> }).tasks.get(id)!;
+    const steered = hub.dispatchPeerTask({
+      targetAgent: "mock-a", groupId: g5.groupId, session: "worker", callerAgent: "user",
+      callerSession: leadKey5, depth: 0, isolateWorktree: false, prompt: "VERYSLOW first plan.",
+    });
+    await until(() => sessions().find((s) => s.sessionKey === steered.targetSessionKey)?.status === "busy", 15000);
+    res = await post("/api/peer/cancel", { sessionKey: steered.targetSessionKey, steer: true });
+    await until(() => sessions().find((s) => s.sessionKey === steered.targetSessionKey)?.status === "idle", 15000);
+    await sleep(300);
+    check("an interrupted-to-redirect task stays open", taskOf(steered.taskId).status === "running", taskOf(steered.taskId).status);
+    const guided = await hub.runSubSessionChat({ sessionKey: steered.targetSessionKey, prompt: "Do it the second way.", steer: true });
+    check(
+      "it ends with the turn that carried the guidance",
+      taskOf(steered.taskId).status === "completed" && /second way/.test(taskOf(steered.taskId).outputText) && guided.stopReason !== "cancelled",
+      `${taskOf(steered.taskId).status}: ${taskOf(steered.taskId).outputText}`,
+    );
+    const stopped = hub.dispatchPeerTask({
+      targetAgent: "mock-a", groupId: g5.groupId, session: "worker2", callerAgent: "user",
+      callerSession: leadKey5, depth: 0, isolateWorktree: false, prompt: "VERYSLOW thing.",
+    });
+    await until(() => sessions().find((s) => s.sessionKey === stopped.targetSessionKey)?.status === "busy", 15000);
+    await post("/api/peer/cancel", { sessionKey: stopped.targetSessionKey });
+    check("a plain stop still cancels the task", await until(() => taskOf(stopped.taskId).status === "cancelled", 15000), taskOf(stopped.taskId).status);
+
+    // The same inside a workflow: redirecting a step's session must not fail the workflow.
+    await post("/api/workflows/save", {
+      groupId: g5.groupId,
+      steps: [
+        { id: "one", agent: "mock-a", prompt: "VERYSLOW step one." },
+        { id: "two", agent: "mock-a", prompt: "Step two.", dependsOn: ["one"] },
+      ],
+    });
+    await post("/api/workflows/run", { groupId: g5.groupId });
+    const wf5 = async (): Promise<Json> => (await get(`/api/workflows?groupId=${g5.groupId}`)).workflow;
+    const oneKey = (await wf5()).steps[0].sessionKey as string;
+    await until(() => sessions().find((s) => s.sessionKey === oneKey)?.status === "busy", 15000);
+    await post("/api/peer/cancel", { sessionKey: oneKey, steer: true });
+    await until(() => sessions().find((s) => s.sessionKey === oneKey)?.status === "idle", 15000);
+    await sleep(300);
+    check("the step is still running after the interruption", (await wf5()).steps[0].status === "running" && (await wf5()).status === "running", (await wf5()).steps[0].status);
+    await hub.runSubSessionChat({ sessionKey: oneKey, prompt: "Take the short route.", steer: true });
+    check("the workflow goes on and completes", await until(async () => (await wf5()).status === "completed", 30000), (await wf5()).status);
+
     console.log("=== 6. Shared MCP servers ===");
     const codexDefs = parseCodexMcpServers(
       [

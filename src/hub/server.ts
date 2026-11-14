@@ -331,6 +331,8 @@ const ProgressUpdateSchema = z.object({
 
 const CancelBodySchema = z.object({
   sessionKey: z.string().min(1),
+  /** The turn is interrupted to redirect it, not to stop the work; a message follows. */
+  steer: z.boolean().optional(),
 });
 
 const PermissionResolveSchema = z.object({
@@ -728,6 +730,9 @@ interface LeadNotice {
   questionId?: string;
 }
 
+/** How long an interrupted task waits for the guidance that should follow the interruption. */
+const STEER_FOLLOW_UP_MS = 90_000;
+
 /** Hub-started lead turns in a row before it waits for the user. */
 const MAX_AUTO_LEAD_TURNS = 8;
 
@@ -801,6 +806,13 @@ export class AgentHubServer {
   private readonly taskContext = new TaskContextStore((context) =>
     this.broadcast({ type: "context_updated", context, timestamp: Date.now() }),
   );
+  /** Sessions whose running turn the user interrupted in order to redirect it, and when. */
+  private readonly steerPending = new Map<string, number>();
+  /**
+   * Dispatched tasks whose turn was interrupted that way. To the user this is still the same
+   * piece of work, so the task stays open and ends with the turn that carries the guidance.
+   */
+  private readonly steeredTasks = new Map<string, TaskRecord>();
   /** Things the lead of a task should hear about, kept until it is free to take a turn. */
   private readonly leadInbox = new Map<string, LeadNotice[]>();
   /** Tasks whose caller is waiting for the result itself (peer_ask) or already fetched it. */
@@ -2666,6 +2678,48 @@ export class AgentHubServer {
   }
 
   /**
+   * A dispatched task's turn was cut short. If the user did it to redirect the session, the
+   * task is kept running for the turn that follows; otherwise it ends as cancelled.
+   */
+  private settleInterruptedTask(task: TaskRecord): void {
+    const key = task.targetSessionKey;
+    const steeredAt = this.steerPending.get(key);
+    if (steeredAt && Date.now() - steeredAt < STEER_FOLLOW_UP_MS) {
+      this.steeredTasks.set(key, task);
+      const timer = setTimeout(() => {
+        // The guidance never came: this was a stop after all.
+        if (this.steeredTasks.get(key) === task && !this.activeAssistantBySession.has(key)) {
+          this.steeredTasks.delete(key);
+          this.steerPending.delete(key);
+          task.status = "cancelled";
+          task.completedAt = Date.now();
+          this.updateTask(task);
+        }
+      }, STEER_FOLLOW_UP_MS);
+      timer.unref();
+      return;
+    }
+    this.steeredTasks.delete(key);
+    task.status = "cancelled";
+    task.completedAt = Date.now();
+    this.updateTask(task);
+  }
+
+  /** The turn that carried the user's guidance ended: that is the end of the steered task. */
+  private finishSteeredTask(task: TaskRecord, outcome: { stopReason: string; outputText: string; error?: string }): void {
+    if (outcome.stopReason === "cancelled") {
+      this.settleInterruptedTask(task);
+      return;
+    }
+    this.steeredTasks.delete(task.targetSessionKey);
+    task.status = outcome.error ? "failed" : "completed";
+    task.error = outcome.error;
+    task.outputText = outcome.outputText;
+    task.completedAt = Date.now();
+    this.updateTask(task);
+  }
+
+  /**
    * Queues something for a task's lead and delivers it as soon as the lead is free. The lead
    * gets one turn for everything that piled up, decides what to do, and tells the user.
    */
@@ -3465,6 +3519,10 @@ export class AgentHubServer {
       throw new Error(t("thisTaskIsArchivedRestoreItBefore"));
     }
 
+    // Guidance after an interruption continues the dispatched task that was interrupted.
+    const steeredTask = input.steer ? this.steeredTasks.get(session.sessionKey) : undefined;
+    this.steerPending.delete(session.sessionKey);
+
     const streamKey = `sub:${session.sessionKey}`;
     // Built before this turn's messages are stored, so it holds only what came earlier.
     const recap = this.buildSubSessionRecap(session.sessionKey);
@@ -3558,6 +3616,7 @@ export class AgentHubServer {
         usage: result.usage,
       });
 
+      if (steeredTask) this.finishSteeredTask(steeredTask, { stopReason: result.stopReason, outputText: result.outputText });
       return {
         sessionKey: result.sessionKey,
         groupId: session.groupId,
@@ -3570,6 +3629,7 @@ export class AgentHubServer {
         assistantMsg.status = "cancelled";
         assistantMsg.completedAt = Date.now();
         this.upsertMessage(assistantMsg);
+        if (steeredTask) this.finishSteeredTask(steeredTask, { stopReason: "cancelled", outputText: assistantMsg.text });
         return {
           sessionKey: session.sessionKey,
           groupId: session.groupId,
@@ -3578,6 +3638,7 @@ export class AgentHubServer {
         };
       }
       this.markAssistantError(assistantMsg, errMsg);
+      if (steeredTask) this.finishSteeredTask(steeredTask, { stopReason: "error", outputText: assistantMsg.text, error: errMsg });
       throw err;
     } finally {
       if (this.activeAssistantBySession.get(session.sessionKey)?.messageId === assistantMsg.messageId) {
@@ -3706,13 +3767,17 @@ export class AgentHubServer {
         effort: body.effort,
       })
       .then((res) => {
-        task.status = res.stopReason === "cancelled" ? "cancelled" : "completed";
         task.outputText = res.outputText;
         task.worktreePath = res.isWorktree ? res.effectiveCwd : undefined;
         task.branch = res.branch;
         task.workspaceSummary = summarizeWorkspaceChanges(res.effectiveCwd);
-        task.completedAt = Date.now();
-        this.updateTask(task);
+        if (res.stopReason === "cancelled") {
+          this.settleInterruptedTask(task);
+        } else {
+          task.status = "completed";
+          task.completedAt = Date.now();
+          this.updateTask(task);
+        }
 
         assistantMsg.status = res.stopReason === "cancelled" ? "cancelled" : "done";
         if (!assistantMsg.text && res.outputText) {
@@ -3736,9 +3801,7 @@ export class AgentHubServer {
       .catch((err) => {
         const errMsg = err instanceof Error ? err.message : String(err);
         if (errMsg.includes("SESSION_CANCELLED_BY_USER")) {
-          task.status = "cancelled";
-          task.completedAt = Date.now();
-          this.updateTask(task);
+          this.settleInterruptedTask(task);
 
           assistantMsg.status = "cancelled";
           assistantMsg.completedAt = Date.now();
@@ -4221,6 +4284,7 @@ export class AgentHubServer {
 
       if (method === "POST" && pathname === "/api/peer/cancel") {
         const body = CancelBodySchema.parse(await readJsonBody(req));
+        if (body.steer) this.steerPending.set(body.sessionKey, Date.now());
         const cancelled = await this.pool.cancelSession(body.sessionKey);
         sendJson(res, 200, { ok: true, cancelled });
         return;

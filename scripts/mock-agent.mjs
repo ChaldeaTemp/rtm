@@ -72,6 +72,8 @@ function answer(text) {
 }
 
 let sessionSeq = 0;
+/** The slow prompt in flight, so a session/cancel can end it the way a real agent would. */
+let pendingSlow;
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on("line", (line) => {
   let msg;
@@ -107,8 +109,15 @@ rl.on("line", (line) => {
       });
       send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } });
     };
-    if (text.includes("SLOW")) setTimeout(reply, slowMs);
-    else reply();
+    if (text.includes("SLOW")) {
+      pendingSlow = { id: msg.id, timer: setTimeout(() => { pendingSlow = undefined; reply(); }, text.includes("VERYSLOW") ? 20000 : slowMs) };
+    } else reply();
+  } else if (msg.method === "session/cancel") {
+    if (pendingSlow) {
+      clearTimeout(pendingSlow.timer);
+      send({ jsonrpc: "2.0", id: pendingSlow.id, result: { stopReason: "cancelled" } });
+      pendingSlow = undefined;
+    }
   } else if (msg.id !== undefined && msg.method) {
     send({ jsonrpc: "2.0", id: msg.id, result: {} });
   }
