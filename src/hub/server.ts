@@ -251,6 +251,14 @@ const WorkflowSaveSchema = z.object({
 
 const WorkflowGroupSchema = z.object({ groupId: z.string().min(1) });
 
+const LeadHandoffSchema = z.object({
+  groupId: z.string().optional(),
+  from: z.string().min(1),
+  to: z.string().min(1),
+  brief: z.string().min(1),
+  depth: z.number().optional(),
+});
+
 const ProgressUpdateSchema = z.object({
   groupId: z.string().optional(),
   goal: z.string().optional(),
@@ -581,6 +589,18 @@ function autoTitleFromPrompt(prompt: string): string {
  * Put in front of a message the user sent to redirect a turn they interrupted. The transcript
  * shows the user's words only; the agent also needs to know why its turn was cut short.
  */
+function buildHandoffPrompt(fromLabel: string, brief: string): string {
+  return [
+    "<lead_handoff>",
+    `You are now the Lead Agent of this task. The user asked the previous lead (${fromLabel}) to hand the task over to you, and it wrote this brief for you:`,
+    "",
+    brief,
+    "</lead_handoff>",
+    "",
+    "You have not seen the earlier conversation; the brief and the task's shared context (`context_get`) are what you have. Reply to the user now, briefly: what you understand you are taking over, and what you will do next. Do not start large pieces of work in this reply unless the brief says the user is waiting for them. If something essential is missing from the brief, ask the user.",
+  ].join("\n");
+}
+
 const STEER_PREFIX =
   "[The user interrupted your previous turn on purpose to steer you. Take the guidance below into account, then continue the task you were working on; do not start over unless the guidance says so.]\n\n";
 
@@ -612,6 +632,8 @@ export class AgentHubServer {
   private readonly lastCostBySession = new Map<string, number>();
   private stateStore?: HubStateStore;
   private progressByGroup = new Map<string, TaskProgress>();
+  /** Handoffs the current lead asked for; carried out when its turn ends. */
+  private pendingHandoffs = new Map<string, { from: AgentId; to: AgentId; brief: string }>();
   /** Sessions from before a restart: not running, kept so their history stays reachable. */
   private archivedSessions = new Map<string, SessionRecord>();
   private readonly taskContext = new TaskContextStore((context) =>
@@ -1030,6 +1052,59 @@ export class AgentHubServer {
     return clean;
   }
 
+  private agentLabel(agent: AgentId): string {
+    return this.registry.getDefinition(agent)?.label || agent;
+  }
+
+  /**
+   * The lead of a task asks to pass the lead role to another agent. Nothing switches yet:
+   * the current lead finishes its turn first, then the new lead is started with the brief.
+   */
+  requestLeadHandoff(input: { groupId?: string; from: string; to: string; brief: string; depth?: number }): {
+    groupId: string;
+    to: AgentId;
+    toLabel: string;
+  } {
+    const group = this.groups.get(input.groupId && this.groups.has(input.groupId) ? input.groupId : this.defaultGroupId)!;
+    if ((input.depth ?? 0) > 0 || input.from.trim().toLowerCase() !== group.leadAgent) {
+      throw new Error("Only the current lead of the task can hand the lead role over.");
+    }
+    const enabled = this.registry.listEnabledDefinitions();
+    const wanted = input.to.trim().toLowerCase();
+    const target = enabled.find((d) => d.id === wanted) ?? enabled.find((d) => (d.label || "").toLowerCase() === wanted);
+    const others = enabled.filter((d) => d.id !== group.leadAgent);
+    if (!target) {
+      throw new Error(
+        `No enabled agent "${input.to}". Agents that can take over: ${others.map((d) => d.id).join(", ") || "(none)"}`,
+      );
+    }
+    if (target.id === group.leadAgent) {
+      throw new Error(`${target.id} already leads this task.`);
+    }
+    const brief = input.brief.trim();
+    if (!brief) {
+      throw new Error("The handoff brief is empty.");
+    }
+    this.pendingHandoffs.set(group.groupId, { from: group.leadAgent, to: target.id, brief });
+    return { groupId: group.groupId, to: target.id, toLabel: target.label || target.id };
+  }
+
+  /** Carries out a handoff the lead asked for during the turn that just ended. */
+  private completePendingHandoff(group: TaskGroup, finishedLead: AgentId, turnSucceeded: boolean): void {
+    const pending = this.pendingHandoffs.get(group.groupId);
+    if (!pending) return;
+    this.pendingHandoffs.delete(group.groupId);
+    if (!turnSucceeded || pending.from !== finishedLead || group.leadAgent !== finishedLead || group.archived) return;
+    try {
+      this.setGroupLeadAgent(group.groupId, pending.to);
+    } catch {
+      return;
+    }
+    // Started before the finished turn's response goes out, so a message the user sends next
+    // queues behind the takeover turn. Failures are already shown in the transcript.
+    void this.runLeadChat({ groupId: group.groupId, handoff: { from: pending.from, brief: pending.brief } }).catch(() => {});
+  }
+
   private syncGroupLeadModelFields(group: TaskGroup): void {
     const def = this.registry.getDefinition(group.leadAgent);
     group.leadModel = group.agentModels?.[group.leadAgent] ?? def?.defaultModel;
@@ -1179,7 +1254,7 @@ export class AgentHubServer {
       sessionKey: buildSessionKey(validAgent, `${groupId}__lead`),
       role: "system",
       senderLabel: "系统",
-      text: `主导会话已切换：${previousLead} → ${validAgent}`,
+      text: `主导已交接：${this.agentLabel(previousLead)} → ${this.agentLabel(validAgent)}`,
       thoughtText: "",
       toolCalls: [],
       status: "done",
@@ -2303,6 +2378,8 @@ export class AgentHubServer {
     files?: Array<{ name: string; mimeType?: string; data: string }>;
     /** The user interrupted the running turn to redirect it; the agent is told so. */
     steer?: boolean;
+    /** The previous lead passed the role on; `brief` is what it wrote for its successor. */
+    handoff?: { from: AgentId; brief: string };
     leadAgent?: AgentId;
     cwd?: string;
     session?: string;
@@ -2326,14 +2403,16 @@ export class AgentHubServer {
 
     const savedImages = this.persistUploadedImages(input.images);
     const savedFiles = this.persistUploadedFiles(input.files);
-    const displayUserText = (input.prompt ?? "").trim();
+    const displayUserText = (input.handoff?.brief ?? input.prompt ?? "").trim();
     const effectiveUserPrompt =
       displayUserText ||
       (savedFiles.length > 0 ? "请查看附带的文件。" : savedImages.length > 0 ? "请查看并分析附带的图片。" : "");
     if (!effectiveUserPrompt) {
       throw new Error("请输入消息内容，或至少附带一张图片或一个文件");
     }
-    const promptForAgent = `${input.steer ? STEER_PREFIX : ""}${effectiveUserPrompt}${buildAttachedFilesBlock(savedFiles)}`;
+    const promptForAgent = input.handoff
+      ? buildHandoffPrompt(this.agentLabel(input.handoff.from), effectiveUserPrompt)
+      : `${input.steer ? STEER_PREFIX : ""}${effectiveUserPrompt}${buildAttachedFilesBlock(savedFiles)}`;
 
     if (group.archived) {
       throw new Error("这个任务已归档，先恢复再发消息");
@@ -2371,7 +2450,15 @@ export class AgentHubServer {
       startsFresh && (group.extraDirs?.length ?? 0) > 0
         ? `\n\n<additional_directories>\nBesides the working directory, this task also covers these directories. Read and edit files there as needed:\n${group.extraDirs!.map((d) => `- ${d}`).join("\n")}\n</additional_directories>`
         : "";
-    const leadPromptMeta = ledger.buildLeadPromptWithMeta(lead, `${promptForAgent}${extraDirsNote}`);
+    // On a handoff the previous lead's own brief replaces the mechanical history. It only counts
+    // as delivered once this turn succeeds (recordTurn); a failed takeover gets the history later.
+    const leadPromptMeta = input.handoff
+      ? {
+          prompt: `${promptForAgent}${extraDirsNote}`,
+          handoffTokens: estimateTokens(promptForAgent),
+          missedTurnsCount: 0,
+        }
+      : ledger.buildLeadPromptWithMeta(lead, `${promptForAgent}${extraDirsNote}`);
 
     const now = Date.now();
     this.upsertMessage({
@@ -2379,8 +2466,9 @@ export class AgentHubServer {
       groupId: group.groupId,
       streamKey,
       sessionKey,
-      role: "user",
-      senderLabel: "你",
+      role: input.handoff ? "caller" : "user",
+      senderLabel: input.handoff ? `${this.agentLabel(input.handoff.from)} 交接` : "你",
+      agent: input.handoff?.from,
       text: displayUserText,
       thoughtText: "",
       toolCalls: [],
@@ -2443,12 +2531,13 @@ export class AgentHubServer {
 
       const turn = ledger.recordTurn({
         leadAgent: lead,
-        userText: effectiveUserPrompt,
+        userText: input.handoff ? `[Handoff brief from ${input.handoff.from}] ${effectiveUserPrompt}` : effectiveUserPrompt,
         assistantSummary: result.outputText,
         peerCallsSummary: result.peerToolsCalled,
       });
       turn.groupId = group.groupId;
       this.broadcast({ type: "ledger_turn", turn: { ...turn }, timestamp: Date.now() });
+      this.completePendingHandoff(group, lead, result.stopReason !== "cancelled");
 
       if (promptDerivedTitle && this.settings.autoTitle && result.stopReason !== "cancelled") {
         void this.generateTaskTitle(group, promptDerivedTitle, effectiveUserPrompt, result.outputText);
@@ -2464,6 +2553,7 @@ export class AgentHubServer {
       };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
+      this.completePendingHandoff(group, lead, false);
       if (errMsg.includes("SESSION_CANCELLED_BY_USER")) {
         assistantMsg.status = "cancelled";
         assistantMsg.completedAt = Date.now();
@@ -3193,6 +3283,12 @@ export class AgentHubServer {
         const body = LeadBodySchema.parse(await readJsonBody(req));
         const group = this.setGroupLeadAgent(body.groupId ?? this.defaultGroupId, body.agent);
         sendJson(res, 200, { ok: true, groupId: group.groupId, leadAgent: group.leadAgent });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/lead/handoff") {
+        const body = LeadHandoffSchema.parse(await readJsonBody(req));
+        sendJson(res, 200, { ok: true, ...this.requestLeadHandoff(body) });
         return;
       }
 

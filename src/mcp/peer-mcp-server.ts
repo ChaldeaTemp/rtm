@@ -244,6 +244,37 @@ async function main(): Promise<void> {
   );
 
   server.registerTool(
+    "lead_handoff",
+    {
+      description:
+        "Hand the lead role of this task over to another agent. Lead only, and only when the user asks for it (e.g. \"switch to codex\", \"let claude take over\"). The switch happens when your current turn ends: the new lead starts in a fresh session and sees nothing of this conversation except your `brief`, then reports to the user. After calling this, tell the user in one sentence that the handoff is done and stop; do not continue the work.",
+      inputSchema: {
+        to: z.string().min(1).describe("Id of the agent that takes over (see peer_list_agents for the enabled agents)."),
+        brief: z
+          .string()
+          .min(1)
+          .describe(
+            "Everything your successor needs, written for someone who has seen nothing: the user's goal, what is done, decisions and their reasons, what is in progress or blocked, the next steps, key files and paths, and the user's preferences and constraints stated so far.",
+          ),
+      },
+    },
+    async ({ to, brief }) => {
+      const res = await callHub<{ to: string; toLabel: string }>(cfg.hubUrl, "/api/lead/handoff", {
+        method: "POST",
+        body: { groupId: cfg.groupId, from: cfg.callerAgent, to, brief, depth: cfg.depth },
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Handoff registered. ${res.toLabel} (${res.to}) takes over with your brief as soon as this turn ends. Tell the user so in one sentence and end your turn now.`,
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
     "progress_update",
     {
       description:

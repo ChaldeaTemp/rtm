@@ -52,6 +52,7 @@ export function buildHubWorkbenchGuide(role: "lead" | "sub" = "lead"): string {
     lines.push(
       "- Peer agent collaboration: Call `peer_list_agents`, `peer_ask` (sync), or `peer_dispatch` + `peer_status` (parallel sub-sessions) when delegating subtasks.",
       "- Multi-step delegation with dependencies: Call `workflow_propose` to draft the steps; the user reviews and publishes the draft in the Workflow panel, so do not dispatch those steps yourself.",
+      "- Handing over the lead: when the user asks you to pass this task to another agent, call `lead_handoff` with that agent's id and a complete brief, then tell the user in one sentence and stop. Never do this on your own initiative.",
       "- Shared task context: sub-sessions do not see this conversation. Whatever several of them need (goal, conventions, constraints, where materials are) goes into the task's shared context once, via `shared_context`/`sections` of `workflow_propose` or `context_put`, and is delivered to them automatically. Keep delegation prompts to what is specific to that delegation; never paste the same background into each one.",
     );
   }

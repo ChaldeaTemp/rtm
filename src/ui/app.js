@@ -232,8 +232,22 @@ function applyAgentColorVar(el, agentId) {
   if (color) el.style.setProperty("--agent-color", color);
 }
 
+// 界面上一律显示 Agent 的名称；id 只用于内部标识
+function agentName(agentId) {
+  if (!agentId) return "";
+  const list = STATE.agents && STATE.agents.length > 0 ? STATE.agents : BUILTIN_FALLBACK_AGENTS;
+  return list.find((a) => a.agent === agentId)?.label || agentId;
+}
+
+// 服务端给的发送者标签以 id 开头（如 "codex 委派"），显示时换成名称
+function senderLabelText(msg) {
+  const label = msg.senderLabel || "";
+  if (msg.agent && label.startsWith(msg.agent)) return agentName(msg.agent) + label.slice(msg.agent.length);
+  return label;
+}
+
 function agentTagHtml(agentId, text) {
-  const label = text ?? agentId;
+  const label = text ?? agentName(agentId);
   return `<span class="agent-tag" data-agent="${escapeHtml(agentId)}"${getAgentColorStyle(agentId)}>${escapeHtml(label)}</span>`;
 }
 
@@ -246,6 +260,21 @@ function applyDefaultLead(msg) {
   }
   STATE.defaultLead = next;
   STATE.configuredDefaultLead = msg.configuredDefaultLead || "";
+}
+
+// 主导在新建任务时指定，这里只显示。要换人，在对话里让当前主导交接（lead_handoff）。
+function renderLeadBadge(group) {
+  if (!els.leadSwitcher) return;
+  const lead = group?.leadAgent;
+  els.leadSwitcher.innerHTML = '<span class="lead-switch-label">主导</span>';
+  if (!lead) return;
+  const badge = document.createElement("span");
+  badge.className = "lead-pill active is-static";
+  badge.dataset.agent = lead;
+  applyAgentColorVar(badge, lead);
+  badge.textContent = agentName(lead);
+  els.leadSwitcher.appendChild(badge);
+  els.leadSwitcher.title = `这个任务由 ${agentName(lead)} 主导。要换人，直接在对话里让它交接给其他 Agent`;
 }
 
 function renderAgentControls() {
@@ -269,7 +298,7 @@ function renderAgentControls() {
       btn.className = "quick-btn";
       btn.dataset.quickLead = item.agent;
       applyAgentColorVar(btn, item.agent);
-      btn.textContent = `+ ${item.agent}`;
+      btn.textContent = `+ ${item.label || item.agent}`;
       btn.title = `以 ${item.label || item.agent} 为主导，新建一个并行任务`;
       btn.onclick = () => {
         void createTaskGroup({ leadAgent: item.agent });
@@ -286,7 +315,7 @@ function renderAgentControls() {
       btn.className = `popover-agent-opt${item.agent === STATE.newTaskLead ? " active" : ""}`;
       btn.dataset.agent = item.agent;
       applyAgentColorVar(btn, item.agent);
-      btn.textContent = item.agent;
+      btn.textContent = item.label || item.agent;
       btn.onclick = () => {
         STATE.newTaskLead = item.agent;
         els.newTaskAgents
@@ -297,24 +326,7 @@ function renderAgentControls() {
     }
   }
 
-  if (els.leadSwitcher) {
-    const activeLead = getActiveGroup()?.leadAgent;
-    els.leadSwitcher.innerHTML = '<span class="lead-switch-label">主导</span>';
-    for (const item of enabled) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = `lead-pill${item.agent === activeLead ? " active" : ""}`;
-      btn.dataset.agent = item.agent;
-      applyAgentColorVar(btn, item.agent);
-      btn.textContent = item.agent;
-      btn.title = item.available ? `${item.label || item.agent} (就绪)` : `${item.label || item.agent}: ${item.reason || "未就绪"}`;
-      btn.onclick = () => {
-        const group = getActiveGroup();
-        if (group) void switchGroupLead(group.groupId, item.agent);
-      };
-      els.leadSwitcher.appendChild(btn);
-    }
-  }
+  renderLeadBadge(getActiveGroup());
 
   if (els.adapterPills) {
     els.adapterPills.innerHTML = "";
@@ -950,14 +962,6 @@ async function deleteTaskGroup(group) {
   });
 }
 
-async function switchGroupLead(groupId, agent) {
-  await fetch("/api/lead", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ groupId, agent }),
-  });
-}
-
 async function cancelSession(sessionKey) {
   if (!sessionKey) return;
   await fetch("/api/peer/cancel", {
@@ -1290,7 +1294,7 @@ function renderSidebarGroups() {
     const meta = document.createElement("div");
     meta.className = "group-meta";
     meta.innerHTML = `
-      ${agentTagHtml(group.leadAgent, `★ ${group.leadAgent}`)}
+      ${agentTagHtml(group.leadAgent, `★ ${agentName(group.leadAgent)}`)}
       ${group.archived ? `<span class="archived-pill">归档于 ${escapeHtml(new Date(group.archivedAt || group.updatedAt).toLocaleDateString())}</span>` : ""}
       ${(group.extraDirs || []).length > 0 ? `<span class="archived-pill" title="${escapeHtml(group.extraDirs.join("\n"))}">+${group.extraDirs.length} 个目录</span>` : ""}
       ${activeModel ? `<span class="model-badge-pill" title="当前/预设模型">${escapeHtml(activeModel)}</span>` : ""}
@@ -1311,7 +1315,7 @@ function renderSidebarGroups() {
       leadNode.innerHTML = `
         <span class="tree-node-left">
           <span class="dot ${busy ? "busy" : "idle"}"></span>
-          <span class="tree-node-label">${escapeHtml(group.leadAgent)} · 主导</span>
+          <span class="tree-node-label">${escapeHtml(agentName(group.leadAgent))} · 主导</span>
         </span>
       `;
       leadNode.onclick = (e) => {
@@ -1329,7 +1333,7 @@ function renderSidebarGroups() {
         subNode.innerHTML = `
           <span class="tree-node-left">
             <span class="dot ${subRunning ? "busy" : escapeHtml(sub.status)}"></span>
-            <span class="tree-node-label">${escapeHtml(sub.agent)} · ${escapeHtml(sub.label || sub.name)}</span>
+            <span class="tree-node-label">${escapeHtml(agentName(sub.agent))} · ${escapeHtml(sub.label || sub.name)}</span>
           </span>
           ${sub.isWorktree ? '<span class="wt-pill">wt</span>' : ""}
         `;
@@ -1533,27 +1537,25 @@ function renderStageHeaderAndTabs() {
 
   els.stageTaskTitle.textContent = group.title;
   if (subMode && subSession) {
-    els.streamBadge.textContent = `子会话 · ${subSession.agent} (${subSession.label || subSession.name})`;
+    els.streamBadge.textContent = `子会话 · ${agentName(subSession.agent)} (${subSession.label || subSession.name})`;
     els.streamBadge.className = "stream-badge sub";
     els.leadSwitcher.hidden = true;
     els.backToLeadBtn.hidden = false;
-    els.composerLabel.textContent = `直连子会话 · ${subSession.agent}:${subSession.label || subSession.name}`;
+    els.composerLabel.textContent = `直连子会话 · ${agentName(subSession.agent)}:${subSession.label || subSession.name}`;
     els.composerHint.textContent = "可直接向该子会话追加追问，不会污染任务主对话上下文";
-    els.promptInput.placeholder = `给子会话 ${subSession.agent} 发消息`;
+    els.promptInput.placeholder = `给子会话 ${agentName(subSession.agent)} 发消息`;
   } else {
-    // 主导是谁已由旁边的主导切换条表明，这里不再重复
+    // 主导是谁已由旁边的主导标记表明，这里不再重复
     els.streamBadge.textContent = "";
     els.streamBadge.className = "stream-badge";
     els.leadSwitcher.hidden = false;
     els.backToLeadBtn.hidden = true;
-    els.composerLabel.textContent = `${group.title} · 主导 ${group.leadAgent}`;
-    els.composerHint.textContent = `当前任务独立由 ${group.leadAgent} 主导，可随时切换或与其他任务并行执行`;
-    els.promptInput.placeholder = `给 ${group.leadAgent} 发消息`;
+    els.composerLabel.textContent = `${group.title} · 主导 ${agentName(group.leadAgent)}`;
+    els.composerHint.textContent = `当前任务由 ${agentName(group.leadAgent)} 主导；要换人，直接让它交接给其他 Agent`;
+    els.promptInput.placeholder = `给 ${agentName(group.leadAgent)} 发消息`;
   }
 
-  document.querySelectorAll("#leadSwitcher .lead-pill").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.agent === group.leadAgent);
-  });
+  renderLeadBadge(group);
 
   // 已归档的任务只读：输入框换成一条「恢复任务」
   const archivedBar = document.getElementById("archivedBar");
@@ -1575,7 +1577,7 @@ function renderStageHeaderAndTabs() {
     const leadTab = document.createElement("button");
     leadTab.type = "button";
     leadTab.className = `session-tab${STATE.activeStreamKey === leadStreamKey ? " active" : ""}`;
-    leadTab.innerHTML = `<span class="dot ${isGroupBusy(group.groupId) ? "busy" : "idle"}"></span>${escapeHtml(group.leadAgent)} · 主导`;
+    leadTab.innerHTML = `<span class="dot ${isGroupBusy(group.groupId) ? "busy" : "idle"}"></span>${escapeHtml(agentName(group.leadAgent))} · 主导`;
     leadTab.onclick = () => selectGroup(group.groupId, leadStreamKey);
     els.sessionTabs.appendChild(leadTab);
 
@@ -1586,7 +1588,7 @@ function renderStageHeaderAndTabs() {
       tab.type = "button";
       tab.className = `session-tab is-sub${STATE.activeStreamKey === key ? " active" : ""}`;
       tab.title = sub.sessionKey;
-      tab.innerHTML = `<span class="dot ${subRunning ? "busy" : escapeHtml(sub.status)}"></span>${escapeHtml(sub.agent)} · ${escapeHtml(sub.label || sub.name)}${sub.isWorktree ? " [wt]" : ""}`;
+      tab.innerHTML = `<span class="dot ${subRunning ? "busy" : escapeHtml(sub.status)}"></span>${escapeHtml(agentName(sub.agent))} · ${escapeHtml(sub.label || sub.name)}${sub.isWorktree ? " [wt]" : ""}`;
       tab.onclick = () => selectGroup(group.groupId, key);
       els.sessionTabs.appendChild(tab);
     }
@@ -1608,7 +1610,7 @@ function renderStageHeaderAndTabs() {
   renderModelSelectorBar();
 }
 
-const BASE_DOC_TITLE = "RTM";
+const BASE_DOC_TITLE = "RoundTable Meeting";
 // 图标地址带着服务端给的版本号（?v=…），这里沿用页面里的地址，换图标后不会被旧缓存挡住
 const DEFAULT_FAVICON_HREF = document.getElementById("appFavicon")?.getAttribute("href") || "/ui/icon-64.png";
 const ALERT_FAVICON_HREF = DEFAULT_FAVICON_HREF.replace("icon-64.png", "icon-alert.png");
@@ -1683,7 +1685,7 @@ function syncAttentionIndicators(notifyPayload = null) {
       playSoftAlertChime();
       if ("Notification" in window && Notification.permission === "granted") {
         try {
-          const n = new Notification("RTM 需要你的确认", {
+          const n = new Notification("RoundTable Meeting 需要你的确认", {
             body: notifyPayload.body,
             tag: "agent-hub-pending",
             renotify: true,
@@ -1774,7 +1776,7 @@ function renderEmptyStage(group) {
   box.className = "alma-box empty-stage";
   box.innerHTML = `
     <div class="empty-inner">
-      <h2>${escapeHtml(group?.leadAgent || "claude")} 已就绪</h2>
+      <h2>${escapeHtml(agentName(group?.leadAgent || "claude"))} 已就绪</h2>
       <p>直接发消息开始，或从下面选一个。</p>
       <div class="starter-list">
         <button type="button" class="starter-btn" data-starter="列出当前项目目录核心文件，并委派 codex 检查主要入口逻辑是否存在边界问题">
@@ -2057,7 +2059,7 @@ function buildMessageElement(msg, linkedTasks) {
       const modelPart = msg.usage.modelId ? `${escapeHtml(msg.usage.modelId.split("/").pop())}　` : "";
       usageHtml = `<span class="msg-usage-pill" title="${escapeHtml(detail)}">${modelPart}${estMark}↑${formatTokens(msg.usage.inputTokens)} ↓${formatTokens(msg.usage.outputTokens)}</span>`;
     }
-    meta.innerHTML = `${agentTagHtml(msg.agent, msg.senderLabel)}<span>${formatTime(msg.timestamp)}</span>${usageHtml}`;
+    meta.innerHTML = `${agentTagHtml(msg.agent, senderLabelText(msg))}<span>${formatTime(msg.timestamp)}</span>${usageHtml}`;
   } else {
     meta.innerHTML = `<span>${escapeHtml(`${msg.senderLabel} · ${formatTime(msg.timestamp)}`)}</span>`;
   }
@@ -2658,6 +2660,7 @@ function renderDesktopControls() {
   if (els.portBadge) {
     els.portBadge.textContent = activePort ? `:${activePort}` : "";
     els.portBadge.title = activePort ? `当前监听端口 ${activePort}` : "";
+    if (els.portBadge.parentElement) els.portBadge.parentElement.title = activePort ? `当前监听端口 ${activePort}` : "";
   }
   if (els.quitHubBtn) {
     els.quitHubBtn.hidden = !STATE.desktopMode;

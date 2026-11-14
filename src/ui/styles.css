@@ -409,11 +409,13 @@ body:not([data-skin="classic"]) .alma-box-corner-br {
 .brand-title {
   display: flex;
   align-items: center;
-  gap: 9px;
   font-family: var(--ui);
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 650;
-  letter-spacing: 0.01em;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  min-width: 0;
+  gap: 7px;
 }
 
 .brand-mark {
@@ -434,8 +436,9 @@ body:not([data-skin="classic"]) .alma-box-corner-br {
   color: var(--muted);
 }
 
+/* 标题变长后这一行放不下端口号，端口改在连接状态的悬停提示里显示 */
 .ws-status #portBadge {
-  color: var(--faint);
+  display: none;
 }
 
 .ws-status #portBadge:empty {
@@ -962,6 +965,11 @@ kbd {
 
 .lead-pill.active::before {
   opacity: 1;
+}
+
+/* 只显示当前主导，不可点击 */
+.lead-pill.is-static {
+  cursor: default;
 }
 
 /* 原生下拉框统一外观：去掉系统箭头，用双线渐变画一个随主题变色的小箭头 */
@@ -3299,4 +3307,10 @@ body[data-skin="roundtable"] *::-webkit-scrollbar-track {
   flex-shrink: 0;
   font-size: 12px;
   color: var(--faint);
+}
+
+/* 圆桌皮肤的标题字距在全称下会溢出侧栏 */
+body[data-skin="roundtable"] .brand-title {
+  letter-spacing: 0;
+  font-size: 12.5px;
 }

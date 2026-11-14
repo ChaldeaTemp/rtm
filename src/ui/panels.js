@@ -166,7 +166,7 @@ function renderResourcesPanel() {
       (b) => `
       <div class="stat-card">
         <div class="stat-card-label">
-          <span class="agent-tag" data-agent="${esc(b.agent)}">${esc(b.agent)}</span>
+          ${app.agentTagHtml ? app.agentTagHtml(b.agent) : `<span class="agent-tag" data-agent="${esc(b.agent)}">${esc(b.agent)}</span>`}
           <span>首轮桥接 ~${fmtTok(b.firstTurnInjectionTokens)} tok</span>
         </div>
         <div class="stat-card-value">${b.nativeRules + b.bridgedRules} 规则 · ${b.nativeSkills + b.bridgedSkills} 技能</div>
