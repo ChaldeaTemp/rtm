@@ -333,6 +333,43 @@ async function main(): Promise<void> {
   );
 
   server.registerTool(
+    "task_report",
+    {
+      description:
+        `Report the outcome of a task that was published on the task board. Lead only. Call it once, when the work is finished ("delivered", with every deliverable; files as paths relative to the working directory, they are checked to exist) or cannot be done ("failed", with the reason). The board frees this task's slot when you report, and the user then confirms or sends the delivery back. After calling it, tell the user in a few lines what was delivered and end your turn.`,
+      inputSchema: {
+        outcome: z.enum(["delivered", "failed"]),
+        summary: z.string().min(1),
+        deliverables: z
+          .array(
+            z.object({
+              kind: z.enum(["file", "text", "link"]),
+              path: z.string().optional(),
+              note: z.string().optional(),
+            }),
+          )
+          .max(50)
+          .optional(),
+        reason: z.string().optional(),
+      },
+    },
+    async ({ outcome, summary, deliverables, reason }) => {
+      await callHub(cfg.hubUrl, "/api/board/report", {
+        method: "POST",
+        body: { groupId: cfg.groupId, depth: cfg.depth, outcome, summary, deliverables, reason },
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Report registered (${outcome}). The task slot has been freed. Tell the user in a few lines what was delivered and end your turn now.`,
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
     "progress_update",
     {
       description:

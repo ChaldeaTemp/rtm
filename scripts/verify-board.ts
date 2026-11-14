@@ -165,6 +165,29 @@ async function main(): Promise<void> {
         try { fs.rmSync(memTmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* ignore on windows */ }
       }
     }
+
+    console.log("=== 3. Report ===");
+    const report = (groupId: string, body: Json) => post("/api/board/report", { groupId, ...body });
+    res = await report(ids[0], { outcome: "delivered", summary: "done", deliverables: [{ kind: "file", path: "out/missing.md" }] });
+    check("a missing file is refused and named", res.ok === false && /out\/missing\.md/.test(res.error ?? "") && (await card(ids[0]))?.board.status === "running");
+    res = await report(ids[0], { outcome: "delivered", summary: "done", deliverables: [{ kind: "file", path: "../outside.md" }] });
+    check("a path outside the task directory is refused", res.ok === false);
+    fs.mkdirSync(path.join(cwd, "out"), { recursive: true });
+    res = await report(ids[0], { outcome: "delivered", summary: "done", deliverables: [{ kind: "file", path: "out" }] });
+    check("a directory itself is refused as a file deliverable", res.ok === false);
+    res = await report(ids[0], { depth: 1, outcome: "delivered", summary: "done" });
+    check("a sub-session cannot report", res.ok === false && (await card(ids[0]))?.board.status === "running");
+    fs.writeFileSync(path.join(cwd, "out", "a.md"), "x");
+    res = await report(ids[0], { outcome: "delivered", summary: "wrote a.md", deliverables: [{ kind: "file", path: "out/a.md" }, { kind: "text", note: "see chat" }] });
+    check("delivered", res.ok === true && res.board.status === "delivered" && res.board.deliverables.length === 2 && typeof res.board.deliveredAt === "number", res.error);
+    check("the next task starts", await until(async () => (await card(ids[1]))?.board.status === "running"));
+    check("reporting twice is refused", (await report(ids[0], { outcome: "delivered", summary: "again" })).ok === false);
+    check("its sessions are released once the turn ends", await until(() => sessions().filter((s) => s.groupId === ids[0]).every((s) => s.status === "closed"), 30000));
+    res = await report(ids[1], { outcome: "failed", summary: "cannot", reason: "no access" });
+    check("failed with a reason", res.ok === true && res.board.status === "failed" && res.board.failReason === "no access");
+    check("failed needs a reason", (await report(ids[2], { outcome: "failed", summary: "x" })).ok === false);
+    const plain = (await post("/api/groups", { title: "plain2", leadAgent: "mock-a", cwd })).group;
+    check("a task that is not on the board is refused", (await report(plain.groupId, { outcome: "delivered", summary: "x" })).ok === false);
   } finally {
     await hub.stop();
     try { fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* ignore on windows */ }

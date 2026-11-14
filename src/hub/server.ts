@@ -12,6 +12,7 @@ import {
   type ArtifactKind,
   type ArtifactRecord,
   type BoardCard,
+  type BoardDeliverable,
   type BoardWaitingReason,
   type ChatImageAttachment,
   type ChatMessagePart,
@@ -22,6 +23,7 @@ import {
   type QuestionField,
   type SessionRecord,
   type SessionUsageTotals,
+  type TaskBoardInfo,
   type TaskGroup,
   type TaskRecord,
   type WorkflowRecord,
@@ -50,6 +52,7 @@ import {
   DEFAULT_BOARD_PARALLEL,
   clampBoardParallel,
   clampIdleLeadMinutes,
+  missingDeliverables,
   pickToStart,
 } from "./task-board.js";
 import { SharedResourceManager, estimateTokens } from "./resources.js";
@@ -240,6 +243,24 @@ const PublishBoardBodySchema = z.object({
     .min(1)
     .max(50),
   common: z.string().optional(),
+});
+
+const ReportBoardBodySchema = z.object({
+  groupId: z.string().min(1),
+  depth: z.number().int().min(0).optional(),
+  outcome: z.enum(["delivered", "failed"]),
+  summary: z.string().min(1),
+  deliverables: z
+    .array(
+      z.object({
+        kind: z.enum(["file", "text", "link"]),
+        path: z.string().optional(),
+        note: z.string().optional(),
+      }),
+    )
+    .max(50)
+    .optional(),
+  reason: z.string().optional(),
 });
 
 const SessionChatBodySchema = z
@@ -1765,6 +1786,97 @@ export class AgentHubServer {
     } finally {
       this.pumpingBoard = false;
     }
+  }
+
+  private releaseBoardSessions(groupId: string): void {
+    const now = Date.now();
+    for (const session of this.pool.listSessions()) {
+      if (session.groupId !== groupId) continue;
+      const asleep: SessionRecord = {
+        ...session,
+        status: "closed",
+        closedReason: "idle",
+        pid: undefined,
+        updatedAt: now,
+      };
+      this.archivedSessions.set(session.sessionKey, asleep);
+      void this.pool.closeSession(session.sessionKey).then(() => {
+        this.broadcast({ type: "session_updated", session: { ...asleep }, timestamp: Date.now() });
+      });
+    }
+  }
+
+  reportBoardTask(input: {
+    groupId: string;
+    depth?: number;
+    outcome: "delivered" | "failed";
+    summary: string;
+    deliverables?: BoardDeliverable[];
+    reason?: string;
+  }): TaskBoardInfo {
+    if ((input.depth ?? 0) > 0) {
+      throw new Error("Only the lead of the task can report its outcome on the task board.");
+    }
+    const group = this.groups.get(input.groupId);
+    if (!group || !group.board) {
+      throw new Error("This task is not on the task board; nothing to report.");
+    }
+    if (group.board.status !== "running") {
+      throw new Error(`This task is ${group.board.status}; it can only be reported while running.`);
+    }
+    const cleanSummary = input.summary.trim();
+    if (!cleanSummary) {
+      throw new Error("Report summary must not be empty.");
+    }
+    const now = Date.now();
+    if (input.outcome === "failed") {
+      const cleanReason = input.reason?.trim();
+      if (!cleanReason) {
+        throw new Error("Failed outcome requires a non-empty reason.");
+      }
+      group.board.status = "failed";
+      group.board.summary = cleanSummary;
+      group.board.failReason = cleanReason;
+      group.board.closedAt = now;
+      delete group.board.stalled;
+      delete group.board.interrupted;
+    } else {
+      const isExistingFile = (absPath: string): boolean => {
+        try {
+          return fs.statSync(absPath).isFile();
+        } catch {
+          return false;
+        }
+      };
+      const missing = missingDeliverables(
+        input.deliverables ?? [],
+        [group.cwd, ...(group.extraDirs ?? [])],
+        isExistingFile,
+      );
+      if (missing.length > 0) {
+        throw new Error(
+          `These files do not exist: ${missing.join(", ")}. Create them or correct the list, then report again.`,
+        );
+      }
+      group.board.status = "delivered";
+      group.board.summary = cleanSummary;
+      group.board.deliverables = (input.deliverables ?? []).map((d) => ({ ...d }));
+      group.board.deliveredAt = now;
+      delete group.board.failReason;
+      delete group.board.stalled;
+      delete group.board.interrupted;
+    }
+    this.leadInbox.delete(group.groupId);
+    this.boardChanged(group);
+    const hasActiveSession = this.pool.listSessions().some(
+      (s) =>
+        s.groupId === group.groupId &&
+        (s.status === "busy" || s.status === "starting" || this.activeAssistantBySession.has(s.sessionKey)),
+    );
+    if (!hasActiveSession) {
+      this.releaseBoardSessions(group.groupId);
+    }
+    return { ...group.board };
   }
 
   updateGroup(input: {
@@ -3698,6 +3810,9 @@ export class AgentHubServer {
       if (this.activeAssistantBySession.get(sessionKey)?.messageId === assistantMsg.messageId) {
         this.activeAssistantBySession.delete(sessionKey);
       }
+      if (group.board?.status === "delivered" || group.board?.status === "failed") {
+        this.releaseBoardSessions(group.groupId);
+      }
       setImmediate(() => this.flushLeadInbox(group.groupId));
     }
   }
@@ -4345,6 +4460,13 @@ export class AgentHubServer {
         const body = PublishBoardBodySchema.parse(await readJsonBody(req));
         const groups = this.publishBoardTasks(body);
         sendJson(res, 200, { ok: true, groups });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/board/report") {
+        const body = ReportBoardBodySchema.parse(await readJsonBody(req));
+        const board = this.reportBoardTask(body);
+        sendJson(res, 200, { ok: true, board });
         return;
       }
 
