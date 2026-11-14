@@ -176,9 +176,11 @@ async function main(): Promise<void> {
     await hub.pool.closeSession(`${primaryAgent}:wt-test`).catch(() => false);
     await new Promise((r) => setTimeout(r, 300));
     removeSessionWorktree(PROJECT_ROOT, expectedWtPath);
-    execFileSync("git", ["-C", PROJECT_ROOT, "branch", "-D", "agent-hub/wt-test"], {
-      stdio: "ignore",
-    });
+    // removeSessionWorktree now deletes the temporary branch as well.
+    const leftover = execFileSync("git", ["-C", PROJECT_ROOT, "branch", "--list", "agent-hub/wt-test"], {
+      encoding: "utf8",
+    }).trim();
+    assert.equal(leftover, "", "Temporary worktree branch should be gone after cleanup");
     console.log("Worktree and temporary branch cleaned up successfully.");
 
     console.log("\n=== 5. Alma UI Static Assets & Group APIs ===");

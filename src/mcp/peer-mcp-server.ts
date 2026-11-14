@@ -341,6 +341,16 @@ async function main(): Promise<void> {
               depends_on: z.array(z.string()).optional().describe("Ids of steps that must finish first."),
               context: z.array(z.string()).optional().describe("Keys of the sections this step needs."),
               isolate_worktree: z.boolean().optional().describe("Run the step in its own git worktree."),
+              review: z
+                .object({
+                  agent: z.string().min(1).describe("Agent ID that reviews the step's work; pick a different agent than the one doing it."),
+                  criteria: z.string().optional().describe("What the work must satisfy to be accepted."),
+                  max_rounds: z.number().int().min(1).max(5).optional().describe("Reviews before the step fails (default 2)."),
+                })
+                .optional()
+                .describe(
+                  "Acceptance gate. When the step's agent is done the reviewer checks the work; a rejection goes back to the same agent with the findings. Use this instead of separate 'implement' and 'accept' steps.",
+                ),
             }),
           )
           .min(1)
@@ -366,6 +376,9 @@ async function main(): Promise<void> {
               dependsOn: s.depends_on,
               contextRefs: s.context,
               isolateWorktree: s.isolate_worktree,
+              review: s.review
+                ? { agent: s.review.agent, criteria: s.review.criteria, maxRounds: s.review.max_rounds }
+                : undefined,
             })),
           },
         },

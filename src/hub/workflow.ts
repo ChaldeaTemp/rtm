@@ -1,6 +1,8 @@
 import type { AgentId, TaskRecord, WorkflowRecord, WorkflowStep, WorkflowStepInput } from "../types.js";
 
 const MAX_STEPS = 20;
+const DEFAULT_REVIEW_ROUNDS = 2;
+const MAX_REVIEW_ROUNDS = 5;
 const STEP_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 export interface WorkflowDeps {
@@ -91,6 +93,7 @@ export class WorkflowManager {
         dependsOn: [...new Set((raw.dependsOn ?? []).map((d) => d.trim().toLowerCase()).filter(Boolean))],
         contextRefs: [...new Set((raw.contextRefs ?? []).map((k) => k.trim().toLowerCase()).filter(Boolean))],
         isolateWorktree: Boolean(raw.isolateWorktree),
+        review: this.normalizeReview(id, raw.review),
         status: "draft",
       });
     });
@@ -137,6 +140,10 @@ export class WorkflowManager {
       step.sessionKey = undefined;
       step.error = undefined;
       step.output = undefined;
+      step.phase = undefined;
+      step.round = undefined;
+      step.reviewNotes = undefined;
+      step.reviewSessionKey = undefined;
     }
     workflow.status = "running";
     this.advance(workflow);
@@ -181,6 +188,10 @@ export class WorkflowManager {
       step.sessionKey = undefined;
       step.error = undefined;
       step.output = undefined;
+      step.phase = undefined;
+      step.round = undefined;
+      step.reviewNotes = undefined;
+      step.reviewSessionKey = undefined;
     }
     workflow.status = "running";
     this.advance(workflow);
@@ -215,6 +226,10 @@ export class WorkflowManager {
       step.sessionKey = undefined;
       step.error = undefined;
       step.output = undefined;
+      step.phase = undefined;
+      step.round = undefined;
+      step.reviewNotes = undefined;
+      step.reviewSessionKey = undefined;
     }
     workflow.status = "running";
     this.advance(workflow);
@@ -231,11 +246,101 @@ export class WorkflowManager {
       if (step.status === "pending") {
         step.status = "cancelled";
       } else if (step.status === "running" && step.sessionKey) {
-        this.deps.cancel(step.sessionKey);
+        this.deps.cancel(step.phase === "review" && step.reviewSessionKey ? step.reviewSessionKey : step.sessionKey);
       }
     }
     this.advance(workflow);
     return this.clone(workflow)!;
+  }
+
+  private normalizeReview(stepId: string, raw: WorkflowStepInput["review"]): WorkflowStep["review"] {
+    const agent = (raw?.agent ?? "").trim().toLowerCase();
+    if (!agent) return undefined;
+    if (!this.deps.isKnownAgent(agent)) {
+      throw new Error(`步骤「${stepId}」的验收方「${raw?.agent}」不存在`);
+    }
+    const rounds = Math.floor(Number(raw?.maxRounds));
+    return {
+      agent,
+      criteria: (raw?.criteria ?? "").trim() || undefined,
+      maxRounds: Number.isFinite(rounds) && rounds >= 1 ? Math.min(rounds, MAX_REVIEW_ROUNDS) : DEFAULT_REVIEW_ROUNDS,
+    };
+  }
+
+  /** The step's agent reported done: hand the work to the reviewer. */
+  private startReview(workflow: WorkflowRecord, step: WorkflowStep): void {
+    const review = step.review!;
+    const prompt = [
+      "You are the acceptance reviewer for a piece of work another agent just finished. Check it against the task it was given: read the files it changed and run whatever checks are appropriate. Do not redo the work and do not edit files yourself.",
+      "",
+      "<task>",
+      step.prompt,
+      "</task>",
+      ...(review.criteria ? ["", "<acceptance_criteria>", review.criteria, "</acceptance_criteria>"] : []),
+      "",
+      `<work_report round="${step.round ?? 1}">`,
+      step.output || "(the agent reported nothing)",
+      "</work_report>",
+      "",
+      "List the concrete problems that must be fixed, if any. Then end your reply with exactly one line: `VERDICT: PASS` or `VERDICT: FAIL`.",
+    ].join("\n");
+    const task = this.deps.dispatch({
+      groupId: workflow.groupId,
+      agent: review.agent,
+      prompt,
+      session: `wf-${step.id}-review`,
+      isolateWorktree: false,
+      contextRefs: step.contextRefs ?? [],
+      upstreamStepIds: [],
+    });
+    step.phase = "review";
+    step.taskId = task.taskId;
+    step.reviewSessionKey = task.targetSessionKey;
+  }
+
+  /** The reviewer answered: accept the step, send it back for another round, or fail it. */
+  private finishReview(workflow: WorkflowRecord, step: WorkflowStep, reply: string): void {
+    const review = step.review!;
+    step.reviewNotes = reply;
+    const verdicts = [...reply.matchAll(/VERDICT:\s*\**\s*(PASS|FAIL)/gi)];
+    const verdict = verdicts.length > 0 ? verdicts[verdicts.length - 1]![1]!.toUpperCase() : "";
+    if (verdict === "PASS") {
+      step.status = "completed";
+      step.phase = undefined;
+      this.deps.saveResult(workflow.groupId, step, step.output ?? "");
+      return;
+    }
+    if (!verdict) {
+      step.status = "failed";
+      step.error = "验收方没有给出 VERDICT 结论，需要人工判断";
+      return;
+    }
+    const round = step.round ?? 1;
+    if (round >= review.maxRounds) {
+      step.status = "failed";
+      step.error = `验收未通过（已验收 ${round} 轮）`;
+      return;
+    }
+    // Same session as before, so the agent still has its own context for the rework.
+    const task = this.deps.dispatch({
+      groupId: workflow.groupId,
+      agent: step.agent,
+      prompt: [
+        `The reviewer did not accept your work (review ${round} of ${review.maxRounds}). Fix the problems below, then report what you changed.`,
+        "",
+        "<review>",
+        reply,
+        "</review>",
+      ].join("\n"),
+      session: `wf-${step.id}`,
+      isolateWorktree: Boolean(step.isolateWorktree),
+      contextRefs: [],
+      upstreamStepIds: [],
+    });
+    step.phase = "work";
+    step.round = round + 1;
+    step.taskId = task.taskId;
+    step.sessionKey = task.targetSessionKey;
   }
 
   /** Feeds a sub-session task result back into the workflow that started it. */
@@ -248,7 +353,19 @@ export class WorkflowManager {
     if (!step || step.status !== "running") {
       return;
     }
-    if (task.status === "completed") {
+    if (task.status === "completed" && step.review) {
+      try {
+        if (step.phase === "review") {
+          this.finishReview(workflow, step, task.outputText ?? "");
+        } else {
+          step.output = task.outputText;
+          this.startReview(workflow, step);
+        }
+      } catch (err) {
+        step.status = "failed";
+        step.error = err instanceof Error ? err.message : String(err);
+      }
+    } else if (task.status === "completed") {
       step.status = "completed";
       step.output = task.outputText;
       this.deps.saveResult(workflow.groupId, step, task.outputText);
@@ -320,6 +437,10 @@ export class WorkflowManager {
           step.status = "running";
           step.taskId = task.taskId;
           step.sessionKey = task.targetSessionKey;
+          if (step.review) {
+            step.phase = "work";
+            step.round = 1;
+          }
         } catch (err) {
           step.status = "failed";
           step.error = err instanceof Error ? err.message : String(err);

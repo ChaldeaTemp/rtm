@@ -34,6 +34,28 @@ export function appendCrashLog(title: string, detail?: string): void {
   }
 }
 
+const LOG_ROTATE_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Opens a log file for appending, moving it aside first once it has grown large. The hub
+ * writes its own logs instead of relying on the launcher's shell redirection: a redirect
+ * holds the file exclusively on Windows, so a second launch (which should only open another
+ * window) could not start at all, and each start wiped the previous run's output.
+ */
+export function openLogFile(name: string): number | undefined {
+  try {
+    const file = path.join(installDataDir(PROJECT_ROOT), name);
+    try {
+      if (fs.statSync(file).size > LOG_ROTATE_BYTES) fs.renameSync(file, `${file}.1`);
+    } catch {
+      // No log yet, or it is in use: keep appending to it.
+    }
+    return fs.openSync(file, "a");
+  } catch {
+    return undefined;
+  }
+}
+
 /** Direct children of a process that may itself be gone already. */
 export function listChildPids(parentPid: number): number[] {
   try {
@@ -76,17 +98,30 @@ export async function superviseDesktop(argv: string[]): Promise<number> {
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
 
+  const outFd = openLogFile("desktop.stdout.log");
+  const errFd = openLogFile("desktop.stderr.log");
+  const stamp = `\n[${new Date().toISOString()}] launch (supervisor pid ${process.pid})\n`;
+  if (outFd !== undefined) fs.writeSync(outFd, stamp);
+
   let extraArgs: string[] = [];
   for (;;) {
     const child = spawn(process.execPath, [...process.execArgv, process.argv[1]!, ...argv, ...extraArgs], {
       env: { ...process.env, [SUPERVISED_ENV]: "1" },
-      stdio: ["ignore", "inherit", "pipe"],
+      stdio: ["ignore", outFd ?? "inherit", "pipe"],
       windowsHide: true,
     });
     currentChild = child;
     let stderrTail = "";
     child.stderr?.on("data", (chunk: Buffer) => {
-      process.stderr.write(chunk);
+      if (errFd !== undefined) {
+        try {
+          fs.writeSync(errFd, chunk);
+        } catch {
+          // Disk full or file gone: the tail below still reaches crash.log.
+        }
+      } else {
+        process.stderr.write(chunk);
+      }
       stderrTail = (stderrTail + chunk.toString("utf8")).slice(-STDERR_TAIL_CHARS);
     });
 

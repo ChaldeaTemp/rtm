@@ -12,13 +12,15 @@ The interface is currently in Chinese only.
 
 ## What it does
 
-- **One task, several agents.** Each task has a lead agent. The lead can delegate work to other agents, and is chosen when the task is created. To change it, ask the current lead in the conversation to hand over: it writes a brief, and the new lead confirms what it is taking over before carrying on.
-- **Workflows.** Lay out the work for sub-sessions as steps with dependencies, review it, then publish it in one go. Write the steps yourself or ask the lead to draft them.
+- **One task, several agents.** Each task has a lead agent. The lead can delegate work to other agents, and is chosen when the task is created. To change it, ask the current lead in the conversation to hand over: it writes a brief, and the new lead confirms what it is taking over before carrying on. If the lead itself is broken and cannot hand over, send `/lead <agent>` in the lead conversation to switch directly.
+- **Workflows.** Lay out the work for sub-sessions as steps with dependencies, review it, then publish it in one go. Write the steps yourself or ask the lead to draft them. A step can carry an acceptance gate: another agent reviews the work and a rejection goes back to be redone. A workflow that stopped part-way can continue from its finished steps, and arrangements you reuse can be saved as templates.
+- **Shared context.** A task's background, conventions and step results are written once; sub-sessions take what they need instead of having it repeated in every delegation.
 - **Progress panel.** Agents keep the task's goal, steps and current state up to date themselves, so you do not have to keep asking where things stand.
 - **Session panel.** Context usage, sub-agents, files read and changed, and artifacts of the session you are looking at.
-- **Shared rules and skills.** Each agent's own rule files and skills are made available to the others; whatever an agent does not load natively is supplied to it.
+- **Shared rules and skills.** Each agent's own rule files and skills are made available to the others; whatever an agent does not load natively is supplied to it. Each item can be switched off for everyone or for a single agent.
 - **Directories and projects.** A task can span several directories, the sidebar groups tasks by project, and tasks can be archived and restored.
 - **Survives restarts.** Tasks, messages, workflows and progress are saved and restored.
+- **Long runs.** If the backend exits unexpectedly it is restarted and the reason is written to `.rtm/crash.log`. Idle sub-sessions are put to sleep to free memory and wake up with their earlier conversation. When the system is short on memory the UI says so and workflows drop to one step at a time (memory is only measured on Windows for now).
 
 ![Workflow: runs left to right, steps in the same column run in parallel](docs/screenshots/workflow.png)
 
@@ -101,6 +103,8 @@ Settings → General offers three skins, each with a light and a dark variant: S
 ```bash
 npm run typecheck
 ```
+
+`npm run verify:robustness` and `npm run verify:walkthrough` use a built-in mock agent, need no agent sign-in and finish in well under a minute; `npm run verify:mock` runs both plus the type check, and is what CI runs.
 
 `npm run verify` and `verify:phase2-3` through `verify:phase8` are end-to-end checks. They start the real agents on this machine, which must be signed in. Run `npm run build` before `verify:phase8`.
 

@@ -3376,6 +3376,41 @@ function renderConnBanner() {
       : `已经 ${Math.floor(secs / 60)} 分钟连不上后端。请重新启动 RoundTable Meeting，任务记录会保留；原因可查看数据目录下的 crash.log。`;
 }
 
+// 主导回复完成而窗口不在前台时，发一条桌面通知：长任务跑完不用守着看。
+// 只管主导会话；子会话的进展由主导汇总，逐条通知会太吵。
+const NOTIFIED_TURNS = new Set();
+
+function notifyLeadTurnFinished(message) {
+  if (!message || message.role !== "assistant" || !String(message.streamKey || "").startsWith("lead:")) return;
+  if (message.status !== "done" && message.status !== "error") return;
+  if (NOTIFIED_TURNS.has(message.messageId)) return;
+  // 只在亲眼看着它从「输出中」变成结束时通知，刷新页面带回来的旧消息不算
+  const previous = (STATE.messagesByStream.get(message.streamKey) || []).find((m) => m.messageId === message.messageId);
+  if (!previous || previous.status !== "streaming") return;
+  NOTIFIED_TURNS.add(message.messageId);
+  if (!document.hidden && document.hasFocus()) return;
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  try {
+    const group = STATE.taskGroups.get(message.groupId);
+    const title = message.status === "error" ? "任务出错了" : "主导已回复";
+    const n = new Notification(`${title} · ${group?.title || "RoundTable Meeting"}`, {
+      body: String(message.text || "").replace(/\s+/g, " ").trim().slice(0, 140) || agentName(message.agent),
+      tag: `rtm-turn-${message.groupId}`,
+    });
+    n.onclick = () => {
+      try {
+        window.focus();
+        if (message.groupId) selectGroup(message.groupId);
+      } catch {
+        // ignore
+      }
+      n.close();
+    };
+  } catch {
+    // 通知被系统拦截时不影响使用
+  }
+}
+
 function connectWs() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/ws`);
@@ -3582,6 +3617,7 @@ function connectWs() {
       renderAll();
       appendLog(`任务 [${msg.groupId}] 主导切换: ${msg.previousLead} -> ${msg.leadAgent}`);
     } else if (msg.type === "message_upserted") {
+      notifyLeadTurnFinished(msg.message);
       upsertMessageRecord(msg.message);
       pendingStreamDomMap.delete(msg.message.messageId);
       if (msg.message.streamKey === STATE.activeStreamKey) {

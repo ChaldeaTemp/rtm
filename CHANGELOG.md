@@ -1,0 +1,39 @@
+# Changelog
+
+## 0.1.0 (unreleased)
+
+First public version.
+
+### Tasks and agents
+
+- One task, several agents: a lead agent delegates to sub-sessions through MCP tools.
+- The lead is chosen when a task is created. It hands over from inside the conversation with a
+  brief for its successor; `/lead <agent>` switches directly when the lead cannot.
+- Queue a message while an agent is working, or interrupt it with guidance.
+- Tasks span several directories, are grouped by project, and can be archived.
+
+### Workflows
+
+- Draft a DAG of sub-session steps (by hand or by the lead), review it, publish it.
+- Acceptance gates: a second agent reviews a step and a rejection is sent back for rework.
+- Resume a workflow that stopped part-way, retry failed steps, limit how many steps run at once.
+- Save arrangements as templates.
+- Shared task context with named sections, so background is written once.
+
+### Staying up
+
+- State is saved and restored across restarts.
+- A supervisor restarts the hub after a crash and records the reason in `.rtm/crash.log`.
+- Idle sub-sessions are put to sleep and wake with their history.
+- Low-memory warning and automatic back-off (Windows).
+
+### Resources
+
+- Rules and skills of each agent are bridged to the others; items can be switched off for
+  everyone or for one agent, and an agent is told when one of its own items is switched off.
+
+### Interface
+
+- Three skins in light and dark, Markdown with highlighting and diffs, Mermaid, progress and
+  session panels, workflow flowchart, desktop notifications.
+- One launcher for Windows and macOS.

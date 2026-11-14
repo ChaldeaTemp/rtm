@@ -7,6 +7,6 @@ rootDir = fso.GetParentFolderName(WScript.ScriptFullName)
 logDir = fso.BuildPath(rootDir, ".rtm")
 If Not fso.FolderExists(logDir) Then fso.CreateFolder(logDir)
 shell.CurrentDirectory = rootDir
-cmd = "cmd /c node node_modules\tsx\dist\cli.mjs src\index.ts desktop" & _
-      " 1> "".rtm\desktop.stdout.log"" 2> "".rtm\desktop.stderr.log"""
+' RTM writes its own logs to .rtm\desktop.*.log; no redirection here, which would lock the files.
+cmd = "cmd /c node node_modules\tsx\dist\cli.mjs src\index.ts desktop"
 shell.Run cmd, 0, False

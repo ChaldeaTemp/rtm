@@ -1891,3 +1891,26 @@ main.stage[data-view="agents"] #chatComposerWrap {
   flex: 1;
   min-width: 0;
 }
+
+/* 资源页里按 Agent 的开关：外观沿用状态标签，只是可以点 */
+button.cov-pill {
+  cursor: pointer;
+  font: inherit;
+  font-size: inherit;
+}
+
+button.cov-pill:hover {
+  filter: brightness(0.96);
+  text-decoration: underline;
+}
+
+.wf-review-notes pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  white-space: pre-wrap;
+  font-size: 12px;
+  background: var(--soft);
+  border: 1px solid var(--line-soft);
+}

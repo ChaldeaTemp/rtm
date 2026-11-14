@@ -51,7 +51,7 @@ export function buildHubWorkbenchGuide(role: "lead" | "sub" = "lead"): string {
   if (role === "lead") {
     lines.push(
       "- Peer agent collaboration: Call `peer_list_agents`, `peer_ask` (sync), or `peer_dispatch` + `peer_status` (parallel sub-sessions) when delegating subtasks.",
-      "- Multi-step delegation with dependencies: Call `workflow_propose` to draft the steps; the user reviews and publishes the draft in the Workflow panel, so do not dispatch those steps yourself.",
+      "- Multi-step delegation with dependencies: Call `workflow_propose` to draft the steps; the user reviews and publishes the draft in the Workflow panel, so do not dispatch those steps yourself. Work that must be checked by another agent is ONE step with a `review` gate (reviewer agent, criteria), not an implement step plus an accept step: a rejection is sent back to the implementer automatically.",
       "- Handing over the lead: when the user asks you to pass this task to another agent, call `lead_handoff` with that agent's id and a complete brief, then tell the user in one sentence and stop. Never do this on your own initiative.",
       "- Shared task context: sub-sessions do not see this conversation. Whatever several of them need (goal, conventions, constraints, where materials are) goes into the task's shared context once, via `shared_context`/`sections` of `workflow_propose` or `context_put`, and is delivered to them automatically. Keep delegation prompts to what is specific to that delegation; never paste the same background into each one.",
     );
@@ -164,6 +164,8 @@ interface RawCandidate {
 
 interface ResourceConfigFile {
   disabledIds: string[];
+  /** Per-agent switches: agent id -> ids switched off for that agent only. */
+  disabledByAgent?: Record<string, string[]>;
 }
 
 export interface AgentInjectionPayload {
@@ -312,6 +314,19 @@ export class SharedResourceManager {
     }
   }
 
+  private loadDisabledByAgent(cwd?: string): Map<string, Set<string>> {
+    const out = new Map<string, Set<string>>();
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.configFileFor(cwd), "utf8")) as Partial<ResourceConfigFile>;
+      for (const [agent, ids] of Object.entries(parsed.disabledByAgent ?? {})) {
+        if (Array.isArray(ids) && ids.length > 0) out.set(agent, new Set(ids.filter((x) => typeof x === "string")));
+      }
+    } catch {
+      // No config yet.
+    }
+    return out;
+  }
+
   private ensureProjectHubGitignore(cwd?: string): void {
     const hubDir = this.projectHubDirFor(cwd);
     fs.mkdirSync(hubDir, { recursive: true });
@@ -321,12 +336,17 @@ export class SharedResourceManager {
     }
   }
 
-  private saveDisabledSet(disabled: Set<string>, cwd?: string): void {
+  private saveDisabledSet(disabled: Set<string>, cwd?: string, byAgent?: Map<string, Set<string>>): void {
     const targetCwd = this.resolveTargetCwd(cwd);
+    const perAgent = byAgent ?? this.loadDisabledByAgent(targetCwd);
     this.ensureProjectHubGitignore(targetCwd);
     const configFile = this.configFileFor(targetCwd);
     fs.mkdirSync(path.dirname(configFile), { recursive: true });
     const payload: ResourceConfigFile = { disabledIds: [...disabled].sort() };
+    const entries = [...perAgent.entries()].filter(([, ids]) => ids.size > 0);
+    if (entries.length > 0) {
+      payload.disabledByAgent = Object.fromEntries(entries.map(([agent, ids]) => [agent, [...ids].sort()]));
+    }
     fs.writeFileSync(configFile, JSON.stringify(payload, null, 2), "utf8");
     this.invalidateCache();
   }
@@ -568,6 +588,7 @@ export class SharedResourceManager {
 
   private scanResources(resolvedCwd: string, activeAgents: AgentId[]): DiscoveredItem[] {
     const disabled = this.loadDisabledSet(resolvedCwd);
+    const disabledByAgent = this.loadDisabledByAgent(resolvedCwd);
     const candidates = this.collectRawCandidates(resolvedCwd);
     const mergedMap = new Map<string, { item: SharedResourceItem & { _rawContent: string } }>();
 
@@ -598,6 +619,10 @@ export class SharedResourceManager {
             bridgedAgents,
             // dedupKey was the id before; honour entries disabled under the old scheme.
             enabled: !disabled.has(id) && !disabled.has(c.dedupKey),
+            disabledAgents: activeAgents.filter((a) => {
+              const ids = disabledByAgent.get(a);
+              return Boolean(ids && (ids.has(id) || ids.has(c.dedupKey)));
+            }),
             fullTokens: estimateTokens(c.content),
             indexTokens: c.kind === "skill" ? estimateTokens(indexLine) : estimateTokens(c.content),
             updatedAt: c.updatedAt,
@@ -638,7 +663,8 @@ export class SharedResourceManager {
   }
 
   private buildInjectionFromItems(agent: AgentId, items: readonly DiscoveredItem[]): AgentInjectionPayload {
-    const enabledItems = items.filter((item) => item.enabled);
+    const isOn = (item: DiscoveredItem) => item.enabled && !item.disabledAgents.includes(agent);
+    const enabledItems = items.filter(isOn);
 
     const nativeRulesCount = enabledItems.filter(
       (i) => i.kind === "rule" && i.nativeAgents.includes(agent),
@@ -709,7 +735,7 @@ export class SharedResourceManager {
 
     // The hub cannot stop an agent from loading what lives in its own config directory, so
     // switching such an item off only works if the agent is told about it.
-    const turnedOffNative = items.filter((i) => !i.enabled && i.nativeAgents.includes(agent));
+    const turnedOffNative = items.filter((i) => !isOn(i) && i.nativeAgents.includes(agent));
     const turnedOffSection =
       turnedOffNative.length > 0
         ? [
@@ -792,9 +818,19 @@ export class SharedResourceManager {
     });
   }
 
-  setResourceEnabled(id: string, enabled: boolean, cwd = this.baseCwd): void {
+  /** Switches an item on or off: for every agent, or with `agent` for that agent only. */
+  setResourceEnabled(id: string, enabled: boolean, cwd = this.baseCwd, agent?: AgentId): void {
     const targetCwd = this.resolveTargetCwd(cwd);
     const disabled = this.loadDisabledSet(targetCwd);
+    if (agent) {
+      const byAgent = this.loadDisabledByAgent(targetCwd);
+      const ids = byAgent.get(agent) ?? new Set<string>();
+      if (enabled) ids.delete(id);
+      else ids.add(id);
+      byAgent.set(agent, ids);
+      this.saveDisabledSet(disabled, targetCwd, byAgent);
+      return;
+    }
     if (enabled) {
       disabled.delete(id);
     } else {

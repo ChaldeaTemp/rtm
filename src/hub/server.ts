@@ -34,6 +34,7 @@ import { AcpPool, buildSessionKey, type WarmSessionOptions } from "./acp-pool.js
 import { AgentRegistry } from "./agent-registry.js";
 import { ThreadLedger } from "./ledger.js";
 import { MemoryMonitor, type MemoryStatus } from "./memory.js";
+import { WorkflowTemplateStore } from "./workflow-templates.js";
 import { checkPortAvailable, findAvailablePort, pickNativeDirectory } from "./port-finder.js";
 import { PROJECT_ROOT } from "./process-tree.js";
 import { WorkflowManager } from "./workflow.js";
@@ -53,6 +54,7 @@ const RUNTIME_FILE = path.join(installDataDir(PROJECT_ROOT), "runtime.json");
 const UPLOADS_DIR = path.join(installDataDir(PROJECT_ROOT), "uploads");
 const SETTINGS_FILE = path.join(installDataDir(PROJECT_ROOT), "settings.json");
 const STATE_FILE = path.join(installDataDir(PROJECT_ROOT), "state.json");
+const WORKFLOW_TEMPLATES_FILE = path.join(installDataDir(PROJECT_ROOT), "workflow-templates.json");
 /** Events that never change what is persisted; everything else schedules a save. */
 const TRANSIENT_EVENT_TYPES = new Set(["agent_chunk", "tool_event", "snapshot", "models_updated"]);
 /** Session-name suffix of the throwaway session that names a task; never shown in the UI. */
@@ -287,6 +289,9 @@ const WorkflowSaveSchema = z.object({
         dependsOn: z.array(z.string()).optional(),
         isolateWorktree: z.boolean().optional(),
         contextRefs: z.array(z.string()).optional(),
+        review: z
+          .object({ agent: z.string().optional(), criteria: z.string().optional(), maxRounds: z.number().optional() })
+          .nullish(),
       }),
     )
     .max(20),
@@ -335,6 +340,8 @@ const PermissionModeBodySchema = z.object({
 const ResourceToggleSchema = z.object({
   id: z.string().min(1),
   enabled: z.boolean(),
+  /** Only for this agent; omitted = for every agent. */
+  agent: z.string().optional(),
   cwd: z.string().optional(),
   groupId: z.string().optional(),
 });
@@ -759,6 +766,7 @@ export class AgentHubServer {
     if (status.level !== "ok") this.sweepIdleSubSessions();
   });
   private idleSweepTimer?: ReturnType<typeof setInterval>;
+  private readonly workflowTemplates = new WorkflowTemplateStore(WORKFLOW_TEMPLATES_FILE);
   /** Handoffs the current lead asked for; carried out when its turn ends. */
   private pendingHandoffs = new Map<string, { from: AgentId; to: AgentId; brief: string }>();
   /** Sessions from before a restart: not running, kept so their history stays reachable. */
@@ -3026,6 +3034,40 @@ export class AgentHubServer {
       throw new Error("这个任务已归档，先恢复再发消息");
     }
 
+    // Escape hatch for a lead that cannot hand over by itself (it will not start, or is stuck):
+    // "/lead <agent>" typed in the lead conversation switches the lead directly. No agent turn
+    // runs; the new lead gets the history summary with the user's next message.
+    const forced = /^\/lead\s+(\S+)\s*$/i.exec((input.prompt ?? "").trim());
+    if (forced && !input.handoff) {
+      const previous = group.leadAgent;
+      const enabled = this.registry.listEnabledDefinitions();
+      const wanted = forced[1]!.toLowerCase();
+      const target =
+        enabled.find((d) => d.id === wanted) ?? enabled.find((d) => (d.label || "").toLowerCase() === wanted);
+      if (!target) {
+        throw new Error(
+          `没有名为 ${forced[1]} 的已启用 Agent。可选：${enabled
+            .filter((d) => d.id !== previous)
+            .map((d) => d.id)
+            .join("、")}`,
+        );
+      }
+      if (target.id === previous) {
+        throw new Error(`${this.agentLabel(previous)} 已经是这个任务的主导`);
+      }
+      this.pendingHandoffs.delete(group.groupId);
+      void this.pool.cancelSession(buildSessionKey(previous, `${group.groupId}__lead`)).catch(() => false);
+      this.setGroupLeadAgent(group.groupId, target.id);
+      return {
+        groupId: group.groupId,
+        leadAgent: target.id,
+        sessionKey: buildSessionKey(target.id, `${group.groupId}__lead`),
+        outputText: "",
+        stopReason: "end_turn",
+        peerToolsCalled: [],
+      };
+    }
+
     const lead = group.leadAgent;
     const sessionName = input.session ?? `${group.groupId}__lead`;
     const sessionKey = buildSessionKey(lead, sessionName);
@@ -4014,7 +4056,7 @@ export class AgentHubServer {
       if (method === "POST" && pathname === "/api/resources/toggle") {
         const body = ResourceToggleSchema.parse(await readJsonBody(req));
         const cwd = this.resolveResourceCwd(body.cwd, body.groupId);
-        this.resources.setResourceEnabled(body.id, body.enabled, cwd);
+        this.resources.setResourceEnabled(body.id, body.enabled, cwd, body.agent?.trim().toLowerCase() || undefined);
         const resources = this.resources.discover(cwd);
         const budgets = this.resources.getAgentBudgets(cwd);
         this.broadcast({ type: "resources_updated", budgets, timestamp: Date.now() });
@@ -4298,6 +4340,32 @@ export class AgentHubServer {
       if (method === "POST" && pathname === "/api/workflows/retry") {
         const body = WorkflowGroupSchema.parse(await readJsonBody(req));
         sendJson(res, 200, { ok: true, workflow: this.workflows.retryFailed(body.groupId) });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/workflows/templates") {
+        sendJson(res, 200, { ok: true, templates: this.workflowTemplates.list() });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/workflows/templates/save") {
+        const body = z.object({ groupId: z.string().min(1), name: z.string().min(1) }).parse(await readJsonBody(req));
+        const templates = this.workflowTemplates.save(body.name, this.workflows.get(body.groupId).steps);
+        sendJson(res, 200, { ok: true, templates });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/workflows/templates/apply") {
+        const body = z.object({ groupId: z.string().min(1), name: z.string().min(1) }).parse(await readJsonBody(req));
+        const template = this.workflowTemplates.get(body.name);
+        if (!template) throw new Error(`没有名为「${body.name}」的模板`);
+        sendJson(res, 200, { ok: true, workflow: this.workflows.save(body.groupId, template.steps, "user") });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/workflows/templates/delete") {
+        const body = z.object({ name: z.string().min(1) }).parse(await readJsonBody(req));
+        sendJson(res, 200, { ok: true, templates: this.workflowTemplates.delete(body.name) });
         return;
       }
 

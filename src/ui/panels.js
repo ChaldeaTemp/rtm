@@ -57,7 +57,7 @@ async function fetchResources() {
   }
 }
 
-async function toggleResource(id, enabled) {
+async function toggleResource(id, enabled, agent) {
   try {
     const { groupId, cwd } = getResourceScope();
     const res = await fetch("/api/resources/toggle", {
@@ -66,6 +66,7 @@ async function toggleResource(id, enabled) {
       body: JSON.stringify({
         id,
         enabled,
+        agent: agent || undefined,
         cwd: cwd || undefined,
         groupId: groupId || undefined,
       }),
@@ -268,10 +269,13 @@ function renderResourcesPanel() {
                 if (!item.enabled) {
                   return `<span class="cov-pill off">${ag}: 停用</span>`;
                 }
+                // 点一下只对这一个 Agent 停用或恢复，其他 Agent 不受影响
+                const offForAgent = (item.disabledAgents || []).includes(ag);
                 const isNative = item.nativeAgents.includes(ag);
-                return isNative
-                  ? `<span class="cov-pill native">${ag}: 原生</span>`
-                  : `<span class="cov-pill bridged">${ag}: 注入</span>`;
+                const cls = offForAgent ? "off" : isNative ? "native" : "bridged";
+                const text = offForAgent ? "停用" : isNative ? "原生" : "注入";
+                const tip = offForAgent ? `点击恢复对 ${ag} 生效` : `点击只对 ${ag} 停用`;
+                return `<button type="button" class="cov-pill ${cls}" data-toggle-res-agent="${esc(item.id)}" data-agent="${esc(ag)}" data-next-enabled="${offForAgent}" title="${tip}">${ag}: ${text}</button>`;
               })
               .join("");
 
@@ -408,6 +412,13 @@ function renderResourcesPanel() {
   container.querySelectorAll("[data-toggle-res]").forEach((btn) => {
     btn.onclick = () =>
       void toggleResource(btn.dataset.toggleRes, btn.dataset.nextEnabled === "true");
+  });
+
+  container.querySelectorAll("[data-toggle-res-agent]").forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      void toggleResource(btn.dataset.toggleResAgent, btn.dataset.nextEnabled === "true", btn.dataset.agent);
+    };
   });
 
   container.querySelectorAll("[data-del-res]").forEach((btn) => {
@@ -746,6 +757,15 @@ function buildWorkflowTemplateSteps(templateKey, agents, leadAgent) {
   ];
 }
 
+// 带验收关卡的步骤，运行中要分清是在做、在验收还是在返工
+function wfStepStatusText(live, status) {
+  if (status === "running" && live?.review) {
+    if (live.phase === "review") return `验收中 · 第 ${live.round || 1} 轮`;
+    if ((live.round || 1) > 1) return `返工中 · 第 ${live.round} 轮`;
+  }
+  return WF_STEP_STATUS_TEXT[status] || status;
+}
+
 const WF_STEP_STATUS_TEXT = {
   draft: "草稿",
   pending: "等待上游",
@@ -774,6 +794,7 @@ function wfDraft(groupId) {
         dependsOn: [...s.dependsOn],
         isolateWorktree: Boolean(s.isolateWorktree),
         contextRefs: [...(s.contextRefs || [])],
+        review: s.review ? { ...s.review } : null,
       })),
       baseUpdatedAt: server.updatedAt,
       dirty: false,
@@ -805,7 +826,7 @@ function wfDepths(steps) {
   return new Map(steps.map((s) => [s.id, depth(s.id)]));
 }
 
-async function wfPost(path, body) {
+async function wfPost(path, body, raw) {
   const res = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -818,7 +839,7 @@ async function wfPost(path, body) {
   if (data.workflow) {
     app.STATE.workflows.set(data.workflow.groupId, data.workflow);
   }
-  return data.workflow;
+  return raw ? data : data.workflow;
 }
 
 function wfServerContext(groupId) {
@@ -876,6 +897,48 @@ async function wfSave(groupId) {
   draft.dirty = false;
   draft.baseUpdatedAt = -1; // 下次渲染时按服务端返回的结果重建
   return workflow;
+}
+
+// 模板：把一套编排（步骤、先后、Agent、验收关卡）存下来，换个任务还能直接载入
+async function wfLoadTemplates() {
+  try {
+    const data = await (await fetch("/api/workflows/templates")).json();
+    WF_STATE.templates = data.templates || [];
+  } catch {
+    WF_STATE.templates = [];
+  }
+}
+
+async function wfTemplateAction(groupId, value) {
+  try {
+    if (value === "save") {
+      const name = await app.showPromptModal({ title: "存为模板", label: "模板名称", confirmText: "保存" });
+      if (!name || !String(name).trim()) return;
+      await wfSave(groupId);
+      const data = await wfPost("/api/workflows/templates/save", { groupId, name: String(name).trim() }, true);
+      WF_STATE.templates = data.templates || [];
+    } else if (value.startsWith("load:")) {
+      const draft = wfDraft(groupId);
+      if (draft.steps.length > 0) {
+        const ok = await app.showConfirmModal({
+          title: "载入模板",
+          message: "当前的步骤会被模板替换，步骤里的任务内容需要按这次的任务改一改。",
+          confirmText: "载入",
+        });
+        if (!ok) return;
+      }
+      await wfPost("/api/workflows/templates/apply", { groupId, name: value.slice(5) });
+      draft.dirty = false;
+      draft.baseUpdatedAt = -1;
+    } else if (value.startsWith("delete:")) {
+      const data = await wfPost("/api/workflows/templates/delete", { name: value.slice(7) }, true);
+      WF_STATE.templates = data.templates || [];
+    }
+  } catch (err) {
+    await app.showConfirmModal({ title: "模板操作没有成功", message: err.message, confirmText: "知道了" });
+  }
+  WF_STATE.lastSignature = "";
+  renderWorkflowPanel();
 }
 
 // 内存紧张时发布工作流要先问一句：这正是把后端拖垮的场景
@@ -1088,6 +1151,34 @@ function wfOpenPopover(ctx, stepId) {
         ? ""
         : `<label class="wf-check"><input type="checkbox" data-wf-field="isolateWorktree" ${step.isolateWorktree ? "checked" : ""} />在独立的 git worktree 里改动</label>`
     }
+    ${(() => {
+      // 验收关卡：做完后交给另一个 Agent 验收，不通过自动打回重做
+      const review = readonly ? live?.review || step.review : step.review;
+      if (readonly) {
+        if (!review) return "";
+        const round = live?.round ? ` · 第 ${live.round} 轮${live.phase === "review" ? "验收中" : live.phase === "work" && live.round > 1 ? "返工中" : ""}` : "";
+        return `<div class="wf-pop-block"><label>验收</label><div class="wf-deps"><span class="origin-tag">${esc(review.agent)} 验收，最多 ${review.maxRounds} 轮${round}</span></div>${
+          live?.reviewNotes ? `<details class="wf-review-notes"><summary>验收意见</summary><pre>${esc(live.reviewNotes)}</pre></details>` : ""
+        }</div>`;
+      }
+      return `<div class="wf-pop-block">
+        <label>验收关卡</label>
+        <div class="wf-pop-head">
+          <select class="perm-select" data-wf-review="agent">
+            <option value="">不验收</option>
+            ${agents.map((a) => `<option value="${esc(a.agent)}" ${review?.agent === a.agent ? "selected" : ""}>${esc(a.label || a.agent)} 验收</option>`).join("")}
+          </select>
+          ${
+            review
+              ? `<select class="perm-select" data-wf-review="maxRounds" title="验收不通过会打回重做，到这个轮数还不过就算失败">${[1, 2, 3, 4, 5]
+                  .map((n) => `<option value="${n}" ${(review.maxRounds || 2) === n ? "selected" : ""}>最多 ${n} 轮</option>`)
+                  .join("")}</select>`
+              : ""
+          }
+        </div>
+        ${review ? `<textarea class="rule-editor-textarea" data-wf-review="criteria" rows="2" placeholder="验收标准（可不填，默认按任务内容验收）">${esc(review.criteria || "")}</textarea>` : ""}
+      </div>`;
+    })()}
     ${live?.error && (running || showResults) ? `<div class="wf-error">${esc(live.error)}</div>` : ""}
     ${(() => {
       if (!(running || showResults) || !live?.sessionKey) return "";
@@ -1133,6 +1224,20 @@ function wfOpenPopover(ctx, stepId) {
         wfTouch(draft, true);
         rerenderKeepingOpen();
       }
+    };
+  });
+  pop.querySelectorAll("[data-wf-review]").forEach((el) => {
+    el.onchange = () => {
+      const target = draft.steps[index];
+      if (!target) return;
+      const field = el.dataset.wfReview;
+      if (field === "agent") {
+        target.review = el.value ? { agent: el.value, maxRounds: target.review?.maxRounds || 2, criteria: target.review?.criteria || "" } : null;
+      } else if (target.review) {
+        target.review[field] = field === "maxRounds" ? Number(el.value) : el.value;
+      }
+      wfTouch(draft, true);
+      if (field === "agent") rerenderKeepingOpen();
     };
   });
   pop.querySelectorAll("[data-wf-ctx-key]").forEach((btn) => {
@@ -1339,7 +1444,7 @@ function renderWorkflowPanel() {
           </span>
           <span class="wf-node-bottom">
             ${app.agentTagHtml ? app.agentTagHtml(step.agent) : esc(step.agent)}
-            <span class="wf-node-status">${running || showResults ? esc(WF_STEP_STATUS_TEXT[status] || status) : step.prompt.trim() ? (step.isolateWorktree ? "worktree" : "") : "还没写任务"}</span>
+            <span class="wf-node-status">${running || showResults ? esc(wfStepStatusText(steps.find((s) => s.id === step.id) && server.steps.find((s) => s.id === step.id), status)) : step.prompt.trim() ? (step.review ? "带验收" : step.isolateWorktree ? "worktree" : "") : "还没写任务"}</span>
           </span>
         </button>`;
     })
@@ -1362,7 +1467,13 @@ function renderWorkflowPanel() {
         ${
           running
             ? ""
-            : `<button type="button" class="alma-btn alma-btn-outline alma-btn-sm" id="wfAddStepBtn">添加步骤</button>
+            : `<select class="perm-select" id="wfTemplateSelect" title="把保存过的编排载入为草稿，或把当前编排存为模板">
+                 <option value="">模板…</option>
+                 ${(WF_STATE.templates || []).map((t) => `<option value="load:${esc(t.name)}">载入：${esc(t.name)}（${t.stepCount} 步）</option>`).join("")}
+                 ${steps.length > 0 ? '<option value="save">把当前编排存为模板…</option>' : ""}
+                 ${(WF_STATE.templates || []).map((t) => `<option value="delete:${esc(t.name)}">删除：${esc(t.name)}</option>`).join("")}
+               </select>
+               <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" id="wfAddStepBtn">添加步骤</button>
                <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" id="wfAskLeadBtn" title="主导把目标拆成几步并存成草稿，不会直接执行">让 ${esc(group.leadAgent)} 起草</button>`
         }
       </div>
@@ -1536,6 +1647,21 @@ function renderWorkflowPanel() {
     wfClosePopover();
     void wfRunAction(groupId, "retry");
   });
+  const tplSelect = document.getElementById("wfTemplateSelect");
+  if (tplSelect) {
+    if (!WF_STATE.templatesLoaded) {
+      WF_STATE.templatesLoaded = true;
+      void wfLoadTemplates().then(() => {
+        WF_STATE.lastSignature = "";
+        renderWorkflowPanel();
+      });
+    }
+    tplSelect.onchange = () => {
+      const value = tplSelect.value;
+      tplSelect.value = "";
+      if (value) void wfTemplateAction(groupId, value);
+    };
+  }
   bind("wfResumeBtn", () => {
     wfClosePopover();
     void wfRunAction(groupId, "resume");

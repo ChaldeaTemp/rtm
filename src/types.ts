@@ -68,6 +68,8 @@ export interface SharedResourceItem {
   nativeAgents: AgentId[];
   bridgedAgents: AgentId[];
   enabled: boolean;
+  /** Agents this item is switched off for while it stays on for the others. */
+  disabledAgents: AgentId[];
   fullTokens: number;
   indexTokens: number;
   updatedAt: number;
@@ -455,6 +457,8 @@ export interface WorkflowStepInput {
   isolateWorktree?: boolean;
   /** Context sections this step needs besides the common one. */
   contextRefs?: string[];
+  /** Acceptance gate; an empty agent means none. */
+  review?: { agent?: string; criteria?: string; maxRounds?: number } | null;
 }
 
 export interface WorkflowStep {
@@ -467,6 +471,18 @@ export interface WorkflowStep {
   isolateWorktree?: boolean;
   /** Context sections this step needs besides the common one. */
   contextRefs?: string[];
+  /**
+   * Acceptance gate: when the step's agent is done, `agent` reviews the work. A rejection goes
+   * back to the step's agent with the reviewer's findings, up to `maxRounds` reviews in all.
+   */
+  review?: { agent: AgentId; criteria?: string; maxRounds: number };
+  /** While a gated step runs: whether its agent is working or the reviewer is reviewing. */
+  phase?: "work" | "review";
+  /** Which review round the step is in (1 = first attempt). */
+  round?: number;
+  /** The reviewer's last reply. */
+  reviewNotes?: string;
+  reviewSessionKey?: string;
   status: WorkflowStepStatus;
   taskId?: string;
   sessionKey?: string;

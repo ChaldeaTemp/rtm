@@ -23,7 +23,10 @@
     "verify:phase5": "tsx scripts/verify-phase5.ts",
     "verify:phase6": "tsx scripts/verify-phase6.ts",
     "verify:phase7": "tsx scripts/verify-phase7.ts",
-    "verify:phase8": "tsx scripts/verify-phase8.ts"
+    "verify:phase8": "tsx scripts/verify-phase8.ts",
+    "verify:walkthrough": "tsx scripts/verify-walkthrough.ts",
+    "verify:robustness": "tsx scripts/verify-robustness.ts",
+    "verify:mock": "tsc --noEmit && tsx scripts/verify-walkthrough.ts && tsx scripts/verify-robustness.ts"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "^0.106.0",
