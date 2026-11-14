@@ -264,7 +264,8 @@ async function main(): Promise<void> {
     const uiIndex = await fetch(`${baseUrl}/`);
     assert.equal(uiIndex.status, 200);
     const uiIndexHtml = await uiIndex.text();
-    assert.ok(uiIndexHtml.includes("Agent 接入"), "Expected 04 Agent 接入 tab in index.html");
+    // The Agent page lives in the settings dialog now.
+    assert.ok(uiIndexHtml.includes('data-settings-tab="agents"'), "Expected the Agent tab of the settings dialog in index.html");
     assert.ok(uiIndexHtml.includes("/ui/interactive.js"), "Expected /ui/interactive.js script tag in index.html");
 
     const uiInteractive = await fetch(`${baseUrl}/ui/interactive.js`);

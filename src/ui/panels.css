@@ -30,7 +30,7 @@
   background: transparent;
   border: none;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: 13px;
   white-space: nowrap;
   cursor: pointer;
   transition: background-color 0.15s ease, color 0.15s ease;
@@ -62,8 +62,8 @@
 }
 
 .mode-tab .num {
-  font-family: var(--mono);
-  font-size: 11px;
+  font-family: var(--ui);
+  font-size: 12.5px;
   font-weight: 400;
   color: var(--faint);
 }
@@ -74,7 +74,7 @@
 
 .mode-badge {
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 400;
   line-height: 1.5;
   padding: 0 5px;
@@ -94,8 +94,8 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-family: var(--mono);
-  font-size: 11.5px;
+  font-family: var(--ui);
+  font-size: 12.5px;
   padding: 3px 10px;
   border: 1px solid var(--line);
   background: var(--bg-elevated);
@@ -140,8 +140,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
 }
 
 .msg-usage-pill {
-  font-family: var(--mono);
-  font-size: 11px;
+  font-family: var(--ui);
+  font-size: 12.5px;
   color: var(--faint);
   padding: 1px 6px;
   border: 1px solid var(--line-soft);
@@ -173,20 +173,20 @@ main.stage[data-view="agents"] #chatComposerWrap {
 }
 
 .panel-sec-title {
-  font-size: 12.5px;
+  font-size: 13px;
   letter-spacing: 0.04em;
   color: var(--muted);
 }
 
 .panel-sec-title .num {
-  font-family: var(--mono);
+  font-family: var(--ui);
   color: var(--accent);
   margin-right: 6px;
 }
 
 .panel-sec-sub {
-  font-family: var(--mono);
-  font-size: 11.5px;
+  font-family: var(--ui);
+  font-size: 12.5px;
   color: var(--faint);
 }
 
@@ -215,8 +215,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
 }
 
 .stat-card-label {
-  font-family: var(--mono);
-  font-size: 11px;
+  font-family: var(--ui);
+  font-size: 12.5px;
   color: var(--faint);
   display: flex;
   align-items: center;
@@ -232,7 +232,7 @@ main.stage[data-view="agents"] #chatComposerWrap {
 }
 
 .stat-card-value {
-  font-family: var(--mono);
+  font-family: var(--ui);
   font-size: 22px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -242,8 +242,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
 }
 
 .stat-card-meta {
-  font-family: var(--mono);
-  font-size: 11.5px;
+  font-family: var(--ui);
+  font-size: 12.5px;
   color: var(--muted);
   display: flex;
   flex-wrap: wrap;
@@ -267,7 +267,7 @@ main.stage[data-view="agents"] #chatComposerWrap {
 
 .filter-pill {
   padding: 3px 10px;
-  font-size: 12px;
+  font-size: 13px;
   border: 1px solid var(--line);
   background: var(--bg-elevated);
   color: var(--muted);
@@ -298,8 +298,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
   min-width: 210px;
   border: 1px solid var(--line);
   background: var(--bg-elevated);
-  font-size: 12.5px;
-  font-family: var(--mono);
+  font-size: 13px;
+  font-family: var(--ui);
   outline: none;
   transition: border-color 0.14s var(--ease), box-shadow 0.14s var(--ease);
 }
@@ -334,8 +334,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
   padding: 8px 10px;
   border: 1px solid var(--line);
   background: var(--bg);
-  font-family: var(--mono);
-  font-size: 12.5px;
+  font-family: var(--ui);
+  font-size: 13px;
   line-height: 1.5;
   resize: vertical;
   outline: none;
@@ -391,8 +391,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
 }
 
 .kind-tag {
-  font-family: var(--mono);
-  font-size: 10.5px;
+  font-family: var(--ui);
+  font-size: 12px;
   padding: 1px 6px;
   border: 1px solid var(--line);
   text-transform: uppercase;
@@ -412,8 +412,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
 
 .scope-tag,
 .origin-tag {
-  font-family: var(--mono);
-  font-size: 10.5px;
+  font-family: var(--ui);
+  font-size: 12px;
   padding: 1px 6px;
   border: 1px solid var(--line-soft);
   color: var(--muted);
@@ -422,12 +422,12 @@ main.stage[data-view="agents"] #chatComposerWrap {
 
 .resource-name {
   font-weight: 600;
-  font-size: 13.5px;
+  font-size: 14px;
   color: var(--ink);
 }
 
 .resource-desc {
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--muted);
   line-height: 1.5;
 }
@@ -435,7 +435,7 @@ main.stage[data-view="agents"] #chatComposerWrap {
 .resource-path {
   margin-top: 3px;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 12.5px;
   color: var(--faint);
   word-break: break-all;
 }
@@ -457,8 +457,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
 }
 
 .cov-pill {
-  font-family: var(--mono);
-  font-size: 10.5px;
+  font-family: var(--ui);
+  font-size: 12px;
   padding: 1px 6px;
   border: 1px solid var(--line);
   background: var(--bg);
@@ -490,8 +490,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
   padding: 10px 12px;
   background: var(--bg);
   border: 1px solid var(--line);
-  font-family: var(--mono);
-  font-size: 11.5px;
+  font-family: var(--ui);
+  font-size: 12.5px;
   line-height: 1.5;
   white-space: pre-wrap;
   max-height: 280px;
@@ -551,8 +551,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
   display: flex;
   flex-wrap: wrap;
   gap: 14px;
-  font-family: var(--mono);
-  font-size: 11px;
+  font-family: var(--ui);
+  font-size: 12.5px;
   color: var(--muted);
 }
 
@@ -585,8 +585,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
 .telemetry-table {
   width: 100%;
   border-collapse: collapse;
-  font-family: var(--mono);
-  font-size: 11.5px;
+  font-family: var(--ui);
+  font-size: 12.5px;
 }
 
 .telemetry-table th,
@@ -628,8 +628,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
   padding: 6px 10px;
   background: var(--bg-panel);
   border-bottom: 1px dashed var(--line);
-  font-family: var(--mono);
-  font-size: 11px;
+  font-family: var(--ui);
+  font-size: 12.5px;
 }
 
 .artifact-title {
@@ -648,7 +648,7 @@ main.stage[data-view="agents"] #chatComposerWrap {
   padding: 1px 5px;
   border: 1px solid var(--line);
   color: var(--accent);
-  font-size: 10px;
+  font-size: 11.5px;
   text-transform: uppercase;
 }
 
@@ -719,7 +719,7 @@ main.stage[data-view="agents"] #chatComposerWrap {
   align-items: center;
   gap: 8px;
   font-weight: 600;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .question-field {
@@ -729,7 +729,7 @@ main.stage[data-view="agents"] #chatComposerWrap {
 }
 
 .question-prompt {
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--ink);
   font-weight: 500;
 }
@@ -744,8 +744,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
   padding: 5px 10px;
   border: 1px solid var(--line);
   background: var(--bg);
-  font-family: var(--mono);
-  font-size: 11.5px;
+  font-family: var(--ui);
+  font-size: 12.5px;
   color: var(--muted);
   cursor: pointer;
   transition: all 0.14s var(--ease);
@@ -768,7 +768,7 @@ main.stage[data-view="agents"] #chatComposerWrap {
   border: 1px solid var(--line);
   background: var(--bg);
   color: var(--ink);
-  font-size: 12.5px;
+  font-size: 13px;
   font-family: inherit;
   outline: none;
 }
@@ -827,7 +827,7 @@ main.stage[data-view="agents"] #chatComposerWrap {
 
 .agent-origin-badge {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 11.5px;
   padding: 1px 5px;
   border: 1px solid var(--line);
   color: var(--muted);
@@ -835,7 +835,7 @@ main.stage[data-view="agents"] #chatComposerWrap {
 
 .agent-cmd-line {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 12.5px;
   color: var(--muted);
   background: var(--soft);
   padding: 4px 7px;
@@ -844,8 +844,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
 }
 
 .agent-probe-status {
-  font-family: var(--mono);
-  font-size: 11px;
+  font-family: var(--ui);
+  font-size: 12.5px;
   color: var(--muted);
   min-height: 16px;
 }
@@ -889,8 +889,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
 }
 
 .agent-form-field label {
-  font-family: var(--mono);
-  font-size: 11px;
+  font-family: var(--ui);
+  font-size: 12.5px;
   color: var(--muted);
 }
 
@@ -911,19 +911,19 @@ main.stage[data-view="agents"] #chatComposerWrap {
 
 .model-select {
   max-width: 260px;
-  font-family: var(--mono);
-  font-size: 11.5px;
+  font-family: var(--ui);
+  font-size: 12.5px;
 }
 
 .effort-select {
   max-width: 190px;
-  font-family: var(--mono);
-  font-size: 11.5px;
+  font-family: var(--ui);
+  font-size: 12.5px;
 }
 
 .model-badge-pill {
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: 12px;
   color: var(--muted);
   background: var(--soft);
   border: 1px solid var(--line-soft);
@@ -947,7 +947,7 @@ main.stage[data-view="agents"] #chatComposerWrap {
   padding: 3px 7px;
   border: 1px solid var(--line);
   background: var(--bg);
-  font-size: 11px;
+  font-size: 12.5px;
 }
 
 .cwd-pick-btn:hover {
@@ -971,20 +971,20 @@ main.stage[data-view="agents"] #chatComposerWrap {
   padding: 18px 16px;
   border: 1px dashed var(--line);
   background: var(--soft);
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--muted);
   text-align: center;
 }
 
 .res-desc {
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--muted);
   line-height: 1.5;
 }
 
 .res-meta {
-  font-family: var(--mono);
-  font-size: 11.5px;
+  font-family: var(--ui);
+  font-size: 12.5px;
   color: var(--muted);
   overflow-wrap: anywhere;
 }
@@ -994,8 +994,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
   align-items: center;
   gap: 5px;
   flex-shrink: 0;
-  font-family: var(--mono);
-  font-size: 11px;
+  font-family: var(--ui);
+  font-size: 12.5px;
   color: var(--muted);
   cursor: pointer;
   user-select: none;
@@ -1016,7 +1016,7 @@ main.stage[data-view="agents"] #chatComposerWrap {
 .group-search-input {
   flex: 1 1 auto;
   min-width: 0;
-  font-size: 12px;
+  font-size: 13px;
   padding: 5px 8px;
 }
 
@@ -1026,8 +1026,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
   border: 1px solid var(--line);
   background: var(--bg);
   color: var(--muted);
-  font-family: var(--mono);
-  font-size: 11px;
+  font-family: var(--ui);
+  font-size: 12.5px;
   cursor: pointer;
   transition: background-color 0.14s ease, color 0.14s ease, border-color 0.14s ease;
 }
@@ -1052,8 +1052,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
   padding: 1px 5px;
   border: 1px solid var(--line);
   background: var(--soft);
-  font-family: var(--mono);
-  font-size: 10px;
+  font-family: var(--ui);
+  font-size: 11.5px;
   color: var(--muted);
 }
 
@@ -1083,8 +1083,8 @@ main.stage[data-view="agents"] #chatComposerWrap {
   border: 1px solid var(--line);
   background: var(--bg-elevated);
   color: var(--muted);
-  font-family: var(--mono);
-  font-size: 11px;
+  font-family: var(--ui);
+  font-size: 12.5px;
   cursor: pointer;
   line-height: 1.35;
 }
@@ -1142,7 +1142,7 @@ main.stage[data-view="agents"] #chatComposerWrap {
 
 .alma-modal-msg {
   margin: 0;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.55;
   color: var(--muted);
 }
@@ -1170,7 +1170,7 @@ main.stage[data-view="agents"] #chatComposerWrap {
 
 .qs-input {
   width: 100%;
-  font-size: 13.5px;
+  font-size: 14px;
   padding: 8px 10px;
 }
 
@@ -1207,12 +1207,12 @@ main.stage[data-view="agents"] #chatComposerWrap {
   align-items: center;
   gap: 8px;
   min-width: 0;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .qs-item-sub {
-  font-family: var(--mono);
-  font-size: 11px;
+  font-family: var(--ui);
+  font-size: 12.5px;
   color: var(--faint);
   flex-shrink: 0;
 }
@@ -1220,8 +1220,491 @@ main.stage[data-view="agents"] #chatComposerWrap {
 .qs-foot {
   display: flex;
   gap: 14px;
-  font-size: 11px;
+  font-size: 12.5px;
   color: var(--faint);
   border-top: 1px dashed var(--line);
   padding-top: 8px;
+}
+
+/* Agent page: add panel, compact cards */
+.agents-toolbar {
+  margin-bottom: 14px;
+}
+
+.agent-add-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+}
+
+.agent-add-row {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.agent-add-label {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.agent-add-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-add-chips .text-input {
+  flex: 1;
+  min-width: 180px;
+  max-width: 320px;
+}
+
+.filter-pill.preset-ready {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.agent-form-more {
+  margin: 4px 0 10px;
+}
+
+.agent-form-more > summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--muted);
+  padding: 4px 0 8px;
+}
+
+.agent-cmd-line {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: normal;
+  border-radius: var(--r-sm);
+}
+
+.agent-cfg-card {
+  padding: 16px;
+  gap: 10px;
+}
+
+.agent-cfg-actions {
+  border-top: none;
+  padding-top: 2px;
+}
+
+.agents-grid {
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+/* Rounded shapes for the resource, usage and question panels */
+.stat-card,
+.breakdown-card,
+.resource-row,
+.resource-preview-box,
+.artifact-card,
+.question-card,
+.telemetry-table-wrap,
+.inline-preview-box {
+  border-radius: var(--r-md);
+}
+
+.kind-tag,
+.origin-tag,
+.question-opt,
+.question-text-input,
+.rule-editor-textarea,
+.panel-search,
+.msg-usage-pill,
+.model-badge-pill,
+.archived-pill,
+.msg-action-btn,
+.qs-item,
+.stacked-bar,
+.window-meter {
+  border-radius: var(--r-sm);
+}
+
+.artifact-card,
+.telemetry-table-wrap,
+.stacked-bar,
+.window-meter {
+  overflow: hidden;
+}
+
+.panel-sec-sub:empty {
+  display: none;
+}
+
+.panel-sec-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.agent-form-head {
+  margin-bottom: 12px;
+}
+
+.agent-form-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.link-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  margin-left: 6px;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.stat-card-warn {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--warn);
+}
+
+/* Context analysis: one card per task, lead on top, sub-sessions indented below */
+.seg-other {
+  background: var(--line-strong);
+}
+
+.ctx-session {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.ctx-session.is-sub {
+  margin-left: 18px;
+  padding-left: 14px;
+  border-top: none;
+  border-left: 2px solid var(--line);
+}
+
+.ctx-session-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.ctx-session-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+}
+
+.ctx-faint {
+  font-size: 12.5px;
+  color: var(--faint);
+}
+
+.ctx-note {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.ctx-note.warn {
+  color: var(--warn);
+}
+
+.ctx-rules > summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--faint);
+}
+
+/* Workflow panel */
+.wf-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wf-step {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+}
+
+.wf-step.status-running {
+  border-color: var(--accent);
+}
+
+.wf-step.status-failed {
+  border-color: var(--err);
+}
+
+.wf-step.status-skipped,
+.wf-step.status-cancelled {
+  opacity: 0.6;
+}
+
+.wf-step-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.wf-step-index {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--faint);
+}
+
+.wf-name {
+  flex: 1;
+  min-width: 120px;
+  font-weight: 600;
+}
+
+.wf-step-status {
+  margin-left: auto;
+  font-size: 12.5px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.wf-deps {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wf-deps-label {
+  font-size: 12.5px;
+  color: var(--faint);
+}
+
+.wf-deps .filter-pill.active {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--on-ink);
+}
+
+.wf-prompt {
+  min-height: 76px;
+}
+
+.wf-prompt-readonly {
+  font-size: 13px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.wf-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.wf-error {
+  font-size: 12.5px;
+  color: var(--err);
+}
+
+.mode-tab.has-news::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* Workflow as a flowchart: columns left to right, a popover for the details */
+.wf-canvas-wrap {
+  overflow: auto;
+  max-height: calc(100vh - 250px);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background:
+    radial-gradient(circle, var(--line) 1px, transparent 1px) 0 0 / 18px 18px,
+    var(--bg-elevated);
+}
+
+.wf-canvas {
+  position: relative;
+  min-width: 100%;
+}
+
+.wf-edges {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.wf-edge {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 1.5;
+}
+
+.wf-edge.done {
+  stroke: var(--accent);
+}
+
+.wf-arrow {
+  fill: var(--line-strong);
+}
+
+.wf-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+}
+
+.wf-node:hover {
+  border-color: var(--ink);
+}
+
+.wf-node.selected {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 2px var(--soft), var(--shadow-md);
+}
+
+.wf-node.status-running {
+  border-color: var(--warn);
+}
+
+.wf-node.status-completed {
+  border-color: var(--accent);
+}
+
+.wf-node.status-failed {
+  border-color: var(--err);
+}
+
+.wf-node.status-skipped,
+.wf-node.status-cancelled {
+  opacity: 0.55;
+}
+
+.wf-node-top,
+.wf-node-bottom {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.wf-node-name {
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-node-status {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.wf-popover {
+  position: fixed;
+  z-index: 800;
+  width: 400px;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg);
+  background: var(--bg-elevated);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.2);
+}
+
+.wf-pop-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wf-pop-head strong {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+}
+
+.wf-pop-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.wf-pop-row > label,
+.wf-pop-block > label {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.wf-pop-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wf-popover .wf-deps {
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+.wf-popover .wf-prompt {
+  min-height: 140px;
+}
+
+.wf-popover .wf-prompt-readonly {
+  max-height: 220px;
+}
+
+.wf-pop-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
 }

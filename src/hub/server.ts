@@ -2,12 +2,14 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
+import * as acp from "@agentclientprotocol/sdk";
 import { WebSocketServer, type WebSocket } from "ws";
 import { z } from "zod";
 import {
   type AgentId,
   type ArtifactKind,
   type ArtifactRecord,
+  type ChatImageAttachment,
   type ChatMessageRecord,
   type HubEvent,
   type PendingUserQuestion,
@@ -20,36 +22,119 @@ import {
   type TelemetrySnapshot,
   type TurnTelemetryRecord,
   type TurnUsage,
+  type HubSettings,
+  type ChatFileAttachment,
+  type TaskProgress,
+  type ProjectInfo,
 } from "../types.js";
+import type { PersistedHubState } from "./state-store.js";
 import { openInteractiveWindow } from "../ui/launcher.js";
-import { AcpPool, buildSessionKey } from "./acp-pool.js";
+import { AcpPool, buildSessionKey, type WarmSessionOptions } from "./acp-pool.js";
 import { AgentRegistry } from "./agent-registry.js";
 import { ThreadLedger } from "./ledger.js";
 import { checkPortAvailable, findAvailablePort, pickNativeDirectory } from "./port-finder.js";
 import { PROJECT_ROOT } from "./process-tree.js";
+import { WorkflowManager } from "./workflow.js";
+import { HubStateStore } from "./state-store.js";
 import { SharedResourceManager } from "./resources.js";
 import { summarizeWorkspaceChanges } from "./worktree.js";
 
 const MAX_PEER_DEPTH = 3;
 const RUNTIME_FILE = path.join(PROJECT_ROOT, ".agent-hub", "runtime.json");
+const UPLOADS_DIR = path.join(PROJECT_ROOT, ".agent-hub", "uploads");
+const SETTINGS_FILE = path.join(PROJECT_ROOT, ".agent-hub", "settings.json");
+const STATE_FILE = path.join(PROJECT_ROOT, ".agent-hub", "state.json");
+/** Events that never change what is persisted; everything else schedules a save. */
+const TRANSIENT_EVENT_TYPES = new Set(["agent_chunk", "tool_event", "snapshot", "models_updated"]);
+/** Session-name suffix of the throwaway session that names a task; never shown in the UI. */
+const TITLE_SESSION_SUFFIX = "__title";
+
+function loadHubSettings(): HubSettings {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")) as Partial<HubSettings>;
+    return {
+      autoTitle: parsed.autoTitle === true,
+      recentProjects: Array.isArray(parsed.recentProjects)
+        ? parsed.recentProjects.filter((p) => p && typeof p.path === "string").slice(0, 20)
+        : [],
+    };
+  } catch {
+    return { autoTitle: false };
+  }
+}
+
+/** Keeps the model's answer usable as a sidebar title: one line, no quotes, bounded length. */
+function cleanGeneratedTitle(raw: string): string {
+  const line =
+    raw
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .pop() ?? "";
+  const cleaned = line
+    .replace(/^(标题|title)\s*[:：]\s*/i, "")
+    .replace(/^["'“”‘’「」《》#*\s]+|["'“”‘’「」《》*。.\s]+$/g, "");
+  return cleaned.length > 24 ? `${cleaned.slice(0, 24)}…` : cleaned;
+}
+const MAX_SINGLE_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_JSON_BODY_BYTES = 40 * 1024 * 1024;
+const MAX_SINGLE_FILE_BYTES = 12 * 1024 * 1024;
+const MAX_FILES_PER_MESSAGE = 10;
+const ALLOWED_IMAGE_MIMES: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/webp": "webp",
+  "image/gif": "gif",
+};
 
 const AgentIdSchema = z.string().trim().min(1);
 const PermissionModeSchema = z.enum(["approve-all", "approve-reads", "manual"]);
+
+const ChatImageInputSchema = z.object({
+  name: z.string().max(200).optional(),
+  mimeType: z
+    .string()
+    .transform((m) => m.trim().toLowerCase())
+    .refine((m) => m in ALLOWED_IMAGE_MIMES, {
+      message: "仅支持 PNG、JPEG、WEBP 或 GIF 图片格式",
+    }),
+  data: z.string().min(1),
+});
 
 const LeadBodySchema = z.object({
   agent: AgentIdSchema,
   groupId: z.string().optional(),
 });
 
-const ChatBodySchema = z.object({
-  groupId: z.string().optional(),
-  prompt: z.string().min(1),
-  leadAgent: AgentIdSchema.optional(),
-  cwd: z.string().optional(),
-  session: z.string().optional(),
-  model: z.string().optional(),
-  effort: z.string().optional(),
+const WarmSessionBodySchema = z.object({
+  groupId: z.string().min(1),
 });
+
+const ChatFileInputSchema = z.object({
+  name: z.string().min(1),
+  mimeType: z.string().optional(),
+  data: z.string().min(1),
+});
+
+const ChatBodySchema = z
+  .object({
+    groupId: z.string().optional(),
+    prompt: z.string().optional().default(""),
+    images: z.array(ChatImageInputSchema).max(6).optional(),
+    files: z.array(ChatFileInputSchema).max(MAX_FILES_PER_MESSAGE).optional(),
+    leadAgent: AgentIdSchema.optional(),
+    cwd: z.string().optional(),
+    session: z.string().optional(),
+    model: z.string().optional(),
+    effort: z.string().optional(),
+  })
+  .refine(
+    (v) => v.prompt.trim().length > 0 || (v.images?.length ?? 0) > 0 || (v.files?.length ?? 0) > 0,
+    {
+    message: "请输入消息内容，或至少附带一张图片或一个文件",
+    },
+  );
 
 const CreateGroupBodySchema = z.object({
   title: z.string().optional(),
@@ -57,6 +142,7 @@ const CreateGroupBodySchema = z.object({
   leadModel: z.string().optional(),
   leadEffort: z.string().optional(),
   cwd: z.string().optional(),
+  extraDirs: z.array(z.string()).max(8).optional(),
 });
 
 const UpdateGroupBodySchema = z.object({
@@ -64,6 +150,8 @@ const UpdateGroupBodySchema = z.object({
   title: z.string().optional(),
   leadAgent: AgentIdSchema.optional(),
   archived: z.boolean().optional(),
+  cwd: z.string().optional(),
+  extraDirs: z.array(z.string()).max(8).optional(),
 });
 
 const GroupModelBodySchema = z.object({
@@ -77,12 +165,21 @@ const DeleteGroupBodySchema = z.object({
   groupId: z.string().min(1),
 });
 
-const SessionChatBodySchema = z.object({
-  sessionKey: z.string().min(1),
-  prompt: z.string().min(1),
-  model: z.string().optional(),
-  effort: z.string().optional(),
-});
+const SessionChatBodySchema = z
+  .object({
+    sessionKey: z.string().min(1),
+    prompt: z.string().optional().default(""),
+    images: z.array(ChatImageInputSchema).max(6).optional(),
+    files: z.array(ChatFileInputSchema).max(MAX_FILES_PER_MESSAGE).optional(),
+    model: z.string().optional(),
+    effort: z.string().optional(),
+  })
+  .refine(
+    (v) => v.prompt.trim().length > 0 || (v.images?.length ?? 0) > 0 || (v.files?.length ?? 0) > 0,
+    {
+    message: "请输入消息内容，或至少附带一张图片或一个文件",
+    },
+  );
 
 const SessionModelBodySchema = z.object({
   sessionKey: z.string().min(1),
@@ -102,6 +199,42 @@ const PeerCallBodySchema = z.object({
   callerAgent: z.union([AgentIdSchema, z.literal("user")]).optional().default("user"),
   callerSession: z.string().optional().default("main"),
   depth: z.number().int().min(0).optional().default(0),
+});
+
+const WorkflowSaveSchema = z.object({
+  groupId: z.string().optional(),
+  proposedBy: z.string().optional(),
+  steps: z
+    .array(
+      z.object({
+        id: z.string().optional(),
+        name: z.string().optional(),
+        agent: z.string().min(1),
+        prompt: z.string().optional().default(""),
+        dependsOn: z.array(z.string()).optional(),
+        isolateWorktree: z.boolean().optional(),
+      }),
+    )
+    .max(20),
+});
+
+const WorkflowGroupSchema = z.object({ groupId: z.string().min(1) });
+
+const ProgressUpdateSchema = z.object({
+  groupId: z.string().optional(),
+  goal: z.string().optional(),
+  summary: z.string().optional(),
+  items: z
+    .array(
+      z.object({
+        title: z.string().min(1),
+        status: z.enum(["pending", "in_progress", "completed", "blocked"]).optional().default("pending"),
+        note: z.string().optional(),
+      }),
+    )
+    .max(40)
+    .optional(),
+  updatedBy: z.string().optional(),
 });
 
 const CancelBodySchema = z.object({
@@ -180,6 +313,7 @@ const AgentSaveSchema = z.object({
   env: z.record(z.string(), z.string()).optional(),
   defaultModel: z.string().optional(),
   defaultEffort: z.string().optional(),
+  models: z.array(z.string()).optional(),
 });
 
 const AgentToggleSchema = z.object({
@@ -191,6 +325,10 @@ const AgentIdOnlySchema = z.object({
   id: z.string().min(1),
 });
 
+const DefaultLeadSchema = z.object({
+  id: z.string().min(1).nullable().optional(),
+});
+
 const WorkspaceCwdSchema = z.object({
   cwd: z.string().min(1),
   groupId: z.string().optional(),
@@ -200,11 +338,41 @@ const WorkspacePickSchema = z.object({
   initialDir: z.string().optional(),
 });
 
-const DESKTOP_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#151514"/>
-  <path d="M21 48 L32 16 L43 48 M25.5 36.5 H38.5" stroke="#f3f2ec" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <circle cx="49" cy="15" r="5" fill="#0d7148"/>
-</svg>`;
+/** Raster app icons shipped next to the UI files; anything else under /ui/icon* is a 404. */
+const UI_ICON_FILES: Record<string, string> = {
+  "icon-32.png": "image/png",
+  "icon-64.png": "image/png",
+  "icon-192.png": "image/png",
+  "icon-512.png": "image/png",
+  "icon-alert.png": "image/png",
+  "icon.ico": "image/x-icon",
+};
+
+/**
+ * Markup that renders a Mermaid diagram with the library served by the hub itself (no CDN).
+ * If the source does not parse, the error and the source are shown instead of a blank card.
+ */
+function buildMermaidMarkup(source: string): string {
+  const escaped = source.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  return `<div id="mmd-out" class="mmd-out"></div>
+    <pre id="mmd-src" class="mermaid-src" hidden>${escaped}</pre>
+    <script src="/ui/vendor/mermaid.min.js"></script>
+    <script>
+    (async function () {
+      var src = document.getElementById("mmd-src");
+      var out = document.getElementById("mmd-out");
+      try {
+        var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+        mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "neutral" });
+        var result = await mermaid.render("mmd-svg", src.textContent);
+        out.innerHTML = result.svg;
+      } catch (err) {
+        out.innerHTML = '<div class="mmd-error">这段 Mermaid 没能渲染：' + String(err && err.message ? err.message : err).replace(/</g, "&lt;") + '</div>';
+        src.hidden = false;
+      }
+    })();
+    </script>`;
+}
 
 function buildArtifactHtmlDocument(artifact: ArtifactRecord): string {
   const safeTitle = artifact.title.replace(/[<>&"]/g, (c) =>
@@ -215,8 +383,7 @@ function buildArtifactHtmlDocument(artifact: ArtifactRecord): string {
   if (artifact.kind === "svg" && !/<svg[\s>]/i.test(trimmed)) {
     bodyMarkup = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 300">${artifact.content}</svg>`;
   } else if (artifact.kind === "mermaid") {
-    bodyMarkup = `<pre class="mermaid">${trimmed.replace(/</g, "&lt;")}</pre>
-    <p style="font-size:12px;color:var(--muted);margin-top:8px;">Mermaid 源码视图（离线环境不依赖外部 CDN）：</p>`;
+    bodyMarkup = buildMermaidMarkup(trimmed);
   }
 
   // If the HTML already defines a full <html> document, inject auto-height reporter cleanly before </body>
@@ -270,7 +437,10 @@ function buildArtifactHtmlDocument(artifact: ArtifactRecord): string {
       font-size: 14px;
       line-height: 1.55;
     }
-    pre.mermaid {
+    .mmd-out { overflow: auto; text-align: center; }
+    .mmd-out svg { max-width: 100%; height: auto; }
+    .mmd-error { color: #b42318; font-size: 13px; margin-bottom: 8px; text-align: left; }
+    pre.mermaid-src, pre.mermaid {
       padding: 12px;
       background: var(--card);
       border: 1px solid var(--line);
@@ -305,6 +475,13 @@ export interface HubServerOptions {
   defaultLead?: AgentId;
   permissionMode?: PermissionMode;
   writeRuntimeFile?: boolean;
+  /**
+   * Keep tasks, messages, workflows and telemetry across restarts. Defaults to
+   * writeRuntimeFile, so throwaway hubs (tests, benchmarks) never touch the saved state.
+   */
+  persistState?: boolean;
+  /** Where the state is kept; setting it turns persistence on. Defaults to .agent-hub/state.json. */
+  stateFile?: string;
   strictPort?: boolean;
   desktopMode?: boolean;
   autoExitOnWindowClose?: boolean;
@@ -331,10 +508,16 @@ export function readRuntimeFile(): RuntimeFileInfo | undefined {
   }
 }
 
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+async function readJsonBody(req: IncomingMessage, maxBytes = MAX_JSON_BODY_BYTES): Promise<unknown> {
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
   for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buf.byteLength;
+    if (totalBytes > maxBytes) {
+      throw new Error(`Request payload too large (max ${Math.round(maxBytes / (1024 * 1024))}MB)`);
+    }
+    chunks.push(buf);
   }
   const raw = Buffer.concat(chunks).toString("utf8").trim();
   if (!raw) {
@@ -363,10 +546,20 @@ function autoTitleFromPrompt(prompt: string): string {
   return firstLine.length > 26 ? `${firstLine.slice(0, 26)}…` : firstLine;
 }
 
+/** Tells the agent where the attached files were saved; empty when there are none. */
+function buildAttachedFilesBlock(files: ChatFileAttachment[]): string {
+  if (files.length === 0) {
+    return "";
+  }
+  const lines = files.map((f) => `- ${f.localPath} (${f.name}, ${f.sizeBytes} bytes)`);
+  return `\n\n<attached_files>\nThe user attached ${files.length} local file(s). Read them from these paths:\n${lines.join("\n")}\n</attached_files>`;
+}
+
 function cloneMessage(msg: ChatMessageRecord): ChatMessageRecord {
   return {
     ...msg,
     toolCalls: msg.toolCalls.map((t) => ({ ...t })),
+    images: msg.images ? msg.images.map((img) => ({ ...img })) : undefined,
   };
 }
 
@@ -377,6 +570,34 @@ export class AgentHubServer {
   }
   readonly pool = new AcpPool();
   readonly registry: AgentRegistry;
+  private readonly settings: HubSettings = loadHubSettings();
+  private readonly lastCostBySession = new Map<string, number>();
+  private stateStore?: HubStateStore;
+  private progressByGroup = new Map<string, TaskProgress>();
+  /** Sessions from before a restart: not running, kept so their history stays reachable. */
+  private archivedSessions = new Map<string, SessionRecord>();
+  private readonly workflows = new WorkflowManager({
+    dispatch: ({ groupId, agent, prompt, session, isolateWorktree }) => {
+      const group = this.groups.get(groupId);
+      const lead = group?.leadAgent ?? this.getDefaultLead();
+      return this.dispatchPeerTask({
+        targetAgent: agent,
+        prompt,
+        groupId,
+        session,
+        isolateWorktree,
+        callerAgent: lead,
+        callerSession: buildSessionKey(lead, `${groupId}__lead`),
+        depth: 0,
+      });
+    },
+    cancel: (sessionKey) => void this.pool.cancelSession(sessionKey),
+    isKnownAgent: (agent) => this.registry.isEnabledAgent(agent),
+    onChange: (workflow) =>
+      this.broadcast({ type: "workflow_updated", workflow, timestamp: Date.now() }),
+  });
+  /** Lead forced for this run via --lead; wins over the persisted default lead. */
+  private readonly launchLead?: AgentId;
   readonly resources: SharedResourceManager;
   private groups = new Map<string, TaskGroup>();
   private ledgers = new Map<string, ThreadLedger>();
@@ -426,6 +647,11 @@ export class AgentHubServer {
     this.resources.setAgentRegistry(this.registry);
     this.pool.setResourceManager(this.resources);
     this.pool.setAgentRegistry(this.registry);
+    this.pool.setElicitationHandler((params) => this.handleElicitationRequest(params));
+    this.pool.setExtraDirsResolver((groupId) => this.groups.get(groupId)?.extraDirs ?? []);
+    this.launchLead = options.defaultLead;
+    // Auth probes refresh in the background; push the new state when it actually changed.
+    this.registry.onHealthChanged(() => this.broadcastAgentsUpdated());
     for (const def of this.registry.listDefinitions()) {
       this.telemetryByAgent[def.id] = createEmptyTotals();
     }
@@ -437,7 +663,7 @@ export class AgentHubServer {
     const initialGroup: TaskGroup = {
       groupId: this.defaultGroupId,
       title: "任务 1",
-      leadAgent: options.defaultLead ?? "claude",
+      leadAgent: this.registry.resolveDefaultLead(options.defaultLead),
       agentModels: {},
       agentEfforts: {},
       cwd: this.baseCwd,
@@ -448,7 +674,22 @@ export class AgentHubServer {
     this.groups.set(initialGroup.groupId, initialGroup);
     this.ledgers.set(initialGroup.groupId, new ThreadLedger());
 
+    if (options.persistState ?? (Boolean(options.stateFile) || this.writeRuntimeFile)) {
+      this.stateStore = new HubStateStore(options.stateFile ?? STATE_FILE, () => this.collectPersistedState());
+      this.restorePersistedState();
+    }
+
     this.pool.on("hub_event", (event: HubEvent) => {
+      // The title-naming session is internal plumbing: none of its events reach clients.
+      const eventSessionKey =
+        event.type === "session_updated"
+          ? event.session.sessionKey
+          : "sessionKey" in event && typeof event.sessionKey === "string"
+            ? event.sessionKey
+            : "";
+      if (eventSessionKey.endsWith(TITLE_SESSION_SUFFIX)) {
+        return;
+      }
       if (event.type === "agent_chunk") {
         const active = this.activeAssistantBySession.get(event.sessionKey);
         if (active) {
@@ -470,6 +711,7 @@ export class AgentHubServer {
             if (event.kind) existingTool.kind = event.kind;
             if (event.status) existingTool.status = event.status;
             if (event.rawInput !== undefined) existingTool.rawInput = event.rawInput;
+            if (event.locations && event.locations.length > 0) existingTool.locations = event.locations;
             existingTool.timestamp = event.timestamp;
           } else {
             active.toolCalls.push({
@@ -478,6 +720,7 @@ export class AgentHubServer {
               kind: event.kind,
               status: event.status,
               rawInput: event.rawInput,
+              locations: event.locations,
               timestamp: event.timestamp,
             });
           }
@@ -488,6 +731,183 @@ export class AgentHubServer {
       }
       this.broadcast(event);
     });
+  }
+
+  private requireDirectory(raw: string): string {
+    const resolved = path.resolve(raw.trim());
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+      throw new Error(`目录不存在：${resolved}`);
+    }
+    return resolved;
+  }
+
+  /** Existing, de-duplicated directories other than the task's own cwd. */
+  private normalizeExtraDirs(raw: string[] | undefined, cwd: string): string[] {
+    const seen = new Set([path.resolve(cwd).toLowerCase()]);
+    const out: string[] = [];
+    for (const item of raw ?? []) {
+      if (!item?.trim()) continue;
+      const resolved = this.requireDirectory(item);
+      const key = resolved.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(resolved);
+    }
+    return out;
+  }
+
+  /** Closes every live session of a task group (their records stay, marked closed). */
+  private closeGroupSessions(groupId: string): void {
+    for (const session of this.pool.listSessions()) {
+      if (session.groupId !== groupId) continue;
+      this.archivedSessions.set(session.sessionKey, { ...session, status: "closed", pid: undefined });
+      void this.pool.closeSession(session.sessionKey);
+    }
+  }
+
+  /** Remembers a directory as recently used and tells clients the project list changed. */
+  private touchProject(dir: string): void {
+    const resolved = path.resolve(dir);
+    const rest = (this.settings.recentProjects ?? []).filter(
+      (p) => path.resolve(p.path).toLowerCase() !== resolved.toLowerCase(),
+    );
+    this.settings.recentProjects = [{ path: resolved, lastUsedAt: Date.now() }, ...rest].slice(0, 20);
+    // Throwaway hubs (tests, benchmarks) must not write their temp directories into the settings.
+    if (this.writeRuntimeFile)
+    try {
+      fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
+      fs.writeFileSync(SETTINGS_FILE, JSON.stringify(this.settings, null, 2), "utf8");
+    } catch {
+      // not persisted; still valid for this run
+    }
+    this.broadcast({ type: "projects_updated", projects: this.listProjects(), timestamp: Date.now() });
+  }
+
+  /** Directories that have tasks, plus recently used ones that still exist. */
+  listProjects(): ProjectInfo[] {
+    const byKey = new Map<string, ProjectInfo>();
+    const ensure = (dir: string, lastUsedAt: number): ProjectInfo => {
+      const resolved = path.resolve(dir);
+      const key = resolved.toLowerCase();
+      let info = byKey.get(key);
+      if (!info) {
+        info = { path: resolved, name: path.basename(resolved) || resolved, activeTasks: 0, archivedTasks: 0, lastUsedAt };
+        byKey.set(key, info);
+      }
+      info.lastUsedAt = Math.max(info.lastUsedAt, lastUsedAt);
+      return info;
+    };
+    for (const group of this.groups.values()) {
+      const info = ensure(group.cwd, group.updatedAt);
+      if (group.archived) info.archivedTasks += 1;
+      else info.activeTasks += 1;
+    }
+    for (const recent of this.settings.recentProjects ?? []) {
+      if (fs.existsSync(recent.path)) ensure(recent.path, recent.lastUsedAt);
+    }
+    return [...byKey.values()].sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+  }
+
+  getProgress(groupId: string): TaskProgress | undefined {
+    const progress = this.progressByGroup.get(groupId);
+    return progress ? { ...progress, items: progress.items.map((i) => ({ ...i })) } : undefined;
+  }
+
+  /**
+   * Updates a task's goal and progress. Fields that are left out keep their value, so an
+   * agent can tick off a step without repeating the goal; `items`, when given, replaces the list.
+   */
+  updateProgress(input: {
+    groupId?: string;
+    goal?: string;
+    summary?: string;
+    items?: Array<{ title: string; status: TaskProgress["items"][number]["status"]; note?: string }>;
+    updatedBy?: string;
+  }): TaskProgress {
+    const groupId = input.groupId?.trim() && this.groups.has(input.groupId.trim()) ? input.groupId.trim() : this.defaultGroupId;
+    const prev = this.progressByGroup.get(groupId);
+    const clip = (text: string | undefined, max: number) => {
+      const t = text?.trim();
+      return t ? (t.length > max ? `${t.slice(0, max)}…` : t) : undefined;
+    };
+    const next: TaskProgress = {
+      groupId,
+      goal: input.goal !== undefined ? clip(input.goal, 400) : prev?.goal,
+      summary: input.summary !== undefined ? clip(input.summary, 600) : prev?.summary,
+      items:
+        input.items !== undefined
+          ? input.items.map((i) => ({ title: clip(i.title, 200) ?? "", status: i.status, note: clip(i.note, 300) }))
+          : (prev?.items ?? []),
+      updatedBy: input.updatedBy && this.registry.isKnownAgent(input.updatedBy) ? input.updatedBy : "user",
+      updatedAt: Date.now(),
+    };
+    this.progressByGroup.set(groupId, next);
+    this.broadcast({ type: "progress_updated", progress: this.getProgress(groupId)!, timestamp: next.updatedAt });
+    return this.getProgress(groupId)!;
+  }
+
+  getSettings(): HubSettings {
+    return { ...this.settings };
+  }
+
+  updateSettings(patch: Partial<HubSettings>): HubSettings {
+    if (typeof patch.autoTitle === "boolean") {
+      this.settings.autoTitle = patch.autoTitle;
+    }
+    try {
+      fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
+      fs.writeFileSync(SETTINGS_FILE, JSON.stringify(this.settings, null, 2), "utf8");
+    } catch {
+      // Not persisted; the setting still applies until the hub restarts.
+    }
+    this.broadcast({ type: "settings_updated", settings: this.getSettings(), timestamp: Date.now() });
+    return this.getSettings();
+  }
+
+  /**
+   * Asks the lead agent for a short task title in a throwaway session (no peer MCP, no shared
+   * rules, so it stays out of the task's own context), then applies it unless the user has
+   * renamed the task meanwhile. Failures are silent: the prompt-derived title stays.
+   */
+  private async generateTaskTitle(
+    group: TaskGroup,
+    currentTitle: string,
+    userPrompt: string,
+    answer: string,
+  ): Promise<void> {
+    const agent = group.leadAgent;
+    const sessionName = `${group.groupId}${TITLE_SESSION_SUFFIX}`;
+    const sessionKey = buildSessionKey(agent, sessionName);
+    try {
+      const result = await this.pool.runTurn({
+        agent,
+        sessionName,
+        baseCwd: group.cwd,
+        prompt: [
+          "给下面这段对话起一个任务标题：不超过 12 个汉字（或 6 个英文单词），概括用户要做的事，不带标点和引号。只输出标题本身，不要调用任何工具。",
+          "",
+          `用户：${userPrompt.slice(0, 600)}`,
+          "",
+          `助手：${answer.slice(0, 600)}`,
+        ].join("\n"),
+        injectSharedResources: false,
+        injectPeerMcp: false,
+        isolateWorktree: false,
+        groupId: "__internal",
+        label: "title",
+      });
+      const title = cleanGeneratedTitle(result.outputText);
+      const live = this.groups.get(group.groupId);
+      if (title && live && live.title === currentTitle) {
+        live.title = title;
+        live.updatedAt = Date.now();
+        this.broadcast({ type: "group_updated", group: { ...live }, timestamp: live.updatedAt });
+      }
+    } catch {
+      // keep the prompt-derived title
+    } finally {
+      void this.pool.closeSession(sessionKey);
+    }
   }
 
   private getOrCreateLedger(groupId: string): ThreadLedger {
@@ -530,7 +950,19 @@ export class AgentHubServer {
 
   getLeadAgent(groupId?: string): AgentId {
     const group = this.groups.get(groupId ?? this.defaultGroupId) ?? this.groups.get(this.defaultGroupId);
-    return group?.leadAgent ?? "claude";
+    return group?.leadAgent ?? this.getDefaultLead();
+  }
+
+  /** Lead used for new task groups: --lead, then the persisted setting, then the first ready agent. */
+  getDefaultLead(): AgentId {
+    return this.registry.resolveDefaultLead(this.launchLead);
+  }
+
+  /** Persists the default lead (null = automatic) and tells every client. */
+  setDefaultLead(agent: string | null): { defaultLead: AgentId; configured?: AgentId } {
+    const configured = this.registry.setDefaultLead(agent);
+    this.broadcastAgentsUpdated();
+    return { defaultLead: this.getDefaultLead(), configured };
   }
 
   setLeadAgent(agent: AgentId): void {
@@ -558,11 +990,14 @@ export class AgentHubServer {
     leadModel?: string;
     leadEffort?: string;
     cwd?: string;
+    extraDirs?: string[];
   }): TaskGroup {
     const now = Date.now();
+    const cwd = input?.cwd?.trim() ? this.requireDirectory(input.cwd) : this.baseCwd;
+    const extraDirs = this.normalizeExtraDirs(input?.extraDirs, cwd);
     this.groupCounter += 1;
     const rawTitle = input?.title?.trim();
-    const leadAgent = input?.leadAgent ? this.requireKnownAgent(input.leadAgent) : this.getLeadAgent();
+    const leadAgent = input?.leadAgent ? this.requireKnownAgent(input.leadAgent) : this.getDefaultLead();
     const agentModels: Record<string, string> = {};
     const agentEfforts: Record<string, string> = {};
     if (input?.leadModel?.trim()) {
@@ -577,13 +1012,15 @@ export class AgentHubServer {
       leadAgent,
       agentModels,
       agentEfforts,
-      cwd: input?.cwd ? path.resolve(input.cwd) : this.baseCwd,
+      cwd,
+      extraDirs: extraDirs.length > 0 ? extraDirs : undefined,
       createdAt: now,
       updatedAt: now,
     };
     this.syncGroupLeadModelFields(group);
     this.groups.set(group.groupId, group);
     this.ledgers.set(group.groupId, new ThreadLedger());
+    this.touchProject(cwd);
     this.broadcast({
       type: "group_created",
       group: { ...group },
@@ -597,6 +1034,8 @@ export class AgentHubServer {
     title?: string;
     leadAgent?: AgentId;
     archived?: boolean;
+    cwd?: string;
+    extraDirs?: string[];
   }): TaskGroup {
     let group = this.groups.get(input.groupId);
     if (!group) {
@@ -608,10 +1047,37 @@ export class AgentHubServer {
       group.title = cleanTitle;
       changed = true;
     }
+    // Directories: sessions are bound to the directories they started with, so a change
+    // closes the task's sessions; the next message starts fresh ones and hands over the history.
+    let dirsChanged = false;
+    if (input.cwd !== undefined && input.cwd.trim()) {
+      const nextCwd = this.requireDirectory(input.cwd);
+      if (nextCwd.toLowerCase() !== path.resolve(group.cwd).toLowerCase()) {
+        group.cwd = nextCwd;
+        dirsChanged = true;
+      }
+    }
+    if (input.extraDirs !== undefined || dirsChanged) {
+      const nextExtra = this.normalizeExtraDirs(input.extraDirs ?? group.extraDirs, group.cwd);
+      if (JSON.stringify(nextExtra) !== JSON.stringify(group.extraDirs ?? [])) {
+        group.extraDirs = nextExtra.length > 0 ? nextExtra : undefined;
+        dirsChanged = true;
+      }
+    }
+    if (dirsChanged) {
+      changed = true;
+      this.closeGroupSessions(group.groupId);
+      this.touchProject(group.cwd);
+    }
     if (typeof input.archived === "boolean" && Boolean(group.archived) !== input.archived) {
       group.archived = input.archived;
       group.archivedAt = input.archived ? Date.now() : undefined;
       changed = true;
+      if (input.archived) {
+        // An archived task holds no agent processes and runs nothing.
+        this.workflows.cancel(group.groupId);
+        this.closeGroupSessions(group.groupId);
+      }
       if (input.archived && this.defaultGroupId === group.groupId) {
         for (const candidate of this.groups.values()) {
           if (!candidate.archived && candidate.groupId !== group.groupId) {
@@ -647,6 +1113,9 @@ export class AgentHubServer {
     }
     const previousLead = group.leadAgent;
     const now = Date.now();
+    // A session pre-warmed for the previous lead that never ran a turn has no context worth
+    // keeping; sessions that did run stay alive so switching back resumes them.
+    void this.pool.discardWarmSession(buildSessionKey(previousLead, `${groupId}__lead`));
     group.leadAgent = validAgent;
     this.syncGroupLeadModelFields(group);
     group.updatedAt = now;
@@ -761,6 +1230,11 @@ export class AgentHubServer {
 
     this.groups.delete(groupId);
     this.ledgers.delete(groupId);
+    this.workflows.forget(groupId);
+    this.progressByGroup.delete(groupId);
+    for (const [key, session] of this.archivedSessions) {
+      if (session.groupId === groupId) this.archivedSessions.delete(key);
+    }
     for (const [msgId, msg] of this.messages.entries()) {
       if (msg.groupId === groupId) {
         this.messages.delete(msgId);
@@ -841,12 +1315,21 @@ export class AgentHubServer {
           );
           chunks.push(toolLines.join("\n"));
         }
+        if (m.images && m.images.length > 0) {
+          chunks.push(
+            `- **附带图片**: ${m.images.map((img) => `\`${img.name}\` (${img.mimeType})`).join("、")}`,
+          );
+        }
         const bodyText = m.text?.trim()
           ? m.text.trim()
           : m.status === "cancelled"
             ? "*(已停止)*"
-            : "*(空内容)*";
-        chunks.push(bodyText);
+            : m.images && m.images.length > 0
+              ? ""
+              : "*(空内容)*";
+        if (bodyText) {
+          chunks.push(bodyText);
+        }
         if (m.artifactIds && m.artifactIds.length > 0) {
           const artLines = m.artifactIds.map((id) => {
             const art = this.artifacts.get(id);
@@ -969,8 +1452,126 @@ export class AgentHubServer {
     return cloned;
   }
 
+  private collectPersistedState(): Omit<PersistedHubState, "version" | "savedAt"> {
+    const live = this.pool.listSessions().filter((s) => !s.sessionKey.endsWith(TITLE_SESSION_SUFFIX));
+    const liveKeys = new Set(live.map((s) => s.sessionKey));
+    return {
+      defaultGroupId: this.defaultGroupId,
+      groupCounter: this.groupCounter,
+      groups: [...this.groups.values()],
+      ledgers: [...this.ledgers.entries()].map(([groupId, ledger]) => ({ groupId, ...ledger.exportState() })),
+      messages: [...this.messages.values()],
+      tasks: [...this.tasks.values()],
+      artifacts: [...this.artifacts.values()],
+      workflows: this.workflows.list(),
+      progress: [...this.progressByGroup.values()],
+      sessions: [...live, ...[...this.archivedSessions.values()].filter((s) => !liveKeys.has(s.sessionKey))],
+      telemetry: {
+        turnSeq: this.turnSeq,
+        totals: this.telemetryTotals,
+        byAgent: this.telemetryByAgent,
+        recentTurns: this.recentTurns,
+      },
+    };
+  }
+
+  /**
+   * Brings back what a previous run saved. Agent processes are gone, so anything that was
+   * in flight is closed: streaming replies and running delegations become cancelled, and
+   * sessions are kept only as closed records. The ledgers make the next turn hand the
+   * history to a fresh lead session.
+   */
+  private restorePersistedState(): void {
+    const state = this.stateStore?.load();
+    if (!state || state.groups.length === 0) {
+      return;
+    }
+    const knownAgent = (id: string) => this.registry.isKnownAgent(id);
+
+    this.groups.clear();
+    this.ledgers.clear();
+    for (const group of state.groups) {
+      if (!group?.groupId) continue;
+      // An agent removed since the last run cannot lead; fall back instead of breaking the task.
+      if (!knownAgent(group.leadAgent)) {
+        group.leadAgent = this.getDefaultLead();
+      }
+      this.syncGroupLeadModelFields(group);
+      this.groups.set(group.groupId, group);
+    }
+    for (const entry of state.ledgers ?? []) {
+      if (this.groups.has(entry.groupId)) {
+        this.ledgers.set(entry.groupId, ThreadLedger.fromState(entry));
+      }
+    }
+    for (const groupId of this.groups.keys()) {
+      if (!this.ledgers.has(groupId)) this.ledgers.set(groupId, new ThreadLedger());
+    }
+    this.defaultGroupId = this.groups.has(state.defaultGroupId)
+      ? state.defaultGroupId
+      : [...this.groups.keys()][0]!;
+    this.groupCounter = Math.max(state.groupCounter || 1, this.groups.size);
+
+    for (const msg of state.messages ?? []) {
+      if (!this.groups.has(msg.groupId)) continue;
+      if (msg.status === "streaming") {
+        msg.status = "cancelled";
+        msg.completedAt = msg.completedAt ?? Date.now();
+      }
+      this.messages.set(msg.messageId, msg);
+    }
+    for (const task of state.tasks ?? []) {
+      if (!this.groups.has(task.groupId)) continue;
+      if (task.status === "running" || task.status === "queued") {
+        task.status = "cancelled";
+        task.error = task.error ?? "hub 重启时中断";
+        task.completedAt = task.completedAt ?? Date.now();
+      }
+      this.tasks.set(task.taskId, task);
+    }
+    for (const artifact of state.artifacts ?? []) {
+      if (this.groups.has(artifact.groupId)) this.artifacts.set(artifact.artifactId, artifact);
+    }
+    this.workflows.restore((state.workflows ?? []).filter((w) => this.groups.has(w.groupId)));
+    for (const progress of state.progress ?? []) {
+      if (this.groups.has(progress.groupId)) this.progressByGroup.set(progress.groupId, progress);
+    }
+    for (const session of state.sessions ?? []) {
+      if (!this.groups.has(session.groupId)) continue;
+      this.archivedSessions.set(session.sessionKey, {
+        ...session,
+        status: "closed",
+        pid: undefined,
+        lastError: undefined,
+      });
+    }
+    if (state.telemetry) {
+      this.turnSeq = state.telemetry.turnSeq || 0;
+      this.telemetryTotals = { ...createEmptyTotals(), ...state.telemetry.totals };
+      for (const [agent, totals] of Object.entries(state.telemetry.byAgent ?? {})) {
+        this.telemetryByAgent[agent] = { ...createEmptyTotals(), ...totals };
+      }
+      this.recentTurns = (state.telemetry.recentTurns ?? []).slice(-200);
+    }
+  }
+
+  /** Live sessions plus the closed ones kept from before a restart. */
+  private listVisibleSessions(): SessionRecord[] {
+    const live = this.pool.listSessions().filter((s) => !s.sessionKey.endsWith(TITLE_SESSION_SUFFIX));
+    const liveKeys = new Set(live.map((s) => s.sessionKey));
+    return [...live, ...[...this.archivedSessions.values()].filter((s) => !liveKeys.has(s.sessionKey))];
+  }
+
   private broadcast(event: HubEvent): void {
-    const payload = JSON.stringify(event);
+    if (this.stateStore && !TRANSIENT_EVENT_TYPES.has(event.type)) {
+      this.stateStore.schedule();
+    }
+    // Clients only ever see the models the agent is configured to offer.
+    const outgoing =
+      event.type === "models_updated"
+        ? { ...event, catalog: this.registry.applyConfiguredModels(event.catalog) }
+        : event;
+    const payload = JSON.stringify(outgoing);
     for (const ws of this.wsClients) {
       if (ws.readyState === ws.OPEN) {
         ws.send(payload);
@@ -1002,8 +1603,17 @@ export class AgentHubServer {
     role: "lead" | "sub";
     agent: AgentId;
     handoffTokens: number;
+    /** Rules + skills index actually sent this turn (non-zero on a session's first turn only). */
+    injectedTokens?: number;
     usage: TurnUsage;
   }): void {
+    // Adapters report cost as a running total per session; only the increase belongs to this turn.
+    let turnCostUsd: number | undefined;
+    if (typeof params.usage.costUsd === "number") {
+      const prev = this.lastCostBySession.get(params.sessionKey) ?? 0;
+      turnCostUsd = Math.max(0, params.usage.costUsd - prev);
+      this.lastCostBySession.set(params.sessionKey, params.usage.costUsd);
+    }
     const addToTotals = (target: SessionUsageTotals, usage: TurnUsage) => {
       target.turns += 1;
       target.inputTokens += usage.inputTokens;
@@ -1012,8 +1622,11 @@ export class AgentHubServer {
       target.cachedWriteTokens += usage.cachedWriteTokens;
       target.thoughtTokens += usage.thoughtTokens;
       target.totalTokens += usage.totalTokens;
-      if (typeof usage.costUsd === "number") {
-        target.costUsd += usage.costUsd;
+      if (typeof turnCostUsd === "number") {
+        target.costUsd += turnCostUsd;
+      }
+      if (usage.isEstimated) {
+        target.estimatedTurns = (target.estimatedTurns ?? 0) + 1;
       }
       if (usage.modelId) {
         target.modelId = usage.modelId;
@@ -1036,10 +1649,13 @@ export class AgentHubServer {
       sessionKey: params.sessionKey,
       role: params.role,
       agent: params.agent,
-      injectedRulesTokens: session?.contextBreakdown?.sharedRulesTokens ?? 0,
-      injectedSkillsTokens: session?.contextBreakdown?.skillsIndexTokens ?? 0,
+      // Rules and the skills index go out once per session; later turns carry none.
+      injectedRulesTokens:
+        (params.injectedTokens ?? 0) > 0 ? (session?.contextBreakdown?.sharedRulesTokens ?? 0) : 0,
+      injectedSkillsTokens:
+        (params.injectedTokens ?? 0) > 0 ? (session?.contextBreakdown?.skillsIndexTokens ?? 0) : 0,
       handoffTokens: params.handoffTokens,
-      usage: { ...params.usage },
+      usage: { ...params.usage, costUsd: turnCostUsd },
     };
     this.recentTurns.push(turnRecord);
     if (this.recentTurns.length > 200) {
@@ -1218,6 +1834,8 @@ export class AgentHubServer {
     this.broadcast({
       type: "agents_updated",
       agents: this.registry.getHealthList(true),
+      defaultLead: this.getDefaultLead(),
+      configuredDefaultLead: this.registry.getDefaultLead(),
       timestamp: now,
     });
     this.broadcast({
@@ -1238,12 +1856,18 @@ export class AgentHubServer {
 
     return {
       type: "snapshot",
+      settings: this.getSettings(),
+      workflows: this.workflows.list(),
+      progress: [...this.progressByGroup.values()],
+      projects: this.listProjects(),
       defaultGroupId: this.defaultGroupId,
+      defaultLead: this.getDefaultLead(),
+      configuredDefaultLead: this.registry.getDefaultLead(),
       leadAgent: this.getLeadAgent(this.defaultGroupId),
       permissionMode: this.pool.getPermissionMode(),
       baseCwd: this.baseCwd,
       taskGroups: this.listGroups(),
-      sessions: this.pool.listSessions(),
+      sessions: this.listVisibleSessions(),
       tasks: [...this.tasks.values()],
       pendingPermissions: this.pool.getPendingPermissions(),
       pendingQuestions: this.listPendingQuestions(),
@@ -1272,12 +1896,21 @@ export class AgentHubServer {
       groupId && this.groups.has(groupId) ? groupId : this.defaultGroupId;
     const group = this.groups.get(targetGroupId)!;
     const now = Date.now();
+    // Pre-warmed lead sessions were started in the old directory; drop the unused ones so the
+    // first message starts in the new cwd instead of silently reusing the stale session.
+    const discardStaleWarm = (g: TaskGroup): void => {
+      if (g.cwd !== resolved) {
+        void this.pool.discardWarmSession(buildSessionKey(g.leadAgent, `${g.groupId}__lead`));
+      }
+    };
+    discardStaleWarm(group);
     group.cwd = resolved;
     group.updatedAt = now;
 
     if (targetGroupId !== this.defaultGroupId) {
       const defGroup = this.groups.get(this.defaultGroupId);
       if (defGroup) {
+        discardStaleWarm(defGroup);
         defGroup.cwd = resolved;
         defGroup.updatedAt = now;
       }
@@ -1341,12 +1974,277 @@ export class AgentHubServer {
     });
     if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
       this.notifyTaskWaiters(task.taskId);
+      this.workflows.onTaskUpdated(task);
     }
+  }
+
+  private persistUploadedImages(
+    rawImages?: Array<{ name?: string; mimeType: string; data: string }>,
+  ): Array<{
+    attachment: ChatImageAttachment;
+    name: string;
+    mimeType: string;
+    data: string;
+    localPath: string;
+  }> {
+    if (!rawImages || rawImages.length === 0) {
+      return [];
+    }
+    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+    return rawImages.map((raw, index) => {
+      const normalizedMime = raw.mimeType.trim().toLowerCase() === "image/jpg"
+        ? "image/jpeg"
+        : raw.mimeType.trim().toLowerCase();
+      const ext = ALLOWED_IMAGE_MIMES[normalizedMime];
+      if (!ext) {
+        throw new Error(`Unsupported image mimeType: ${raw.mimeType}`);
+      }
+      const cleanBase64 = raw.data.replace(/^data:[^;]+;base64,/, "").replace(/\s+/g, "");
+      const buf = Buffer.from(cleanBase64, "base64");
+      if (buf.byteLength === 0 || buf.byteLength > MAX_SINGLE_IMAGE_BYTES) {
+        throw new Error(`Image "${raw.name || `#${index + 1}`}" exceeds 10MB or is empty.`);
+      }
+      const id = `img-${Date.now()}-${randomUUID().slice(0, 8)}`;
+      const fileName = `${id}.${ext}`;
+      const localPath = path.join(UPLOADS_DIR, fileName);
+      fs.writeFileSync(localPath, buf);
+      const displayName = raw.name?.trim() || `${id}.${ext}`;
+      return {
+        attachment: {
+          id,
+          name: displayName,
+          mimeType: normalizedMime,
+          url: `/uploads/${fileName}`,
+          sizeBytes: buf.byteLength,
+        },
+        name: displayName,
+        mimeType: normalizedMime,
+        data: buf.toString("base64"),
+        localPath,
+      };
+    });
+  }
+
+  /**
+   * Saves attached non-image files under uploads/files and returns what the message record
+   * and the prompt need. The agent gets local paths, not the bytes.
+   */
+  private persistUploadedFiles(
+    rawFiles?: Array<{ name: string; mimeType?: string; data: string }>,
+  ): ChatFileAttachment[] {
+    if (!rawFiles || rawFiles.length === 0) {
+      return [];
+    }
+    const dir = path.join(UPLOADS_DIR, "files");
+    fs.mkdirSync(dir, { recursive: true });
+    return rawFiles.map((raw) => {
+      const buf = Buffer.from(raw.data.replace(/^data:[^;]*;base64,/, "").replace(/\s+/g, ""), "base64");
+      if (buf.byteLength === 0 || buf.byteLength > MAX_SINGLE_FILE_BYTES) {
+        throw new Error(`文件「${raw.name}」为空或超过 ${Math.round(MAX_SINGLE_FILE_BYTES / (1024 * 1024))}MB`);
+      }
+      // Keep the original name readable for the agent, minus anything path-like.
+      const safeName = path.basename(raw.name).replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").slice(0, 120) || "file";
+      const id = `file-${Date.now()}-${randomUUID().slice(0, 8)}`;
+      const localPath = path.join(dir, `${id}-${safeName}`);
+      fs.writeFileSync(localPath, buf);
+      return { id, name: raw.name, sizeBytes: buf.byteLength, localPath };
+    });
+  }
+
+  private async handleElicitationRequest(params: {
+    sessionKey: string;
+    groupId: string;
+    agent: AgentId;
+    request: acp.CreateElicitationRequest;
+  }): Promise<acp.CreateElicitationResponse> {
+    const req = params.request as {
+      mode?: string;
+      message?: string;
+      url?: string;
+      requestedSchema?: {
+        title?: string;
+        properties?: Record<string, Record<string, unknown>>;
+      };
+    };
+
+    if (req.mode !== "form") {
+      const fallbackQuestion = req.url
+        ? `${req.message || "Agent 请求交互确认"} (${req.url})`
+        : req.message || "Agent 请求输入";
+      const res = await this.askUserQuestion({
+        agent: params.agent,
+        sessionKey: params.sessionKey,
+        groupId: params.groupId,
+        title: `${params.agent} 请求确认`,
+        questions: [{ id: "response", question: fallbackQuestion, type: "text" }],
+      });
+      if (res.cancelled) {
+        return { action: "cancel" };
+      }
+      return {
+        action: "accept",
+        content: { response: String(res.answers.response ?? "") },
+      };
+    }
+
+    const propEntries = Object.entries(req.requestedSchema?.properties ?? {});
+    const extractEnumOptions = (prop: Record<string, unknown>): string[] => {
+      if (Array.isArray(prop.enum)) {
+        return prop.enum.map((v) => String(v));
+      }
+      if (Array.isArray(prop.oneOf)) {
+        return prop.oneOf
+          .map((item) => {
+            if (!item || typeof item !== "object") return "";
+            const rec = item as Record<string, unknown>;
+            return String(rec.const ?? rec.title ?? "");
+          })
+          .filter(Boolean);
+      }
+      const items = prop.items as Record<string, unknown> | undefined;
+      if (items && Array.isArray(items.enum)) {
+        return items.enum.map((v) => String(v));
+      }
+      if (items && Array.isArray(items.anyOf)) {
+        return items.anyOf
+          .map((item) => {
+            if (!item || typeof item !== "object") return "";
+            const rec = item as Record<string, unknown>;
+            return String(rec.const ?? rec.title ?? "");
+          })
+          .filter(Boolean);
+      }
+      return [];
+    };
+
+    const fields: Array<{
+      id: string;
+      question: string;
+      type: "single" | "multi" | "text";
+      options?: string[];
+      placeholder?: string;
+    }> = [];
+
+    for (const [key, prop] of propEntries) {
+      const propType = typeof prop.type === "string" ? prop.type : "string";
+      const label =
+        (typeof prop.description === "string" && prop.description.trim()) ||
+        (typeof prop.title === "string" && prop.title.trim()) ||
+        key;
+      const options = extractEnumOptions(prop);
+      if (propType === "array") {
+        fields.push({ id: key, question: label, type: "multi", options });
+      } else if (propType === "boolean") {
+        fields.push({ id: key, question: label, type: "single", options: ["true", "false"] });
+      } else if (options.length > 0) {
+        fields.push({ id: key, question: label, type: "single", options });
+      } else {
+        fields.push({
+          id: key,
+          question: label,
+          type: "text",
+          placeholder: prop.default != null ? String(prop.default) : undefined,
+        });
+      }
+    }
+
+    if (fields.length === 0) {
+      fields.push({
+        id: "response",
+        question: req.message?.trim() || "请补充输入信息",
+        type: "text",
+      });
+    }
+
+    const res = await this.askUserQuestion({
+      agent: params.agent,
+      sessionKey: params.sessionKey,
+      groupId: params.groupId,
+      title: req.requestedSchema?.title?.trim() || req.message?.trim() || `${params.agent} 请求输入`,
+      questions: fields,
+    });
+    if (res.cancelled) {
+      return { action: "cancel" };
+    }
+
+    const content: Record<string, acp.ElicitationContentValue> = {};
+    for (const field of fields) {
+      const val = res.answers[field.id];
+      const schemaProp = req.requestedSchema?.properties?.[field.id];
+      const propType = typeof schemaProp?.type === "string" ? schemaProp.type : "string";
+      if (propType === "boolean") {
+        content[field.id] = val === true || val === "true";
+      } else if (propType === "number" || propType === "integer") {
+        const parsed = Number(val);
+        content[field.id] = Number.isFinite(parsed) ? parsed : 0;
+      } else if (propType === "array") {
+        content[field.id] = Array.isArray(val)
+          ? val.map((v) => String(v))
+          : val !== undefined && val !== ""
+            ? [String(val)]
+            : [];
+      } else {
+        content[field.id] = Array.isArray(val) ? val.map(String).join(", ") : String(val ?? "");
+      }
+    }
+
+    return { action: "accept", content };
+  }
+
+  /**
+   * Single source of the lead session's creation options, shared by chat turns and pre-warming.
+   * A warmed session is only reused if both paths resolve the same session key and options.
+   */
+  private buildLeadSessionOptions(
+    group: TaskGroup,
+    overrides?: { cwd?: string; session?: string; model?: string; effort?: string },
+  ): WarmSessionOptions {
+    const lead = group.leadAgent;
+    const def = this.registry.getDefinition(lead);
+    return {
+      agent: lead,
+      sessionName: overrides?.session ?? `${group.groupId}__lead`,
+      baseCwd: overrides?.cwd ?? group.cwd,
+      injectSharedResources: true,
+      isolateWorktree: false,
+      callDepth: 0,
+      injectPeerMcp: true,
+      groupId: group.groupId,
+      role: "lead",
+      label: "主导会话",
+      model: overrides?.model?.trim() || group.agentModels?.[lead] || def?.defaultModel,
+      effort: overrides?.effort?.trim() || group.agentEfforts?.[lead] || def?.defaultEffort,
+    };
+  }
+
+  /**
+   * Starts the group's lead session before the first message. Returns without waiting for startup.
+   */
+  warmLeadSession(groupId: string): { ok: true; sessionKey?: string; skipped?: string } {
+    const group = this.groups.get(groupId);
+    if (!group) {
+      return { ok: true, skipped: "unknown_group" };
+    }
+    if (group.archived) {
+      return { ok: true, skipped: "group_archived" };
+    }
+    if (!this.registry.isEnabledAgent(group.leadAgent)) {
+      return { ok: true, skipped: "agent_disabled" };
+    }
+    try {
+      this.registry.resolveCommand(group.leadAgent);
+    } catch {
+      return { ok: true, skipped: "agent_unavailable" };
+    }
+    const warm = this.pool.warmSession(this.buildLeadSessionOptions(group));
+    return { ok: true, sessionKey: warm.sessionKey, skipped: warm.skipped };
   }
 
   async runLeadChat(input: {
     groupId?: string;
-    prompt: string;
+    prompt?: string;
+    images?: Array<{ name?: string; mimeType: string; data: string }>;
+    files?: Array<{ name: string; mimeType?: string; data: string }>;
     leadAgent?: AgentId;
     cwd?: string;
     session?: string;
@@ -1368,10 +2266,28 @@ export class AgentHubServer {
       this.setGroupLeadAgent(group.groupId, input.leadAgent);
     }
 
+    const savedImages = this.persistUploadedImages(input.images);
+    const savedFiles = this.persistUploadedFiles(input.files);
+    const displayUserText = (input.prompt ?? "").trim();
+    const effectiveUserPrompt =
+      displayUserText ||
+      (savedFiles.length > 0 ? "请查看附带的文件。" : savedImages.length > 0 ? "请查看并分析附带的图片。" : "");
+    if (!effectiveUserPrompt) {
+      throw new Error("请输入消息内容，或至少附带一张图片或一个文件");
+    }
+    const promptForAgent = `${effectiveUserPrompt}${buildAttachedFilesBlock(savedFiles)}`;
+
+    if (group.archived) {
+      throw new Error("这个任务已归档，先恢复再发消息");
+    }
     const lead = group.leadAgent;
     const ledger = this.getOrCreateLedger(group.groupId);
+    let promptDerivedTitle: string | undefined;
     if (/^(任务\s*\d+|新任务|默认任务)$/.test(group.title) && ledger.getAllTurns().length === 0) {
-      group.title = autoTitleFromPrompt(input.prompt);
+      group.title = autoTitleFromPrompt(
+        displayUserText || (savedImages[0]?.name ? `图片: ${savedImages[0].name}` : "图片分析"),
+      );
+      promptDerivedTitle = group.title;
       group.updatedAt = Date.now();
       this.broadcast({
         type: "group_updated",
@@ -1383,7 +2299,21 @@ export class AgentHubServer {
     const sessionName = input.session ?? `${group.groupId}__lead`;
     const sessionKey = buildSessionKey(lead, sessionName);
     const streamKey = `lead:${group.groupId}`;
-    const leadPromptMeta = ledger.buildLeadPromptWithMeta(lead, input.prompt);
+    // A lead session that died or was closed starts blank; hand it the history again.
+    const existingLead = this.pool.getSession(sessionKey);
+    if (!existingLead || existingLead.status === "closed" || existingLead.status === "error") {
+      if (ledger.getAllTurns().length > 0) {
+        ledger.forgetAgent(lead);
+      }
+    }
+    // A fresh lead session learns about the task's other directories from its first prompt
+    // (adapters that support it also get them as additionalDirectories in session/new).
+    const startsFresh = !existingLead || existingLead.status === "closed" || existingLead.status === "error";
+    const extraDirsNote =
+      startsFresh && (group.extraDirs?.length ?? 0) > 0
+        ? `\n\n<additional_directories>\nBesides the working directory, this task also covers these directories. Read and edit files there as needed:\n${group.extraDirs!.map((d) => `- ${d}`).join("\n")}\n</additional_directories>`
+        : "";
+    const leadPromptMeta = ledger.buildLeadPromptWithMeta(lead, `${promptForAgent}${extraDirsNote}`);
 
     const now = Date.now();
     this.upsertMessage({
@@ -1393,12 +2323,14 @@ export class AgentHubServer {
       sessionKey,
       role: "user",
       senderLabel: "你",
-      text: input.prompt,
+      text: displayUserText,
       thoughtText: "",
       toolCalls: [],
       status: "done",
       timestamp: now,
       completedAt: now,
+      images: savedImages.length > 0 ? savedImages.map((s) => s.attachment) : undefined,
+      files: savedFiles.length > 0 ? savedFiles : undefined,
     });
 
     const assistantMsg: ChatMessageRecord = {
@@ -1419,26 +2351,17 @@ export class AgentHubServer {
     this.upsertMessage(assistantMsg);
 
     try {
-      const def = this.registry.getDefinition(lead);
-      const effectiveModel = input.model?.trim() || group.agentModels?.[lead] || def?.defaultModel;
-      const effectiveEffort =
-        input.effort?.trim() || group.agentEfforts?.[lead] || def?.defaultEffort;
       const result = await this.pool.runTurn({
-        agent: lead,
-        sessionName,
-        baseCwd: input.cwd ?? group.cwd,
+        ...this.buildLeadSessionOptions(group, input),
         prompt: leadPromptMeta.prompt,
-        rawUserPrompt: input.prompt,
+        images: savedImages.map(({ name, mimeType, data, localPath }) => ({
+          name,
+          mimeType,
+          data,
+          localPath,
+        })),
+        rawUserPrompt: effectiveUserPrompt,
         handoffTokens: leadPromptMeta.handoffTokens,
-        injectSharedResources: true,
-        isolateWorktree: false,
-        callDepth: 0,
-        injectPeerMcp: true,
-        groupId: group.groupId,
-        role: "lead",
-        label: "主导会话",
-        model: effectiveModel,
-        effort: effectiveEffort,
       });
 
       assistantMsg.status = result.stopReason === "cancelled" ? "cancelled" : "done";
@@ -1456,17 +2379,22 @@ export class AgentHubServer {
         role: "lead",
         agent: lead,
         handoffTokens: leadPromptMeta.handoffTokens,
+        injectedTokens: result.injectedTokens,
         usage: result.usage,
       });
 
       const turn = ledger.recordTurn({
         leadAgent: lead,
-        userText: input.prompt,
+        userText: effectiveUserPrompt,
         assistantSummary: result.outputText,
         peerCallsSummary: result.peerToolsCalled,
       });
       turn.groupId = group.groupId;
       this.broadcast({ type: "ledger_turn", turn: { ...turn }, timestamp: Date.now() });
+
+      if (promptDerivedTitle && this.settings.autoTitle && result.stopReason !== "cancelled") {
+        void this.generateTaskTitle(group, promptDerivedTitle, effectiveUserPrompt, result.outputText);
+      }
 
       return {
         groupId: group.groupId,
@@ -1507,7 +2435,9 @@ export class AgentHubServer {
 
   async runSubSessionChat(input: {
     sessionKey: string;
-    prompt: string;
+    prompt?: string;
+    images?: Array<{ name?: string; mimeType: string; data: string }>;
+    files?: Array<{ name: string; mimeType?: string; data: string }>;
     model?: string;
     effort?: string;
   }): Promise<{
@@ -1516,10 +2446,24 @@ export class AgentHubServer {
     outputText: string;
     stopReason: string;
   }> {
-    const session = this.pool.getSession(input.sessionKey);
+    const session = this.pool.getSession(input.sessionKey) ?? this.archivedSessions.get(input.sessionKey);
     if (!session) {
       throw new Error(`Unknown session: ${input.sessionKey}`);
     }
+    if (this.groups.get(session.groupId)?.archived) {
+      throw new Error("这个任务已归档，先恢复再发消息");
+    }
+
+    const savedImages = this.persistUploadedImages(input.images);
+    const savedFiles = this.persistUploadedFiles(input.files);
+    const displayUserText = (input.prompt ?? "").trim();
+    const effectiveUserPrompt =
+      displayUserText ||
+      (savedFiles.length > 0 ? "请查看附带的文件。" : savedImages.length > 0 ? "请查看并分析附带的图片。" : "");
+    if (!effectiveUserPrompt) {
+      throw new Error("请输入消息内容，或至少附带一张图片或一个文件");
+    }
+    const promptForAgent = `${effectiveUserPrompt}${buildAttachedFilesBlock(savedFiles)}`;
 
     const streamKey = `sub:${session.sessionKey}`;
     const now = Date.now();
@@ -1530,12 +2474,14 @@ export class AgentHubServer {
       sessionKey: session.sessionKey,
       role: "user",
       senderLabel: "你",
-      text: input.prompt,
+      text: displayUserText,
       thoughtText: "",
       toolCalls: [],
       status: "done",
       timestamp: now,
       completedAt: now,
+      images: savedImages.length > 0 ? savedImages.map((s) => s.attachment) : undefined,
+      files: savedFiles.length > 0 ? savedFiles : undefined,
     });
 
     const assistantMsg: ChatMessageRecord = {
@@ -1560,8 +2506,14 @@ export class AgentHubServer {
         agent: session.agent,
         sessionName: session.name,
         baseCwd: session.baseCwd,
-        prompt: input.prompt,
-        rawUserPrompt: input.prompt,
+        prompt: promptForAgent,
+        images: savedImages.map(({ name, mimeType, data, localPath }) => ({
+          name,
+          mimeType,
+          data,
+          localPath,
+        })),
+        rawUserPrompt: effectiveUserPrompt,
         injectSharedResources: true,
         isolateWorktree: session.isWorktree,
         callDepth: 1,
@@ -1589,6 +2541,7 @@ export class AgentHubServer {
         role: session.role,
         agent: session.agent,
         handoffTokens: 0,
+        injectedTokens: result.injectedTokens,
         usage: result.usage,
       });
 
@@ -1763,6 +2716,7 @@ export class AgentHubServer {
           role: "sub",
           agent: body.targetAgent,
           handoffTokens: 0,
+          injectedTokens: res.injectedTokens,
           usage: res.usage,
         });
       })
@@ -1848,10 +2802,40 @@ export class AgentHubServer {
     return path.join(PROJECT_ROOT, "dist", "ui", fileName);
   }
 
+  /**
+   * The hub can start processes, so its API must only answer its own UI and local tools.
+   * - Host must be this machine's loopback name: a page that points its own domain at
+   *   127.0.0.1 (DNS rebinding) is refused.
+   * - A request that changes anything must not come from another web origin: browsers attach
+   *   Origin to cross-site POSTs, so a page the user happens to visit cannot drive the hub.
+   *   Local tools (the MCP bridge, curl, scripts) send no Origin and are allowed.
+   */
+  private isRequestAllowed(req: IncomingMessage, method: string): boolean {
+    const allowedHosts = new Set([`127.0.0.1:${this.port}`, `localhost:${this.port}`, `[::1]:${this.port}`]);
+    const host = String(req.headers.host ?? "").toLowerCase();
+    if (!allowedHosts.has(host)) {
+      return false;
+    }
+    const origin = req.headers.origin;
+    if (method !== "GET" && method !== "HEAD" && origin !== undefined) {
+      const allowedOrigins = new Set([...allowedHosts].map((h) => `http://${h}`));
+      if (!allowedOrigins.has(String(origin).toLowerCase())) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const reqUrl = new URL(req.url ?? "/", this.url || "http://127.0.0.1");
     const pathname = reqUrl.pathname;
     const method = (req.method ?? "GET").toUpperCase();
+
+    if (!this.isRequestAllowed(req, method)) {
+      res.writeHead(403, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "Request origin not allowed" }));
+      return;
+    }
 
     try {
       if (method === "GET" && pathname === "/") {
@@ -1922,22 +2906,81 @@ export class AgentHubServer {
         return;
       }
 
-      if (method === "GET" && pathname === "/ui/icon.svg") {
-        res.writeHead(200, { "Content-Type": "image/svg+xml; charset=utf-8", "Cache-Control": "no-store" });
-        res.end(DESKTOP_ICON_SVG);
+      if (method === "GET" && pathname.startsWith("/uploads/")) {
+        const fileName = decodeURIComponent(pathname.slice("/uploads/".length));
+        const match = /^img-[a-z0-9_-]+\.(png|jpg|jpeg|webp|gif)$/i.exec(fileName);
+        if (!match) {
+          res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("Image not found");
+          return;
+        }
+        const filePath = path.join(UPLOADS_DIR, fileName);
+        if (!fs.existsSync(filePath)) {
+          res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("Image not found");
+          return;
+        }
+        const ext = match[1].toLowerCase();
+        const mime = ext === "jpg" ? "image/jpeg" : `image/${ext}`;
+        const buf = fs.readFileSync(filePath);
+        res.writeHead(200, {
+          "Content-Type": mime,
+          "Cache-Control": "public, max-age=86400, immutable",
+        });
+        res.end(buf);
+        return;
+      }
+
+      if (method === "GET" && pathname === "/ui/vendor/mermaid.min.js") {
+        const file = path.join(PROJECT_ROOT, "node_modules", "mermaid", "dist", "mermaid.min.js");
+        if (!fs.existsSync(file)) {
+          res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("mermaid is not installed");
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": "text/javascript; charset=utf-8",
+          "Cache-Control": "public, max-age=86400",
+        });
+        res.end(fs.readFileSync(file));
+        return;
+      }
+
+      if (method === "GET" && pathname.startsWith("/ui/icon")) {
+        const fileName = pathname.slice("/ui/".length);
+        if (fileName === "icon.svg") {
+          // Kept for older references: an SVG wrapper around the raster icon.
+          const png = fs.readFileSync(this.getUiAssetPath("icon-192.png")).toString("base64");
+          res.writeHead(200, { "Content-Type": "image/svg+xml; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(
+            `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192"><image width="192" height="192" href="data:image/png;base64,${png}"/></svg>`,
+          );
+          return;
+        }
+        const mime = UI_ICON_FILES[fileName];
+        if (!mime) {
+          res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("Not found");
+          return;
+        }
+        res.writeHead(200, { "Content-Type": mime, "Cache-Control": "public, max-age=3600" });
+        res.end(fs.readFileSync(this.getUiAssetPath(fileName)));
         return;
       }
 
       if (method === "GET" && pathname === "/manifest.webmanifest") {
         const manifest = {
-          name: "Agent Hub",
-          short_name: "AgentHub",
+          name: "Quorum",
+          short_name: "Quorum",
           description: "Multi-agent collaborative workbench on ACP",
           start_url: "/",
           display: "standalone",
-          background_color: "#f3f2ec",
-          theme_color: "#f3f2ec",
-          icons: [{ src: "/ui/icon.svg", sizes: "any", type: "image/svg+xml" }],
+          background_color: "#f7f8f9",
+          theme_color: "#f7f8f9",
+          icons: [
+            { src: "/ui/icon-192.png", sizes: "192x192", type: "image/png" },
+            { src: "/ui/icon-512.png", sizes: "512x512", type: "image/png" },
+          ],
         };
         res.writeHead(200, { "Content-Type": "application/manifest+json; charset=utf-8", "Cache-Control": "no-store" });
         res.end(JSON.stringify(manifest, null, 2));
@@ -2022,7 +3065,7 @@ export class AgentHubServer {
         }
         res.writeHead(200, {
           "Content-Type": "text/markdown; charset=utf-8",
-          "Content-Disposition": `attachment; filename="agent-hub-export.md"; filename*=UTF-8''${encodeURIComponent(exported.filename)}`,
+          "Content-Disposition": `attachment; filename="quorum-export.md"; filename*=UTF-8''${encodeURIComponent(exported.filename)}`,
           "Cache-Control": "no-store",
         });
         res.end(exported.markdown, "utf8");
@@ -2080,6 +3123,12 @@ export class AgentHubServer {
         const body = SessionChatBodySchema.parse(await readJsonBody(req));
         const result = await this.runSubSessionChat(body);
         sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/sessions/warm") {
+        const body = WarmSessionBodySchema.parse(await readJsonBody(req));
+        sendJson(res, 200, this.warmLeadSession(body.groupId));
         return;
       }
 
@@ -2279,7 +3328,11 @@ export class AgentHubServer {
             catalog,
             timestamp: Date.now(),
           });
-          sendJson(res, 200, { ok: true, agent: validAgent, catalog });
+          sendJson(res, 200, {
+            ok: true,
+            agent: validAgent,
+            catalog: this.registry.applyConfiguredModels(catalog),
+          });
           return;
         }
         sendJson(res, 200, {
@@ -2294,7 +3347,89 @@ export class AgentHubServer {
           ok: true,
           agents: this.registry.getHealthList(true),
           definitions: this.registry.listDefinitions(),
+          defaultLead: this.getDefaultLead(),
+          configuredDefaultLead: this.registry.getDefaultLead(),
         });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/projects") {
+        sendJson(res, 200, { ok: true, projects: this.listProjects() });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/progress") {
+        const groupId = reqUrl.searchParams.get("groupId") || this.defaultGroupId;
+        sendJson(res, 200, { ok: true, progress: this.getProgress(groupId) ?? null });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/progress") {
+        const body = ProgressUpdateSchema.parse(await readJsonBody(req));
+        sendJson(res, 200, { ok: true, progress: this.updateProgress(body) });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/workflows") {
+        const groupId = reqUrl.searchParams.get("groupId") || this.defaultGroupId;
+        sendJson(res, 200, { ok: true, workflow: this.workflows.get(groupId) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/workflows/save") {
+        const body = WorkflowSaveSchema.parse(await readJsonBody(req));
+        const workflowGroupId = body.groupId?.trim() || this.defaultGroupId;
+        if (!this.groups.has(workflowGroupId)) {
+          throw new Error(`Unknown task group: ${workflowGroupId}`);
+        }
+        const proposedBy =
+          body.proposedBy && this.registry.isKnownAgent(body.proposedBy) ? body.proposedBy : "user";
+        sendJson(res, 200, { ok: true, workflow: this.workflows.save(workflowGroupId, body.steps, proposedBy) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/workflows/run") {
+        const body = WorkflowGroupSchema.parse(await readJsonBody(req));
+        sendJson(res, 200, { ok: true, workflow: this.workflows.run(body.groupId) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/workflows/cancel") {
+        const body = WorkflowGroupSchema.parse(await readJsonBody(req));
+        sendJson(res, 200, { ok: true, workflow: this.workflows.cancel(body.groupId) });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/settings") {
+        sendJson(res, 200, { ok: true, settings: this.getSettings() });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/settings") {
+        const input = z.object({ autoTitle: z.boolean().optional() }).parse(await readJsonBody(req));
+        sendJson(res, 200, { ok: true, settings: this.updateSettings(input) });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/agents/presets") {
+        sendJson(res, 200, { ok: true, presets: this.registry.listPresets() });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/agents/presets/add") {
+        const input = AgentIdOnlySchema.parse(await readJsonBody(req));
+        const agent = this.registry.addPreset(input.id);
+        if (!this.telemetryByAgent[agent.id]) {
+          this.telemetryByAgent[agent.id] = createEmptyTotals();
+        }
+        this.broadcastAgentsUpdated();
+        sendJson(res, 200, { ok: true, agent, agents: this.registry.getHealthList(true) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/agents/default-lead") {
+        const input = DefaultLeadSchema.parse(await readJsonBody(req));
+        sendJson(res, 200, { ok: true, ...this.setDefaultLead(input.id ?? null) });
         return;
       }
 
@@ -2399,7 +3534,17 @@ export class AgentHubServer {
     });
     this.server = server;
 
-    const wss = new WebSocketServer({ server, path: "/ws" });
+    const wss = new WebSocketServer({
+      server,
+      path: "/ws",
+      // Same rule as the HTTP API: only the hub's own page may open the event stream.
+      verifyClient: (info: { origin?: string; req: IncomingMessage }) => {
+        const hosts = [`127.0.0.1:${this.port}`, `localhost:${this.port}`, `[::1]:${this.port}`];
+        const host = String(info.req.headers.host ?? "").toLowerCase();
+        if (!hosts.includes(host)) return false;
+        return !info.origin || hosts.some((h) => `http://${h}` === String(info.origin).toLowerCase());
+      },
+    });
     this.wss = wss;
     wss.on("connection", (ws) => {
       this.hadWsClient = true;
@@ -2490,6 +3635,8 @@ export class AgentHubServer {
       entry.resolve({ cancelled: true, answers: {} });
       this.pendingQuestions.delete(questionId);
     }
+    // Save before the sessions are torn down, so they are recorded as they were.
+    this.stateStore?.flush();
     await this.pool.disposeAll();
     for (const ws of this.wsClients) {
       ws.close();

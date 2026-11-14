@@ -234,7 +234,9 @@ $okColor = [System.Drawing.Color]::FromArgb(13, 113, 72)
 $errColor = [System.Drawing.Color]::FromArgb(185, 28, 28)
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = U "Agent Hub \u684c\u9762\u542f\u52a8\u5668"
+$form.Text = U "Quorum \u684c\u9762\u542f\u52a8\u5668"
+$iconPath = Join-Path $RootDir "src\ui\icon.ico"
+if (Test-Path $iconPath) { $form.Icon = New-Object System.Drawing.Icon($iconPath) }
 $form.ClientSize = New-Object System.Drawing.Size(520, 350)
 $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
 $form.MaximizeBox = $false
@@ -247,7 +249,7 @@ $form.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9.5)
 $yOffset = 18
 
 $titleLabel = New-Object System.Windows.Forms.Label
-$titleLabel.Text = "Agent Hub"
+$titleLabel.Text = "Quorum"
 $titleLabel.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 14, [System.Drawing.FontStyle]::Bold)
 $titleLabel.Location = New-Object System.Drawing.Point(24, $yOffset)
 $titleLabel.AutoSize = $true
@@ -418,7 +420,7 @@ $autoPortBtn.Add_Click({
 
 $browseBtn.Add_Click({
   $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-  $dlg.Description = U "\u9009\u62e9 Agent Hub \u9ed8\u8ba4\u5de5\u4f5c\u533a\u76ee\u5f55"
+  $dlg.Description = U "\u9009\u62e9 Quorum \u9ed8\u8ba4\u5de5\u4f5c\u533a\u76ee\u5f55"
   if ($cwdBox.Text -and (Test-Path $cwdBox.Text)) {
     $dlg.SelectedPath = $cwdBox.Text
   }
@@ -432,14 +434,15 @@ $browseBtn.Add_Click({
 $shortcutBtn.Add_Click({
   try {
     $desktopDir = [Environment]::GetFolderPath("Desktop")
-    $lnkPath = Join-Path $desktopDir "Agent Hub.lnk"
+    $lnkPath = Join-Path $desktopDir "Quorum.lnk"
     $vbsPath = Join-Path $RootDir "AgentHub.vbs"
     $wsh = New-Object -ComObject WScript.Shell
     $sc = $wsh.CreateShortcut($lnkPath)
     $sc.TargetPath = "wscript.exe"
     $sc.Arguments = '//nologo "' + $vbsPath + '"'
     $sc.WorkingDirectory = $RootDir
-    $sc.Description = "Agent Hub Desktop Workbench"
+    $sc.Description = "Quorum Desktop Workbench"
+    if (Test-Path $iconPath) { $sc.IconLocation = $iconPath }
     $sc.Save()
     $launchErrorLabel.ForeColor = $okColor
     $launchErrorLabel.Text = (U "\u5df2\u521b\u5efa\u684c\u9762\u5feb\u6377\u65b9\u5f0f: ") + $lnkPath
@@ -471,7 +474,19 @@ $startBtn.Add_Click({
   $distEntry = Join-Path $RootDir "dist\index.js"
 
   $entryArgs = @()
-  if ((Test-Path $tsxCli) -and (Test-Path $srcEntry)) {
+  $useDist = $false
+  if (Test-Path $distEntry) {
+    $distTime = (Get-Item $distEntry).LastWriteTimeUtc
+    $newerTs = Get-ChildItem -Path (Join-Path $RootDir "src") -Recurse -File -Filter "*.ts" -ErrorAction SilentlyContinue |
+      Where-Object { $_.LastWriteTimeUtc -gt $distTime } |
+      Select-Object -First 1
+    if (-not $newerTs) {
+      $useDist = $true
+    }
+  }
+  if ($useDist) {
+    $entryArgs = @($distEntry)
+  } elseif ((Test-Path $tsxCli) -and (Test-Path $srcEntry)) {
     $entryArgs = @($tsxCli, $srcEntry)
   } elseif (Test-Path $distEntry) {
     $entryArgs = @($distEntry)

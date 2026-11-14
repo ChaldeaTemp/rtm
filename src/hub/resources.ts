@@ -17,6 +17,40 @@ const MANAGED_START = "<!-- agent-hub:shared:start -->";
 const MANAGED_END = "<!-- agent-hub:shared:end -->";
 const MANAGED_BLOCK_RE = /<!--\s*agent-hub:shared:start\s*-->[\s\S]*?<!--\s*agent-hub:shared:end\s*-->/g;
 const MAX_RULE_INJECTION_TOKENS = 16_000;
+const MAX_SKILLS_INDEX_TOKENS = 1100;
+
+function formatCompactSkillIndexLine(
+  name: string,
+  scope: ResourceScope,
+  description: string,
+): string {
+  const desc = description.replace(/\s+/g, " ").trim().slice(0, 96);
+  return `- \`${name}\` [${scope}]: ${desc}`;
+}
+
+/**
+ * Builds concise workbench tool instructions so agents prefer Hub UI tools
+ * over headless-blocking CLI prompts or plain-text workarounds.
+ */
+export function buildHubWorkbenchGuide(role: "lead" | "sub" = "lead"): string {
+  const lines = [
+    "<agent_hub_workbench>",
+    "You are running inside the Agent Hub graphical workbench (`agent-hub-peers` MCP server is connected):",
+    "- Interactive options / quizzes / user confirmation forms: ALWAYS call MCP tool `hub_ask_user` (`single` | `multi` | `text` fields) to render clickable option cards in the UI and await the user's answer. NEVER call CLI-native TUI `question` or terminal-stdin prompt tools (headless ACP stdio has no TUI listener and will hang).",
+    "- Interactive charts / diagrams / visual widgets / HTML previews: Call MCP tool `ui_render_artifact` (`kind`: `\"html\"` | `\"svg\"` | `\"mermaid\"`) to render live sandboxed cards inline in chat.",
+  ];
+  lines.push(
+    "- Progress panel: the user follows long tasks on a Progress panel and should never have to ask where things stand. As soon as the work turns out to be multi-step, call `progress_update` with the goal and the steps. Call it again, without being asked and before you reply, whenever the goal changes, a step starts, finishes or gets blocked, or the plan itself changes. Keep step titles short; put details in `note`.",
+  );
+  if (role === "lead") {
+    lines.push(
+      "- Peer agent collaboration: Call `peer_list_agents`, `peer_ask` (sync), or `peer_dispatch` + `peer_status` (parallel sub-sessions) when delegating subtasks.",
+      "- Multi-step delegation with dependencies: Call `workflow_propose` to draft the steps; the user reviews and publishes the draft in the Workflow panel, so do not dispatch those steps yourself.",
+    );
+  }
+  lines.push("</agent_hub_workbench>", "", "");
+  return lines.join("\n");
+}
 
 export function estimateTokens(text: string): number {
   const trimmed = text.trim();
@@ -132,6 +166,8 @@ export interface AgentInjectionPayload {
   injectedSkillsCount: number;
   nativeRulesCount: number;
   nativeSkillsCount: number;
+  /** Bridged rules that did not fit the rule budget; the prompt lists them by path instead. */
+  droppedRules: InjectedItemSummary[];
 }
 
 function toForwardSlashes(p: string): string {
@@ -212,6 +248,11 @@ function sha16(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16);
 }
 
+type DiscoveredItem = SharedResourceItem & { _rawContent: string };
+
+/** How long a disk scan is reused. Writes through this manager invalidate it immediately. */
+const DISCOVER_CACHE_TTL_MS = 4000;
+
 export class SharedResourceManager {
   readonly baseCwd: string;
   readonly homeDir: string;
@@ -220,6 +261,8 @@ export class SharedResourceManager {
   private readonly globalRulesDir: string;
   private readonly configFile: string;
   private registry?: AgentRegistry;
+  /** Short-lived scan cache keyed by resolved cwd + active agent list. Entries are read-only. */
+  private readonly discoverCache = new Map<string, { at: number; items: DiscoveredItem[] }>();
 
   constructor(baseCwd: string, homeDir = os.homedir()) {
     this.baseCwd = path.resolve(baseCwd);
@@ -263,6 +306,12 @@ export class SharedResourceManager {
     fs.mkdirSync(path.dirname(this.configFile), { recursive: true });
     const payload: ResourceConfigFile = { disabledIds: [...disabled].sort() };
     fs.writeFileSync(this.configFile, JSON.stringify(payload, null, 2), "utf8");
+    this.invalidateCache();
+  }
+
+  /** Drops cached scans so the next discover() reads the disk again. */
+  invalidateCache(): void {
+    this.discoverCache.clear();
   }
 
   private collectPluginDirs(): string[] {
@@ -357,14 +406,44 @@ export class SharedResourceManager {
     };
 
     // --- Project & Hub Rules ---
+    // A Hub rule that "sync to project files" already wrote into AGENTS.md / CLAUDE.md is read
+    // natively by the agents that load that file; bridging it again would send it twice.
+    const agentsMdPath = path.join(cwd, "AGENTS.md");
+    const claudeMdPath = path.join(cwd, "CLAUDE.md");
+    const hasAgentsMd = fs.existsSync(agentsMdPath);
+    const agentsMdReaders: AgentId[] = ["codex", "agy", "opencode", "kimi"];
+    // opencode falls back to CLAUDE.md only when the project has no AGENTS.md.
+    const claudeMdReaders: AgentId[] = hasAgentsMd ? ["claude"] : ["claude", "opencode"];
+    const managedBlockOf = (file: string): string => {
+      try {
+        return (fs.readFileSync(file, "utf8").match(MANAGED_BLOCK_RE) ?? []).join("\n").replace(/\r\n/g, "\n");
+      } catch {
+        return "";
+      }
+    };
+    const agentsMdBlock = managedBlockOf(agentsMdPath);
+    const claudeMdBlock = managedBlockOf(claudeMdPath);
+    const syncedReaders = (ruleFile: string): AgentId[] => {
+      let body = "";
+      try {
+        body = stripManagedHubBlock(fs.readFileSync(ruleFile, "utf8")).replace(/\r\n/g, "\n").trim();
+      } catch {
+        return [];
+      }
+      if (!body) return [];
+      return [
+        ...(agentsMdBlock.includes(body) ? agentsMdReaders : []),
+        ...(claudeMdBlock.includes(body) ? claudeMdReaders : []),
+      ];
+    };
     for (const f of listMarkdownFiles(path.join(cwd, ".agent-hub", "resources", "rules"))) {
-      pushRule(f, "project", "hub-project", []);
+      pushRule(f, "project", "hub-project", syncedReaders(f));
     }
     for (const f of listMarkdownFiles(this.globalRulesDir)) {
-      pushRule(f, "global", "hub-global", []);
+      pushRule(f, "global", "hub-global", syncedReaders(f));
     }
-    pushRule(path.join(cwd, "AGENTS.md"), "project", "project", ["codex", "agy", "opencode", "kimi"]);
-    pushRule(path.join(cwd, "CLAUDE.md"), "project", "project", ["claude", "opencode"]);
+    pushRule(agentsMdPath, "project", "project", agentsMdReaders);
+    pushRule(claudeMdPath, "project", "project", claudeMdReaders);
     pushRule(path.join(cwd, "GEMINI.md"), "project", "project", ["agy"]);
     for (const f of listMarkdownFiles(path.join(cwd, ".agents", "rules"))) {
       pushRule(f, "project", "project-agy", ["agy"]);
@@ -390,8 +469,10 @@ export class SharedResourceManager {
         pushRule(f, "global", "agy-plugin", ["agy"]);
       }
     }
-    pushRule(path.join(this.homeDir, ".claude", "CLAUDE.md"), "global", "claude-global", ["claude"]);
-    for (const f of listMarkdownFiles(path.join(this.homeDir, ".claude", "rules"))) {
+    // Claude Code keeps its global files under CLAUDE_CONFIG_DIR when that is set.
+    const claudeHome = process.env.CLAUDE_CONFIG_DIR?.trim() || path.join(this.homeDir, ".claude");
+    pushRule(path.join(claudeHome, "CLAUDE.md"), "global", "claude-global", ["claude"]);
+    for (const f of listMarkdownFiles(path.join(claudeHome, "rules"))) {
       pushRule(f, "global", "claude-global", ["claude"]);
     }
 
@@ -427,7 +508,9 @@ export class SharedResourceManager {
     for (const f of listSkillFiles(path.join(this.homeDir, ".codex", "skills"))) {
       pushSkill(f, "global", "codex-global", ["codex"]);
     }
-    for (const f of listSkillFiles(path.join(this.homeDir, ".claude", "skills"))) {
+    for (const f of listSkillFiles(
+      path.join(process.env.CLAUDE_CONFIG_DIR?.trim() || path.join(this.homeDir, ".claude"), "skills"),
+    )) {
       pushSkill(f, "global", "claude-global", ["claude"]);
     }
     for (const f of listSkillFiles(path.join(this.homeDir, ".config", "opencode", "skills"))) {
@@ -437,9 +520,31 @@ export class SharedResourceManager {
     return candidates;
   }
 
-  private discoverInternal(cwd = this.baseCwd): Array<SharedResourceItem & { _rawContent: string }> {
+  /**
+   * Returns the (possibly cached) scan result. The returned array and its items are shared
+   * with the cache: callers inside this class must treat them as read-only, and anything
+   * handed to the outside goes through discover(), which copies.
+   */
+  private discoverInternal(cwd = this.baseCwd): DiscoveredItem[] {
     const resolvedCwd = path.resolve(cwd);
     const activeAgents = this.getActiveAgentIds();
+    const cacheKey = `${resolvedCwd}\n${activeAgents.join(",")}`;
+    const now = Date.now();
+    const cached = this.discoverCache.get(cacheKey);
+    if (cached && now - cached.at < DISCOVER_CACHE_TTL_MS) {
+      return cached.items;
+    }
+    for (const [key, entry] of this.discoverCache) {
+      if (now - entry.at >= DISCOVER_CACHE_TTL_MS) {
+        this.discoverCache.delete(key);
+      }
+    }
+    const items = this.scanResources(resolvedCwd, activeAgents);
+    this.discoverCache.set(cacheKey, { at: Date.now(), items });
+    return items;
+  }
+
+  private scanResources(resolvedCwd: string, activeAgents: AgentId[]): DiscoveredItem[] {
     const disabled = this.loadDisabledSet();
     const candidates = this.collectRawCandidates(resolvedCwd);
     const mergedMap = new Map<string, { item: SharedResourceItem & { _rawContent: string } }>();
@@ -449,10 +554,13 @@ export class SharedResourceManager {
       if (!existing) {
         const nativeAgents = activeAgents.filter((a) => c.nativeAgents.includes(a));
         const bridgedAgents = activeAgents.filter((a) => !nativeAgents.includes(a));
-        const id = c.dedupKey;
+        // Rules are identified by where they live, so editing one keeps its enabled/disabled
+        // state. Identical files still merge through the content-based dedupKey.
+        const id =
+          c.kind === "rule" ? `rule:${c.scope}:p${sha16(path.resolve(c.filePath).toLowerCase())}` : c.dedupKey;
         const indexLine =
           c.kind === "skill"
-            ? `- \`${c.name}\`: ${c.description} (SKILL.md: ${toForwardSlashes(c.filePath)})`
+            ? formatCompactSkillIndexLine(c.name, c.scope, c.description)
             : c.name;
         mergedMap.set(c.dedupKey, {
           item: {
@@ -466,7 +574,8 @@ export class SharedResourceManager {
             sources: [c.filePath],
             nativeAgents,
             bridgedAgents,
-            enabled: !disabled.has(id),
+            // dedupKey was the id before; honour entries disabled under the old scheme.
+            enabled: !disabled.has(id) && !disabled.has(c.dedupKey),
             fullTokens: estimateTokens(c.content),
             indexTokens: c.kind === "skill" ? estimateTokens(indexLine) : estimateTokens(c.content),
             updatedAt: c.updatedAt,
@@ -494,11 +603,19 @@ export class SharedResourceManager {
   }
 
   discover(cwd = this.baseCwd): SharedResourceItem[] {
-    return this.discoverInternal(cwd).map(({ _rawContent: _unused, ...item }) => item);
+    return this.discoverInternal(cwd).map(({ _rawContent: _unused, ...item }) => ({
+      ...item,
+      sources: [...item.sources],
+      nativeAgents: [...item.nativeAgents],
+      bridgedAgents: [...item.bridgedAgents],
+    }));
   }
 
   buildInjectionForAgent(agent: AgentId, cwd = this.baseCwd): AgentInjectionPayload {
-    const items = this.discoverInternal(cwd);
+    return this.buildInjectionFromItems(agent, this.discoverInternal(cwd));
+  }
+
+  private buildInjectionFromItems(agent: AgentId, items: readonly DiscoveredItem[]): AgentInjectionPayload {
     const enabledItems = items.filter((item) => item.enabled);
 
     const nativeRulesCount = enabledItems.filter(
@@ -516,6 +633,8 @@ export class SharedResourceManager {
     );
 
     const injectedRules: InjectedItemSummary[] = [];
+    const droppedRules: InjectedItemSummary[] = [];
+    const droppedRuleLines: string[] = [];
     const ruleBlocks: string[] = [];
     let sharedRulesTokens = 0;
 
@@ -523,6 +642,8 @@ export class SharedResourceManager {
       const block = `### [${rule.scope === "project" ? "Project Rule" : "Global Rule"}] ${rule.name} (source: ${toForwardSlashes(rule.primaryPath)})\n${rule._rawContent}`;
       const tokens = estimateTokens(block);
       if (sharedRulesTokens + tokens > MAX_RULE_INJECTION_TOKENS && injectedRules.length > 0) {
+        droppedRules.push({ id: rule.id, name: rule.name, kind: "rule", scope: rule.scope, tokens });
+        droppedRuleLines.push(`- ${rule.name}: ${toForwardSlashes(rule.primaryPath)}`);
         continue;
       }
       sharedRulesTokens += tokens;
@@ -536,18 +657,32 @@ export class SharedResourceManager {
       });
     }
 
-    const skillLines = bridgedSkills.map((s) => {
-      const desc = s.description.slice(0, 180);
-      return `- \`${s.name}\` [${s.scope}]: ${desc} (SKILL.md: ${toForwardSlashes(s.primaryPath)})`;
+    const sortedSkills = [...bridgedSkills].sort((a, b) => {
+      if (a.scope !== b.scope) return a.scope === "project" ? -1 : 1;
+      return a.name.localeCompare(b.name);
     });
+    const skillsHeaderLines = [
+      "## Shared Skills Index (Progressive Disclosure)",
+      "Below are shared skills bridged across local agents. Call MCP tool resource_read_skill({ skill_name }) (or read its path from resource_list_shared) ONLY when a task matches its description:",
+    ];
+    let runningSkillTokens = estimateTokens(skillsHeaderLines.join("\n"));
+    const skillLines: string[] = [];
+    let omittedSkills = 0;
+    for (const s of sortedSkills) {
+      const line = formatCompactSkillIndexLine(s.name, s.scope, s.description);
+      const lineTokens = estimateTokens(line);
+      if (runningSkillTokens + lineTokens > MAX_SKILLS_INDEX_TOKENS && skillLines.length > 0) {
+        omittedSkills++;
+        continue;
+      }
+      runningSkillTokens += lineTokens;
+      skillLines.push(line);
+    }
+    if (omittedSkills > 0) {
+      skillLines.push(`- ... (${omittedSkills} more skills available via MCP resource_list_shared)`);
+    }
     const skillsSection =
-      skillLines.length > 0
-        ? [
-            "## Shared Skills Index (Progressive Disclosure)",
-            "Below are shared skills bridged across local agents. Only read the corresponding SKILL.md path (or call MCP resource_read_skill) when a task matches its description:",
-            ...skillLines,
-          ].join("\n")
-        : "";
+      skillLines.length > 0 ? [...skillsHeaderLines, ...skillLines].join("\n") : "";
     const skillsIndexTokens = skillsSection ? estimateTokens(skillsSection) : 0;
 
     if (ruleBlocks.length === 0 && !skillsSection) {
@@ -559,6 +694,7 @@ export class SharedResourceManager {
         injectedSkillsCount: 0,
         nativeRulesCount,
         nativeSkillsCount,
+        droppedRules: [],
       };
     }
 
@@ -568,6 +704,14 @@ export class SharedResourceManager {
     ];
     if (ruleBlocks.length > 0) {
       sections.push("", "## Active Shared Rules", ruleBlocks.join("\n\n"));
+    }
+    if (droppedRuleLines.length > 0) {
+      sections.push(
+        "",
+        "## Shared Rules Not Included (size budget reached)",
+        "These rules also apply. Read the file when your task touches its subject:",
+        droppedRuleLines.join("\n"),
+      );
     }
     if (skillsSection) {
       sections.push("", skillsSection);
@@ -579,16 +723,19 @@ export class SharedResourceManager {
       sharedRulesTokens,
       skillsIndexTokens,
       injectedRules,
-      injectedSkillsCount: skillLines.length,
+      injectedSkillsCount: skillLines.length - (omittedSkills > 0 ? 1 : 0),
       nativeRulesCount,
       nativeSkillsCount,
+      droppedRules,
     };
   }
 
   getAgentBudgets(cwd = this.baseCwd): AgentResourceBudget[] {
-    const items = this.discover(cwd).filter((i) => i.enabled);
+    // Scan once and reuse the list for every agent.
+    const allItems = this.discoverInternal(cwd);
+    const items = allItems.filter((i) => i.enabled);
     return this.getActiveAgentIds().map((agent) => {
-      const inj = this.buildInjectionForAgent(agent, cwd);
+      const inj = this.buildInjectionFromItems(agent, allItems);
       const bridgedRules = items.filter((i) => i.kind === "rule" && !i.nativeAgents.includes(agent)).length;
       const bridgedSkills = items.filter((i) => i.kind === "skill" && !i.nativeAgents.includes(agent)).length;
       return {
@@ -600,6 +747,7 @@ export class SharedResourceManager {
         rulesTokens: inj.sharedRulesTokens,
         skillsIndexTokens: inj.skillsIndexTokens,
         firstTurnInjectionTokens: inj.sharedRulesTokens + inj.skillsIndexTokens,
+        droppedRules: inj.droppedRules.map((r) => r.name),
       };
     });
   }
@@ -625,6 +773,7 @@ export class SharedResourceManager {
     const body = input.content.trim();
     const contentToWrite = /^#\s+/.test(body) ? `${body}\n` : `# ${input.name.trim()}\n\n${body}\n`;
     fs.writeFileSync(filePath, contentToWrite, "utf8");
+    this.invalidateCache();
 
     const found = this.discover(this.baseCwd).find(
       (item) => path.resolve(item.primaryPath).toLowerCase() === path.resolve(filePath).toLowerCase(),
@@ -650,6 +799,7 @@ export class SharedResourceManager {
     }
     if (fs.existsSync(item.primaryPath)) {
       fs.unlinkSync(item.primaryPath);
+      this.invalidateCache();
       return true;
     }
     return false;
@@ -665,10 +815,19 @@ export class SharedResourceManager {
     if (query.id) {
       item = items.find((i) => i.id === query.id);
     } else if (query.skillName) {
+      // Exact name first. A partial name is accepted only when it points at a single skill,
+      // and disabled skills are not served at all.
       const needle = query.skillName.trim().toLowerCase();
+      const skills = items.filter((i) => i.kind === "skill" && i.enabled);
+      const partial = needle ? skills.filter((i) => i.name.toLowerCase().includes(needle)) : [];
       item =
-        items.find((i) => i.kind === "skill" && i.name.toLowerCase() === needle) ??
-        items.find((i) => i.kind === "skill" && i.name.toLowerCase().includes(needle));
+        skills.find((i) => i.name.toLowerCase() === needle) ??
+        (partial.length === 1 ? partial[0] : undefined);
+      if (!item && partial.length > 1) {
+        throw new Error(
+          `Skill name "${query.skillName}" is ambiguous: ${partial.map((i) => i.name).slice(0, 8).join(", ")}`,
+        );
+      }
     }
     if (!item) {
       throw new Error(`Shared resource not found: ${query.id ?? query.skillName ?? ""}`);
@@ -684,7 +843,7 @@ export class SharedResourceManager {
     );
     const enabledSkills = this.discover(resolvedCwd).filter((i) => i.enabled && i.kind === "skill");
 
-    const lines: string[] = [MANAGED_START, "## Agent Hub Shared Rules & Skills (Synced)"];
+    const lines: string[] = [MANAGED_START, "## Quorum Shared Rules & Skills (Synced)"];
     if (enabledRules.length === 0) {
       lines.push("", "_No Hub-authored shared rules yet._");
     } else {
@@ -710,6 +869,7 @@ export class SharedResourceManager {
       fs.writeFileSync(targetPath, next, "utf8");
       updatedFiles.push(targetPath);
     }
+    this.invalidateCache();
     return updatedFiles;
   }
 }

@@ -25,7 +25,11 @@ import {
   resolvePeerMcpLaunch,
 } from "./process-tree.js";
 import type { AgentRegistry } from "./agent-registry.js";
-import { estimateTokens, type SharedResourceManager } from "./resources.js";
+import {
+  buildHubWorkbenchGuide,
+  estimateTokens,
+  type SharedResourceManager,
+} from "./resources.js";
 import { ensureSessionWorkspace } from "./worktree.js";
 
 const READ_ONLY_KINDS = new Set(["read", "search", "think"]);
@@ -167,6 +171,20 @@ function buildTurnUsage(params: {
   };
 }
 
+export type ElicitationBridgeHandler = (params: {
+  sessionKey: string;
+  groupId: string;
+  agent: AgentId;
+  request: acp.CreateElicitationRequest;
+}) => Promise<acp.CreateElicitationResponse>;
+
+export interface PromptImageInput {
+  name: string;
+  mimeType: string;
+  data: string;
+  localPath: string;
+}
+
 interface ManagedSession {
   record: SessionRecord;
   child: ChildProcess;
@@ -177,7 +195,65 @@ interface ManagedSession {
   initializeCapabilities?: unknown;
   callDepth: number;
   resourcesInjected: boolean;
+  workbenchGuideInjected: boolean;
+  /** Tokens already delivered through session/new systemPrompt, reported once on the first turn. */
+  pendingSystemInjectedTokens: number;
   modelCatalog?: AgentModelCatalog;
+}
+
+interface EnsureSessionOptions {
+  agent: AgentId;
+  sessionName: string;
+  baseCwd: string;
+  isolateWorktree: boolean;
+  callDepth: number;
+  injectPeerMcp: boolean;
+  injectSharedResources: boolean;
+  groupId?: string;
+  role?: "lead" | "sub";
+  label?: string;
+  parentSessionKey?: string;
+  model?: string;
+  effort?: string;
+}
+
+export type WarmSessionOptions = Omit<
+  RunTurnOptions,
+  "prompt" | "images" | "rawUserPrompt" | "handoffTokens"
+>;
+
+export interface WarmSessionResult {
+  sessionKey: string;
+  /** Set when nothing was started: the session is already live or still starting. */
+  skipped?: "session_exists" | "session_starting";
+  /** Settles when the warm start finishes; never rejects. */
+  ready?: Promise<boolean>;
+}
+
+const DEFAULT_WARM_IDLE_MS = 10 * 60_000;
+const MAX_WARM_UNUSED_SESSIONS = 3;
+
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function toEnsureSessionOptions(options: WarmSessionOptions): EnsureSessionOptions {
+  return {
+    agent: options.agent,
+    sessionName: options.sessionName,
+    baseCwd: options.baseCwd,
+    isolateWorktree: Boolean(options.isolateWorktree),
+    callDepth: options.callDepth ?? 0,
+    injectPeerMcp: options.injectPeerMcp ?? true,
+    injectSharedResources: options.injectSharedResources ?? Boolean(options.role),
+    groupId: options.groupId,
+    role: options.role,
+    label: options.label,
+    parentSessionKey: options.parentSessionKey,
+    model: options.model,
+    effort: options.effort,
+  };
 }
 
 interface PendingPermissionWaiter {
@@ -190,6 +266,7 @@ export interface RunTurnOptions {
   sessionName: string;
   baseCwd: string;
   prompt: string;
+  images?: PromptImageInput[];
   rawUserPrompt?: string;
   handoffTokens?: number;
   injectSharedResources?: boolean;
@@ -230,6 +307,18 @@ export class AcpPool extends EventEmitter {
   private hubUrl = "";
   private resourceManager?: SharedResourceManager;
   private registry?: AgentRegistry;
+  private extraDirsResolver?: (groupId: string) => string[];
+  private elicitationHandler?: ElicitationBridgeHandler;
+  /** Warm starts still in flight that no turn has claimed yet. */
+  private warmPending = new Set<string>();
+  /** Warmed sessions that never ran a turn: sessionKey -> ready timestamp (insertion order = age). */
+  private warmUnused = new Map<string, number>();
+  private warmSweepTimer?: NodeJS.Timeout;
+  private readonly warmIdleMs = readPositiveIntEnv("AGENT_HUB_WARM_IDLE_MS", DEFAULT_WARM_IDLE_MS);
+  private readonly maxWarmUnused = readPositiveIntEnv(
+    "AGENT_HUB_WARM_MAX_UNUSED",
+    MAX_WARM_UNUSED_SESSIONS,
+  );
 
   setHubUrl(url: string): void {
     this.hubUrl = url;
@@ -241,6 +330,15 @@ export class AcpPool extends EventEmitter {
 
   setAgentRegistry(reg: AgentRegistry): void {
     this.registry = reg;
+  }
+
+  setElicitationHandler(handler: ElicitationBridgeHandler): void {
+    this.elicitationHandler = handler;
+  }
+
+  /** Lets the hub say which other directories a task group's sessions should have access to. */
+  setExtraDirsResolver(resolver: (groupId: string) => string[]): void {
+    this.extraDirsResolver = resolver;
   }
 
   getPermissionMode(): PermissionMode {
@@ -444,20 +542,111 @@ export class AcpPool extends EventEmitter {
     return run;
   }
 
-  private async ensureSession(options: {
-    agent: AgentId;
-    sessionName: string;
-    baseCwd: string;
-    isolateWorktree: boolean;
-    callDepth: number;
-    injectPeerMcp: boolean;
-    groupId?: string;
-    role?: "lead" | "sub";
-    label?: string;
-    parentSessionKey?: string;
-    model?: string;
-    effort?: string;
-  }): Promise<ManagedSession> {
+  /**
+   * Starts a session ahead of the first user message so that turn skips process spawn + handshake.
+   * Options must match what the first runTurn will pass, since the session is reused as created.
+   * Returns immediately; a failed warm start is logged and the next runTurn simply starts again.
+   */
+  warmSession(options: WarmSessionOptions): WarmSessionResult {
+    const sessionKey = buildSessionKey(options.agent, options.sessionName);
+    const existing = this.sessions.get(sessionKey);
+    if (existing && existing.record.status !== "closed" && existing.record.status !== "error") {
+      return { sessionKey, skipped: "session_exists" };
+    }
+    if (this.startingSessions.has(sessionKey)) {
+      return { sessionKey, skipped: "session_starting" };
+    }
+
+    this.warmPending.add(sessionKey);
+    this.enforceWarmLimit();
+    const ready = this.ensureSession(toEnsureSessionOptions(options)).then(
+      () => {
+        // Still unclaimed: no turn arrived while starting, so track it for idle reclaim.
+        if (this.warmPending.delete(sessionKey)) {
+          this.warmUnused.set(sessionKey, Date.now());
+          this.enforceWarmLimit();
+          this.scheduleWarmSweep();
+        }
+        return true;
+      },
+      (err: unknown) => {
+        this.warmPending.delete(sessionKey);
+        const message = err instanceof Error ? err.message : String(err);
+        if (!message.includes("SESSION_CANCELLED_BY_USER")) {
+          console.warn(`[acp-pool] warm start failed for ${sessionKey}: ${message}`);
+        }
+        return false;
+      },
+    );
+    return { sessionKey, ready };
+  }
+
+  /**
+   * Drops a warmed session that never ran a turn (ready or still starting).
+   * Sessions that have run a turn, or were not created by warmSession, are left alone.
+   */
+  async discardWarmSession(sessionKey: string): Promise<boolean> {
+    if (this.warmUnused.has(sessionKey)) {
+      return this.closeSession(sessionKey);
+    }
+    if (this.warmPending.delete(sessionKey)) {
+      // session/new may already have returned while model selection is still running.
+      return this.sessions.has(sessionKey)
+        ? this.closeSession(sessionKey)
+        : this.cancelSession(sessionKey);
+    }
+    return false;
+  }
+
+  /** A turn is about to use this session: it is no longer subject to warm reclaim. */
+  private claimWarmSession(sessionKey: string): void {
+    this.warmPending.delete(sessionKey);
+    this.warmUnused.delete(sessionKey);
+  }
+
+  private enforceWarmLimit(): void {
+    while (
+      this.warmUnused.size > 0 &&
+      this.warmUnused.size + this.warmPending.size > this.maxWarmUnused
+    ) {
+      const oldest = this.warmUnused.keys().next().value as string;
+      this.warmUnused.delete(oldest);
+      void this.closeSession(oldest);
+    }
+  }
+
+  private scheduleWarmSweep(): void {
+    if (this.warmSweepTimer || this.warmUnused.size === 0) {
+      return;
+    }
+    const interval = Math.max(1_000, Math.min(30_000, Math.floor(this.warmIdleMs / 4)));
+    this.warmSweepTimer = setInterval(() => this.sweepWarmSessions(), interval);
+    this.warmSweepTimer.unref();
+  }
+
+  private sweepWarmSessions(): void {
+    const now = Date.now();
+    for (const [sessionKey, readyAt] of [...this.warmUnused]) {
+      const managed = this.sessions.get(sessionKey);
+      if (!managed || managed.record.status === "closed" || managed.record.status === "error") {
+        this.warmUnused.delete(sessionKey);
+      } else if (now - readyAt >= this.warmIdleMs) {
+        void this.closeSession(sessionKey);
+      }
+    }
+    if (this.warmUnused.size === 0) {
+      this.stopWarmSweep();
+    }
+  }
+
+  private stopWarmSweep(): void {
+    if (this.warmSweepTimer) {
+      clearInterval(this.warmSweepTimer);
+      this.warmSweepTimer = undefined;
+    }
+  }
+
+  private async ensureSession(options: EnsureSessionOptions): Promise<ManagedSession> {
     const sessionKey = buildSessionKey(options.agent, options.sessionName);
     const existing = this.sessions.get(sessionKey);
     if (existing && existing.record.status !== "closed" && existing.record.status !== "error") {
@@ -481,22 +670,56 @@ export class AcpPool extends EventEmitter {
     }
   }
 
+  /**
+   * Builds the text sent as session/new systemPrompt: workbench guide + bridged shared resources.
+   * Conditions mirror the first-turn prefix logic in runTurn so both paths inject the same content.
+   */
+  private buildSystemInjection(
+    options: EnsureSessionOptions,
+    record: SessionRecord,
+  ): {
+    text: string;
+    injectedTokens: number;
+    breakdown: SessionContextBreakdown;
+    resources: boolean;
+    guide: boolean;
+  } {
+    const breakdown = createEmptyContextBreakdown();
+    let text = "";
+    let injectedTokens = 0;
+    let resources = false;
+    if (options.injectSharedResources && this.resourceManager) {
+      const inj = this.resourceManager.buildInjectionForAgent(record.agent, record.effectiveCwd);
+      breakdown.sharedRulesTokens = inj.sharedRulesTokens;
+      breakdown.skillsIndexTokens = inj.skillsIndexTokens;
+      breakdown.injectedRules = inj.injectedRules;
+      breakdown.droppedRules = inj.droppedRules;
+      breakdown.injectedSkillsCount = inj.injectedSkillsCount;
+      breakdown.nativeRulesCount = inj.nativeRulesCount;
+      breakdown.nativeSkillsCount = inj.nativeSkillsCount;
+      if (inj.promptPrefix) {
+        text = inj.promptPrefix;
+        injectedTokens += inj.sharedRulesTokens + inj.skillsIndexTokens;
+      }
+      resources = true;
+    }
+    if (options.injectPeerMcp) {
+      const guide = buildHubWorkbenchGuide(record.role);
+      text = `${guide}${text}`;
+      injectedTokens += estimateTokens(guide);
+    }
+    return {
+      text: text.trim(),
+      injectedTokens,
+      breakdown,
+      resources,
+      guide: options.injectPeerMcp,
+    };
+  }
+
   private async createSession(
     sessionKey: string,
-    options: {
-      agent: AgentId;
-      sessionName: string;
-      baseCwd: string;
-      isolateWorktree: boolean;
-      callDepth: number;
-      injectPeerMcp: boolean;
-      groupId?: string;
-      role?: "lead" | "sub";
-      label?: string;
-      parentSessionKey?: string;
-      model?: string;
-      effort?: string;
-    },
+    options: EnsureSessionOptions,
   ): Promise<ManagedSession> {
     const workspace = ensureSessionWorkspace(
       options.baseCwd,
@@ -532,6 +755,14 @@ export class AcpPool extends EventEmitter {
       windowsHide: true,
     });
     record.pid = child.pid;
+    // A command that cannot be started emits 'error' on the child; without a listener that
+    // is an uncaught exception and takes the whole hub down.
+    const spawnFailed = new Promise<never>((_, reject) => {
+      child.once("error", (err) =>
+        reject(new Error(`Failed to start "${resolvedCmd.command}": ${err.message}`)),
+      );
+    });
+    spawnFailed.catch(() => {});
     this.startingChildren.set(sessionKey, { child, record });
     this.cancelledStarting.delete(sessionKey);
 
@@ -561,6 +792,17 @@ export class AcpPool extends EventEmitter {
     clientApp.onRequest(acp.methods.client.session.requestPermission, async ({ params }) => {
       return this.handlePermissionRequest(sessionKey, options.agent, params);
     });
+    clientApp.onRequest(acp.methods.client.elicitation.create, async ({ params }) => {
+      if (!this.elicitationHandler) {
+        return { action: "decline" };
+      }
+      return this.elicitationHandler({
+        sessionKey,
+        groupId: record.groupId,
+        agent: options.agent,
+        request: params,
+      });
+    });
 
     const conn = clientApp.connect(stream);
 
@@ -582,32 +824,89 @@ export class AcpPool extends EventEmitter {
     });
 
     try {
-      const initResp = await conn.agent.request(acp.methods.agent.initialize, {
-        protocolVersion: acp.PROTOCOL_VERSION,
-        clientCapabilities: {},
-        clientInfo: { name: "agent-hub", version: "0.1.0" },
-      });
+      const initResp = await Promise.race([
+        conn.agent.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: { elicitation: { form: {} } },
+          clientInfo: { name: "agent-hub", version: "0.1.0" },
+        }),
+        spawnFailed,
+      ]);
 
-      const builder = conn.agent.buildSession(path.resolve(workspace.effectiveCwd));
-      if (options.injectPeerMcp && this.hubUrl) {
-        const mcpLaunch = resolvePeerMcpLaunch({
-          hubUrl: this.hubUrl,
-          callerAgent: options.agent,
-          callerSession: sessionKey,
-          depth: options.callDepth,
-          groupId: record.groupId,
-        });
-        builder.withMcpServer({
-          name: "agent-hub-peers",
-          command: mcpLaunch.command,
-          args: mcpLaunch.args,
-          env: [],
-        });
+      const sessionCwd = path.resolve(workspace.effectiveCwd);
+      // Extra project directories go in session/new when the adapter supports them; for the
+      // others the hub mentions them in the first prompt instead.
+      const extraDirs = initResp.agentCapabilities?.sessionCapabilities?.additionalDirectories
+        ? (this.extraDirsResolver?.(record.groupId) ?? []).filter((dir) => path.resolve(dir) !== sessionCwd)
+        : [];
+      const startSession = (systemPromptText?: string): Promise<acp.ActiveSession> => {
+        const builder =
+          systemPromptText || extraDirs.length > 0
+            ? conn.agent.buildSession({
+                cwd: sessionCwd,
+                mcpServers: [],
+                ...(extraDirs.length > 0 ? { additionalDirectories: extraDirs } : {}),
+                ...(systemPromptText
+                  ? {
+                      systemPrompt: {
+                        mode: "append" as const,
+                        content: [{ type: "text" as const, text: systemPromptText }],
+                      },
+                    }
+                  : {}),
+              })
+            : conn.agent.buildSession(sessionCwd);
+        if (options.injectPeerMcp && this.hubUrl) {
+          const mcpLaunch = resolvePeerMcpLaunch({
+            hubUrl: this.hubUrl,
+            callerAgent: options.agent,
+            callerSession: sessionKey,
+            depth: options.callDepth,
+            groupId: record.groupId,
+          });
+          builder.withMcpServer({
+            name: "agent-hub-peers",
+            command: mcpLaunch.command,
+            args: mcpLaunch.args,
+            env: [],
+          });
+        }
+        return builder.start();
+      };
+
+      // Hub rules and the workbench guide go through session/new systemPrompt when the adapter
+      // advertises it, keeping the first user message clean (slash commands, prompt caching).
+      // Otherwise runTurn prepends them to the first prompt.
+      const systemInjection =
+        initResp.agentCapabilities?.sessionCapabilities?.systemPrompt &&
+        process.env.AGENT_HUB_DISABLE_SYSTEM_PROMPT !== "1"
+          ? this.buildSystemInjection(options, record)
+          : undefined;
+
+      let activeSession: acp.ActiveSession;
+      let viaSystemPrompt = false;
+      if (systemInjection?.text) {
+        try {
+          activeSession = await startSession(systemInjection.text);
+          viaSystemPrompt = true;
+        } catch (err) {
+          if (this.cancelledStarting.has(sessionKey)) {
+            throw err;
+          }
+          stderrTail.push(
+            `[system-prompt-fallback] ${err instanceof Error ? err.message : String(err)}`,
+          );
+          activeSession = await startSession();
+        }
+      } else {
+        activeSession = await startSession();
       }
-
-      const activeSession = await builder.start();
       if (this.cancelledStarting.has(sessionKey)) {
         throw new Error("SESSION_CANCELLED_BY_USER");
+      }
+      record.promptInjection = viaSystemPrompt ? "system" : "prefix";
+      if (viaSystemPrompt && systemInjection) {
+        record.contextBreakdown = systemInjection.breakdown;
       }
       record.acpSessionId = activeSession.sessionId;
       record.status = "idle";
@@ -622,7 +921,10 @@ export class AcpPool extends EventEmitter {
         stderrTail,
         initializeCapabilities: initResp.agentCapabilities,
         callDepth: options.callDepth,
-        resourcesInjected: false,
+        resourcesInjected: viaSystemPrompt && Boolean(systemInjection?.resources),
+        workbenchGuideInjected: viaSystemPrompt && Boolean(systemInjection?.guide),
+        pendingSystemInjectedTokens:
+          viaSystemPrompt && systemInjection ? systemInjection.injectedTokens : 0,
       };
       this.sessions.set(sessionKey, managed);
 
@@ -756,20 +1058,8 @@ export class AcpPool extends EventEmitter {
    * Queues and executes a prompt turn on the target agent session.
    */
   async runTurn(options: RunTurnOptions): Promise<RunTurnResult> {
-    const managed = await this.ensureSession({
-      agent: options.agent,
-      sessionName: options.sessionName,
-      baseCwd: options.baseCwd,
-      isolateWorktree: Boolean(options.isolateWorktree),
-      callDepth: options.callDepth ?? 0,
-      injectPeerMcp: options.injectPeerMcp ?? true,
-      groupId: options.groupId,
-      role: options.role,
-      label: options.label,
-      parentSessionKey: options.parentSessionKey,
-      model: options.model,
-      effort: options.effort,
-    });
+    this.claimWarmSession(buildSessionKey(options.agent, options.sessionName));
+    const managed = await this.ensureSession(toEnsureSessionOptions(options));
 
     const executeTurn = async (): Promise<RunTurnResult> => {
       const wantModel = options.model?.trim();
@@ -789,7 +1079,10 @@ export class AcpPool extends EventEmitter {
       }
 
       let effectivePrompt = options.prompt;
-      let turnInjectedTokens = options.handoffTokens ?? 0;
+      // Rules already sent via systemPrompt still count toward the first turn's injected tokens.
+      let turnInjectedTokens =
+        (options.handoffTokens ?? 0) + managed.pendingSystemInjectedTokens;
+      managed.pendingSystemInjectedTokens = 0;
       const shouldInject = options.injectSharedResources ?? Boolean(options.role);
 
       if (!managed.resourcesInjected && shouldInject && this.resourceManager) {
@@ -800,6 +1093,7 @@ export class AcpPool extends EventEmitter {
         managed.record.contextBreakdown.sharedRulesTokens = inj.sharedRulesTokens;
         managed.record.contextBreakdown.skillsIndexTokens = inj.skillsIndexTokens;
         managed.record.contextBreakdown.injectedRules = inj.injectedRules;
+        managed.record.contextBreakdown.droppedRules = inj.droppedRules;
         managed.record.contextBreakdown.injectedSkillsCount = inj.injectedSkillsCount;
         managed.record.contextBreakdown.nativeRulesCount = inj.nativeRulesCount;
         managed.record.contextBreakdown.nativeSkillsCount = inj.nativeSkillsCount;
@@ -808,6 +1102,40 @@ export class AcpPool extends EventEmitter {
           turnInjectedTokens += inj.sharedRulesTokens + inj.skillsIndexTokens;
         }
         managed.resourcesInjected = true;
+      }
+
+      if (!managed.workbenchGuideInjected && (options.injectPeerMcp ?? true)) {
+        const guide = buildHubWorkbenchGuide(managed.record.role);
+        effectivePrompt = `${guide}${effectivePrompt}`;
+        turnInjectedTokens += estimateTokens(guide);
+        managed.workbenchGuideInjected = true;
+      }
+
+      const attachedImages = options.images ?? [];
+      const initCaps = managed.initializeCapabilities as
+        | { promptCapabilities?: { image?: boolean } }
+        | undefined;
+      const supportsNativeImage = Boolean(initCaps?.promptCapabilities?.image);
+
+      let promptPayload: string | acp.ContentBlock[] = effectivePrompt;
+      if (attachedImages.length > 0 && supportsNativeImage) {
+        const pathHint = attachedImages
+          .map((img) => `${img.localPath} (${img.mimeType})`)
+          .join(", ");
+        const textWithHint = `${effectivePrompt}\n\n[Attached local image file(s): ${pathHint}]`;
+        promptPayload = [
+          ...attachedImages.map((img) => ({
+            type: "image" as const,
+            data: img.data,
+            mimeType: img.mimeType,
+          })),
+          { type: "text" as const, text: textWithHint },
+        ];
+      } else if (attachedImages.length > 0) {
+        const imgLines = attachedImages.map(
+          (img) => `- ${img.localPath} (${img.name}, ${img.mimeType})`,
+        );
+        promptPayload = `${effectivePrompt}\n\n<attached_images>\nThe user attached ${attachedImages.length} local image file(s). Read/inspect these file paths directly:\n${imgLines.join("\n")}\n</attached_images>`;
       }
 
       managed.record.contextBreakdown.handoffTokens += options.handoffTokens ?? 0;
@@ -829,7 +1157,7 @@ export class AcpPool extends EventEmitter {
       let latestModelId: string | undefined;
       const peerToolsCalled: string[] = [];
 
-      const promptPromise = managed.activeSession.prompt(effectivePrompt);
+      const promptPromise = managed.activeSession.prompt(promptPayload);
       // Prevent unhandled rejection if draining loop throws first
       void promptPromise.catch(() => {});
 
@@ -884,6 +1212,7 @@ export class AcpPool extends EventEmitter {
               kind: update.kind,
               status: update.status,
               rawInput: update.rawInput,
+              locations: update.locations ?? undefined,
               timestamp: Date.now(),
             });
           } else if (update.sessionUpdate === "tool_call_update") {
@@ -897,7 +1226,21 @@ export class AcpPool extends EventEmitter {
               kind: update.kind ?? undefined,
               status: update.status ?? undefined,
               rawInput: update.rawInput,
+              locations: update.locations ?? undefined,
               timestamp: Date.now(),
+            });
+          } else if (update.sessionUpdate === "plan") {
+            // The agent's own plan (TodoWrite, codex plan). Each update carries the full list.
+            managed.record.plan = (update.entries ?? []).map((entry) => ({
+              content: entry.content,
+              status: entry.status,
+              priority: entry.priority,
+            }));
+            managed.record.updatedAt = Date.now();
+            this.emitEvent({
+              type: "session_updated",
+              session: { ...managed.record },
+              timestamp: managed.record.updatedAt,
             });
           } else if (update.sessionUpdate === "usage_update") {
             const rawUpdate = update as {
@@ -1052,6 +1395,7 @@ export class AcpPool extends EventEmitter {
       return false;
     }
     this.sessions.delete(sessionKey);
+    this.warmUnused.delete(sessionKey);
     managed.record.status = "closed";
     managed.record.updatedAt = Date.now();
     try {
@@ -1074,6 +1418,12 @@ export class AcpPool extends EventEmitter {
   }
 
   async disposeAll(): Promise<void> {
+    this.stopWarmSweep();
+    this.warmPending.clear();
+    // Warm starts may still be mid-handshake; kill them so no adapter process outlives the hub.
+    for (const key of [...this.startingChildren.keys()]) {
+      await this.cancelSession(key).catch(() => false);
+    }
     const keys = [...this.sessions.keys()];
     await Promise.all(keys.map((key) => this.closeSession(key)));
   }

@@ -40,6 +40,8 @@ export interface AgentDefinition {
   env?: Record<string, string>;
   defaultModel?: string;
   defaultEffort?: string;
+  /** Model ids offered in the model picker; empty or unset means everything the CLI reports. */
+  models?: string[];
   nativeProjectRuleFiles?: string[];
   nativeGlobalSkillDirs?: string[];
 }
@@ -80,6 +82,8 @@ export interface AgentResourceBudget {
   rulesTokens: number;
   skillsIndexTokens: number;
   firstTurnInjectionTokens: number;
+  /** Names of bridged rules left out because the rule budget was exhausted. */
+  droppedRules?: string[];
 }
 
 export interface TurnUsage {
@@ -111,6 +115,8 @@ export interface SessionContextBreakdown {
   userPromptsTokens: number;
   agentOutputsTokens: number;
   injectedRules: InjectedItemSummary[];
+  /** Bridged rules left out of the injection because the rule budget was exhausted. */
+  droppedRules?: InjectedItemSummary[];
   injectedSkillsCount: number;
   nativeRulesCount: number;
   nativeSkillsCount: number;
@@ -125,6 +131,8 @@ export interface SessionUsageTotals {
   thoughtTokens: number;
   totalTokens: number;
   costUsd: number;
+  /** Turns whose token counts were estimated because the adapter reported no usage. */
+  estimatedTurns?: number;
   modelId?: string;
 }
 
@@ -165,6 +173,11 @@ export interface AdapterHealth {
   customArgs?: string[];
   defaultModel?: string;
   defaultEffort?: string;
+  /** Configured allow-list of model ids (see AgentDefinition.models). */
+  models?: string[];
+  /** Every model id the CLI reported, before the allow-list is applied. */
+  discoveredModelIds?: string[];
+  env?: Record<string, string>;
   modelCatalog?: AgentModelCatalog;
   reason?: string;
 }
@@ -211,6 +224,8 @@ export interface TaskGroup {
   agentModels?: Record<string, string>;
   agentEfforts?: Record<string, string>;
   cwd: string;
+  /** Other directories the task works in, besides cwd. */
+  extraDirs?: string[];
   archived?: boolean;
   archivedAt?: number;
   createdAt: number;
@@ -245,6 +260,10 @@ export interface SessionRecord {
   };
   contextBreakdown?: SessionContextBreakdown;
   tokenTotals?: SessionUsageTotals;
+  /** The agent's own current plan, when it reports one. */
+  plan?: SessionPlanEntry[];
+  /** How hub rules / workbench guide reach the agent: session/new systemPrompt or first-turn prompt prefix. */
+  promptInjection?: "system" | "prefix";
 }
 
 export interface TaskRecord {
@@ -298,7 +317,25 @@ export interface SessionToolCall {
   kind?: string;
   status?: string;
   rawInput?: unknown;
+  /** Files the tool call touches, as reported by the adapter. */
+  locations?: Array<{ path: string; line?: number | null }>;
   timestamp: number;
+}
+
+export interface ChatImageAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  url: string;
+  sizeBytes: number;
+}
+
+/** A non-image file the user attached; the agent reads it from localPath. */
+export interface ChatFileAttachment {
+  id: string;
+  name: string;
+  sizeBytes: number;
+  localPath: string;
 }
 
 export interface ChatMessageRecord {
@@ -318,12 +355,112 @@ export interface ChatMessageRecord {
   usage?: TurnUsage;
   injectedTokens?: number;
   artifactIds?: string[];
+  images?: ChatImageAttachment[];
+  files?: ChatFileAttachment[];
+}
+
+export type ProgressItemStatus = "pending" | "in_progress" | "completed" | "blocked";
+
+export interface ProgressItem {
+  title: string;
+  status: ProgressItemStatus;
+  /** Short remark: what is left, why it is blocked, where the result is. */
+  note?: string;
+}
+
+/**
+ * A task group's goal and where it stands, kept up to date by the agents themselves through
+ * the `progress_update` MCP tool so the user does not have to ask.
+ */
+export interface TaskProgress {
+  groupId: string;
+  goal?: string;
+  /** One or two sentences on the current state. */
+  summary?: string;
+  items: ProgressItem[];
+  updatedBy?: AgentId | "user";
+  updatedAt: number;
+}
+
+/** One entry of an agent's own plan (ACP `plan` update: TodoWrite, codex plans). */
+export interface SessionPlanEntry {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+  priority?: "high" | "medium" | "low";
+}
+
+export type WorkflowStepStatus =
+  | "draft"
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "skipped";
+
+/** What a client or the lead agent sends when drafting a workflow. */
+export interface WorkflowStepInput {
+  id?: string;
+  name?: string;
+  agent: string;
+  prompt: string;
+  dependsOn?: string[];
+  isolateWorktree?: boolean;
+}
+
+export interface WorkflowStep {
+  id: string;
+  name: string;
+  agent: AgentId;
+  prompt: string;
+  /** Ids of the steps that must finish first; their output is appended to this step's prompt. */
+  dependsOn: string[];
+  isolateWorktree?: boolean;
+  status: WorkflowStepStatus;
+  taskId?: string;
+  sessionKey?: string;
+  output?: string;
+  error?: string;
+}
+
+/** A task group's workflow: sub-session steps drafted first, then published. */
+export interface WorkflowRecord {
+  groupId: string;
+  status: "draft" | "running" | "completed" | "failed";
+  steps: WorkflowStep[];
+  proposedBy?: AgentId | "user";
+  updatedAt: number;
+}
+
+/** A directory tasks run in. Derived from the tasks themselves plus recently used ones. */
+export interface ProjectInfo {
+  path: string;
+  name: string;
+  activeTasks: number;
+  archivedTasks: number;
+  lastUsedAt: number;
+}
+
+/** User preferences kept by the hub (shared by every window). */
+export interface HubSettings {
+  /** After a task's first turn, ask the lead agent for a short title. */
+  autoTitle: boolean;
+  /** Directories used recently, newest first; offered when creating a task. */
+  recentProjects?: Array<{ path: string; lastUsedAt: number }>;
 }
 
 export type HubEvent =
   | {
       type: "snapshot";
       defaultGroupId: string;
+      settings?: HubSettings;
+      workflows?: WorkflowRecord[];
+      progress?: TaskProgress[];
+      projects?: ProjectInfo[];
+      /** Lead used for new task groups (--lead, persisted setting, or first ready agent). */
+      defaultLead?: AgentId;
+      /** The persisted setting only; undefined means automatic. */
+      configuredDefaultLead?: AgentId;
       leadAgent: AgentId;
       permissionMode: PermissionMode;
       baseCwd: string;
@@ -341,6 +478,26 @@ export type HubEvent =
       modelCatalogs: Record<string, AgentModelCatalog>;
       desktopMode?: boolean;
       port?: number;
+    }
+  | {
+      type: "projects_updated";
+      projects: ProjectInfo[];
+      timestamp: number;
+    }
+  | {
+      type: "progress_updated";
+      progress: TaskProgress;
+      timestamp: number;
+    }
+  | {
+      type: "workflow_updated";
+      workflow: WorkflowRecord;
+      timestamp: number;
+    }
+  | {
+      type: "settings_updated";
+      settings: HubSettings;
+      timestamp: number;
     }
   | {
       type: "workspace_changed";
@@ -420,6 +577,7 @@ export type HubEvent =
       kind?: string;
       status?: string;
       rawInput?: unknown;
+      locations?: Array<{ path: string; line?: number | null }>;
       timestamp: number;
     }
   | {
@@ -456,6 +614,8 @@ export type HubEvent =
   | {
       type: "agents_updated";
       agents: AdapterHealth[];
+      defaultLead?: AgentId;
+      configuredDefaultLead?: AgentId;
       timestamp: number;
     }
   | {

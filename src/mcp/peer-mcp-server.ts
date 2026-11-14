@@ -244,6 +244,91 @@ async function main(): Promise<void> {
   );
 
   server.registerTool(
+    "progress_update",
+    {
+      description:
+        "Update the task's Progress panel in the workbench: the goal, the steps with their status, and a short summary of where things stand. The user reads this panel instead of asking for status, so call it as soon as a task turns out to be multi-step, and again whenever the goal changes or a step starts, finishes or gets blocked. Omitted fields keep their previous value; `items`, when given, replaces the whole list.",
+      inputSchema: {
+        goal: z.string().optional().describe("What the task is trying to achieve, in one or two sentences."),
+        summary: z.string().optional().describe("Where things stand right now, in one or two sentences."),
+        items: z
+          .array(
+            z.object({
+              title: z.string().min(1).describe("The step or milestone."),
+              status: z.enum(["pending", "in_progress", "completed", "blocked"]),
+              note: z.string().optional().describe("What is left, why it is blocked, or where the result is."),
+            }),
+          )
+          .max(40)
+          .optional()
+          .describe("The full, current list of steps."),
+      },
+    },
+    async ({ goal, summary, items }) => {
+      const res = await callHub<{ progress: { items: Array<{ status: string }> } }>(cfg.hubUrl, "/api/progress", {
+        method: "POST",
+        body: { groupId: cfg.groupId, goal, summary, items, updatedBy: cfg.callerAgent },
+      });
+      const done = res.progress.items.filter((i) => i.status === "completed").length;
+      return {
+        content: [{ type: "text", text: `Progress panel updated (${done}/${res.progress.items.length} steps completed).` }],
+      };
+    },
+  );
+
+  server.registerTool(
+    "workflow_propose",
+    {
+      description:
+        "Draft a multi-step workflow of sub-sessions for the current task. Nothing runs yet: the draft appears in the workbench's Workflow panel, where the user reviews, edits and publishes it. Use this instead of several peer_dispatch calls when the work splits into steps with dependencies. A step's output is appended to the prompt of every step that depends on it.",
+      inputSchema: {
+        steps: z
+          .array(
+            z.object({
+              id: z.string().describe("Short unique id: lowercase letters, digits, '-' or '_'."),
+              name: z.string().optional().describe("Human-readable step name."),
+              agent: z.string().min(1).describe("Agent ID that runs this step (see peer_list_agents)."),
+              prompt: z.string().min(1).describe("Self-contained instruction for the step."),
+              depends_on: z.array(z.string()).optional().describe("Ids of steps that must finish first."),
+              isolate_worktree: z.boolean().optional().describe("Run the step in its own git worktree."),
+            }),
+          )
+          .min(1)
+          .max(20),
+      },
+    },
+    async ({ steps }) => {
+      const res = await callHub<{ workflow: { steps: Array<{ id: string }> } }>(
+        cfg.hubUrl,
+        "/api/workflows/save",
+        {
+          method: "POST",
+          body: {
+            groupId: cfg.groupId,
+            proposedBy: cfg.callerAgent,
+            steps: steps.map((s) => ({
+              id: s.id,
+              name: s.name,
+              agent: s.agent,
+              prompt: s.prompt,
+              dependsOn: s.depends_on,
+              isolateWorktree: s.isolate_worktree,
+            })),
+          },
+        },
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Workflow draft saved with ${res.workflow.steps.length} step(s): ${res.workflow.steps.map((s) => s.id).join(", ")}. It has NOT started. Tell the user to review and publish it in the Workflow panel.`,
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
     "peer_cancel",
     {
       description: "Cooperatively cancel an active turn on a peer agent session.",
@@ -326,7 +411,7 @@ async function main(): Promise<void> {
     "ui_render_artifact",
     {
       description:
-        "Render an interactive HTML/SVG/Mermaid widget directly inside the Agent Hub Workbench chat stream inside a sandboxed iframe.",
+        "Render an interactive HTML/SVG/Mermaid widget directly inside the Quorum workbench chat stream inside a sandboxed iframe.",
       inputSchema: {
         title: z.string().min(1).describe("Short descriptive title for the interactive widget."),
         kind: z.enum(["html", "svg", "mermaid"]).optional().default("html").describe("Widget content type."),
@@ -368,7 +453,7 @@ async function main(): Promise<void> {
     "hub_ask_user",
     {
       description:
-        "Show an interactive structured questionnaire card in the Agent Hub Workbench UI and wait for the user's choices or text input.",
+        "Show an interactive structured questionnaire card in the Quorum workbench UI and wait for the user's choices or text input.",
       inputSchema: {
         title: z.string().optional().describe("Optional card header title."),
         questions: z

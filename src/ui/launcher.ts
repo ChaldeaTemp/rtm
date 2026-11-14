@@ -43,6 +43,9 @@ export function openInteractiveWindow(
             "--window-size=1420,900",
             "--no-first-run",
             "--no-default-browser-check",
+            // App window, not a browser: no translate bar, no password or autofill prompts.
+            "--disable-features=Translate,AutofillServerCommunication,PasswordManagerOnboarding",
+            "--disable-save-password-bubble",
           ],
           {
             detached: true,
@@ -50,6 +53,8 @@ export function openInteractiveWindow(
             windowsHide: false,
           },
         );
+        // A missing browser/opener must not crash the hub.
+        child.on("error", () => {});
         child.unref();
         return { mode: "app", executable: exe };
       }
@@ -59,6 +64,8 @@ export function openInteractiveWindow(
       stdio: "ignore",
       windowsHide: true,
     });
+    // A missing browser/opener must not crash the hub.
+    child.on("error", () => {});
     child.unref();
     return { mode: "browser" };
   }
@@ -68,6 +75,8 @@ export function openInteractiveWindow(
     detached: true,
     stdio: "ignore",
   });
+  // A missing browser/opener must not crash the hub.
+  child.on("error", () => {});
   child.unref();
   return { mode: "browser", executable: opener };
 }

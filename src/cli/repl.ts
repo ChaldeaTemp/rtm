@@ -105,7 +105,7 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
     rl.prompt();
   };
 
-  console.log(`Agent Hub started at ${hub.getUrl()} (cwd: ${hub.baseCwd})`);
+  console.log(`Quorum started at ${hub.getUrl()} (cwd: ${hub.baseCwd})`);
   console.log(`Type a prompt, or /help for commands (/tasks, /new, /use, /lead, /models, /model, /subs, /ui, /quit).`);
   printPrompt();
 

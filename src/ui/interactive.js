@@ -2,6 +2,8 @@ const app = window.HUB_APP;
 
 const INTERACTIVE_STATE = {
   showForm: false,
+  // "simple" 只填 ID、命令、参数；"full" 再加名称、模型、颜色、环境变量等
+  formMode: "simple",
   editingId: null,
   formValues: {
     id: "",
@@ -13,63 +15,94 @@ const INTERACTIVE_STATE = {
     description: "",
     defaultModel: "",
     defaultEffort: "",
+    modelsText: "",
   },
   probeResults: new Map(), // agentId -> { testing?: boolean, ok?: boolean, latencyMs?: number, sessionId?: string, error?: string }
   questionDrafts: new Map(), // questionId -> Map<fieldId, string | string[]>
 };
 
-const QUICK_TEMPLATES = [
-  {
-    name: "OpenCode ACP",
-    id: "opencode",
-    label: "opencode",
-    command: "opencode",
-    argsText: "acp",
-    envText: "",
-    color: "#6d3fc0",
-    description: "OpenCode CLI 内置 ACP 服务端",
-  },
-  {
-    name: "Kimi CLI ACP",
-    id: "kimi",
-    label: "kimi",
-    command: "kimi",
-    argsText: "acp",
-    envText: "",
-    color: "#0d7490",
-    description: "Moonshot Kimi Code CLI 内置 ACP 服务端",
-  },
-  {
-    name: "Gemini CLI",
-    id: "gemini",
-    label: "gemini",
-    command: "gemini",
-    argsText: "--experimental-acp",
-    envText: "",
-    color: "#1a73e8",
-    description: "Google Gemini CLI（实验性 ACP 模式）",
-  },
-  {
-    name: "Goose ACP",
-    id: "goose",
-    label: "goose",
-    command: "goose",
-    argsText: "acp",
-    envText: "",
-    color: "#c2410c",
-    description: "Block Goose 本地 ACP Agent",
-  },
-  {
-    name: "自定义 Node/Python 脚本",
-    id: "custom-acp",
-    label: "custom-acp",
-    command: "node",
-    argsText: "./scripts/my-acp-agent.mjs",
-    envText: "MY_ENV=1",
-    color: "#4338ca",
-    description: "通过 stdio JSON-RPC 实现 ACP 协议的自定义脚本",
-  },
-];
+// 预设（已知支持 ACP 的 CLI）由 hub 提供，并带上本机是否已安装
+async function loadAgentPresets() {
+  try {
+    const res = await fetch("/api/agents/presets");
+    const data = await res.json();
+    if (res.ok && Array.isArray(data.presets)) {
+      INTERACTIVE_STATE.presets = data.presets;
+      if (app?.isAgentsViewOpen?.()) renderAgentsView();
+    }
+  } catch {
+    // 旧版 hub 没有这个接口时，只是不显示预设
+  }
+}
+
+async function addAgentPreset(id) {
+  try {
+    const res = await fetch("/api/agents/presets/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      app.appendLog(`添加 ${id} 失败: ${data.error || res.status}`);
+      return;
+    }
+    app.STATE.agents = data.agents || app.STATE.agents;
+    INTERACTIVE_STATE.showForm = false;
+    app.renderAgentControls?.();
+    renderAgentsView();
+    void loadAgentPresets();
+    void probeAgentHandshake(id);
+  } catch (err) {
+    app.appendLog(`添加 ${id} 异常: ${err.message}`);
+  }
+}
+
+// 把接入工作交给默认主导 Agent：它自己找启动命令，再调 hub 接口登记并验证握手
+async function askAgentToRegister(rawName) {
+  const name = String(rawName || "").trim();
+  if (!name) return;
+  const lead = app.STATE.defaultLead || app.STATE.newTaskLead;
+  const origin = location.origin;
+  const prompt = [
+    `请把本机的命令行工具「${name}」接入 Quorum（${origin}）。`,
+    "",
+    "1. 找到它的可执行文件，查它的 --help 或文档，确认以 stdio 方式启动 ACP（Agent Client Protocol）服务的命令和参数。",
+    `2. 登记：POST ${origin}/api/agents/save，JSON 请求体形如 {"id":"小写字母数字","label":"显示名","command":"可执行文件","args":["acp"]}。`,
+    `3. 验证：POST ${origin}/api/agents/test，请求体 {"id":"上一步的 id"}。返回 ok 为 false 时按 error 调整命令或参数后重试。`,
+    "4. 最后告诉我登记的 id、启动命令和握手结果。如果这个工具不支持 ACP，直接说明。",
+    "",
+    "只需要调用上面两个接口，不要阅读 Quorum 的源码，也不要修改任何文件。",
+  ].join("\n");
+  INTERACTIVE_STATE.showForm = false;
+  await app.createTaskGroup({ title: `接入 ${name}`, leadAgent: lead });
+  app.closeSettings?.();
+  app.setStageView("chat");
+  void app.sendStreamPrompt(prompt, app.STATE.activeStreamKey);
+}
+
+function parseModelsText(raw) {
+  return [...new Set(String(raw || "").split(/[\r\n,，]+/).map((m) => m.trim()).filter(Boolean))];
+}
+
+// 切换简化/完整或重绘前，把输入框里的内容收回 formValues，避免丢失已填的字段
+function captureAgentFormValues() {
+  const fv = INTERACTIVE_STATE.formValues;
+  const read = (id, key) => {
+    const el = document.getElementById(id);
+    if (el) fv[key] = el.value;
+  };
+  read("agentCfgId", "id");
+  read("agentCfgCommand", "command");
+  read("agentCfgArgs", "argsText");
+  read("agentCfgLabel", "label");
+  read("agentCfgDefaultModel", "defaultModel");
+  read("agentCfgDefaultEffort", "defaultEffort");
+  read("agentCfgModels", "modelsText");
+  read("agentCfgColor", "color");
+  read("agentCfgDesc", "description");
+  read("agentCfgEnv", "envText");
+}
 
 function parseArgsText(raw) {
   return String(raw || "")
@@ -265,11 +298,39 @@ async function refreshAgentsList() {
     const data = await res.json();
     if (res.ok && Array.isArray(data.agents)) {
       app.STATE.agents = data.agents;
+      if ("defaultLead" in data) {
+        app.STATE.defaultLead = data.defaultLead || "";
+        app.STATE.configuredDefaultLead = data.configuredDefaultLead || "";
+      }
       app.renderAgentControls?.();
       renderAgentsView();
     }
   } catch (err) {
     app.appendLog(`刷新 Agent 列表失败: ${err.message}`);
+  }
+}
+
+// id 为空表示恢复自动（取第一个就绪的 Agent）
+async function setDefaultLeadAgent(id) {
+  try {
+    const res = await fetch("/api/agents/default-lead", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: id || null }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      app.appendLog(`设置默认主导失败: ${data.error || res.status}`);
+      return;
+    }
+    app.STATE.defaultLead = data.defaultLead || "";
+    app.STATE.configuredDefaultLead = data.configured || "";
+    if (data.defaultLead) app.STATE.newTaskLead = data.defaultLead;
+    app.renderAgentControls?.();
+    renderAgentsView();
+    app.appendLog(id ? `默认主导已设为 ${id}，新任务生效` : `默认主导已恢复自动（当前为 ${data.defaultLead}）`);
+  } catch (err) {
+    app.appendLog(`设置默认主导异常: ${err.message}`);
   }
 }
 
@@ -350,28 +411,26 @@ async function deleteCustomAgent(id) {
 
 async function saveAgentForm(e) {
   e.preventDefault();
-  const idEl = document.getElementById("agentCfgId");
-  const labelEl = document.getElementById("agentCfgLabel");
-  const cmdEl = document.getElementById("agentCfgCommand");
-  const argsEl = document.getElementById("agentCfgArgs");
-  const envEl = document.getElementById("agentCfgEnv");
-  const colorEl = document.getElementById("agentCfgColor");
-  const descEl = document.getElementById("agentCfgDesc");
-  const defaultModelEl = document.getElementById("agentCfgDefaultModel");
-  const defaultEffortEl = document.getElementById("agentCfgDefaultEffort");
-
+  captureAgentFormValues();
+  const fv = INTERACTIVE_STATE.formValues;
+  const full = INTERACTIVE_STATE.formMode === "full";
   const payload = {
-    id: idEl.value.trim(),
-    label: labelEl.value.trim() || undefined,
-    command: cmdEl.value.trim() || undefined,
-    args: parseArgsText(argsEl.value),
-    env: parseEnvText(envEl.value),
-    color: colorEl.value.trim() || undefined,
-    description: descEl.value.trim() || undefined,
-    defaultModel: defaultModelEl ? defaultModelEl.value.trim() : undefined,
-    defaultEffort: defaultEffortEl ? defaultEffortEl.value.trim() : undefined,
+    id: fv.id.trim(),
+    command: fv.command.trim() || undefined,
+    args: fv.command.trim() || fv.argsText.trim() ? parseArgsText(fv.argsText) : undefined,
     enabled: true,
   };
+  if (full) {
+    Object.assign(payload, {
+      label: fv.label.trim() || undefined,
+      env: parseEnvText(fv.envText),
+      color: fv.color.trim() || undefined,
+      description: fv.description.trim() || undefined,
+      defaultModel: fv.defaultModel.trim(),
+      defaultEffort: fv.defaultEffort.trim(),
+      models: parseModelsText(fv.modelsText),
+    });
+  }
 
   if (!payload.id) return;
 
@@ -389,7 +448,12 @@ async function saveAgentForm(e) {
     INTERACTIVE_STATE.showForm = false;
     INTERACTIVE_STATE.editingId = null;
     app.STATE.agents = data.agents || app.STATE.agents;
+    // 可用模型可能刚被改过：让模型选择框立刻用上新的列表
+    for (const a of app.STATE.agents) {
+      if (a.modelCatalog && app.STATE.modelCatalogs) app.STATE.modelCatalogs.set(a.agent, a.modelCatalog);
+    }
     app.renderAgentControls?.();
+    app.renderModelSelectorBar?.();
     renderAgentsView();
     app.appendLog(`已保存 Agent 配置: ${payload.id}`);
   } catch (err) {
@@ -410,23 +474,27 @@ function openFormWithTemplate(tpl) {
     description: tpl.description || "",
     defaultModel: tpl.defaultModel || "",
     defaultEffort: tpl.defaultEffort || "",
+    modelsText: "",
   };
   renderAgentsView();
 }
 
 function openFormForEdit(agentItem) {
   INTERACTIVE_STATE.showForm = true;
+  INTERACTIVE_STATE.formMode = "full";
   INTERACTIVE_STATE.editingId = agentItem.agent;
   INTERACTIVE_STATE.formValues = {
     id: agentItem.agent,
     label: agentItem.label || agentItem.agent,
-    command: agentItem.customCommand || (agentItem.command?.[0] ?? ""),
-    argsText: (agentItem.customArgs ?? agentItem.command?.slice(1) ?? []).join(" "),
+    // 内置 Agent 没改过命令时留空，表示继续用内置的启动方式
+    command: agentItem.customCommand || (agentItem.builtin ? "" : (agentItem.command?.[0] ?? "")),
+    argsText: (agentItem.customArgs ?? (agentItem.builtin ? [] : agentItem.command?.slice(1)) ?? []).join(" "),
     envText: formatEnvText(agentItem.env),
     color: agentItem.color || "#3f6212",
     description: agentItem.description || "",
     defaultModel: agentItem.defaultModel || "",
     defaultEffort: agentItem.defaultEffort || "",
+    modelsText: (agentItem.models || []).join("\n"),
   };
   renderAgentsView();
 }
@@ -439,12 +507,8 @@ function renderAgentsView() {
   const esc = app.escapeHtml;
   const list = app.STATE.agents && app.STATE.agents.length > 0 ? app.STATE.agents : app.getEnabledAgents();
 
-  const templateButtons = QUICK_TEMPLATES.map(
-    (tpl, idx) =>
-      `<button type="button" class="filter-pill" data-agent-tpl="${idx}">${esc(tpl.name)}</button>`,
-  ).join("");
-
   const fv = INTERACTIVE_STATE.formValues;
+  const editing = Boolean(INTERACTIVE_STATE.editingId);
   const formCatalog = fv.id ? app.STATE.modelCatalogs?.get(fv.id) : null;
   const modelDatalist =
     formCatalog?.models?.length > 0
@@ -458,57 +522,125 @@ function renderAgentsView() {
           .map((o) => `<option value="${esc(o.id)}">${esc(o.name || o.id)}</option>`)
           .join("")}</datalist>`
       : "";
-  const formHtml = INTERACTIVE_STATE.showForm
-    ? `
-      <form id="agentRegistryForm" class="rule-editor-box">
-        <div class="agent-template-bar">
-          <span class="mono" style="font-size:11px;color:var(--muted)">快速模板：</span>
-          ${templateButtons}
+
+  const addable = (INTERACTIVE_STATE.presets || []).filter((p) => !p.registered);
+  const installedPresets = addable.filter((p) => p.installed);
+  const otherPresets = addable.filter((p) => !p.installed);
+  const assistLead = app.STATE.defaultLead || app.STATE.newTaskLead;
+  const presetTitle = (p) => esc(`${p.description}：${p.command} ${p.args.join(" ")}`);
+  const addPanelHtml =
+    INTERACTIVE_STATE.showForm && !editing
+      ? `
+      <div class="agent-add-panel">
+        ${
+          installedPresets.length > 0
+            ? `<div class="agent-add-row">
+                <span class="agent-add-label">本机已安装</span>
+                <div class="agent-add-chips">${installedPresets
+                  .map(
+                    (p) =>
+                      `<button type="button" class="filter-pill preset-ready" data-add-preset="${esc(p.id)}" title="${presetTitle(p)}">添加 ${esc(p.label)}</button>`,
+                  )
+                  .join("")}</div>
+              </div>`
+            : ""
+        }
+        <div class="agent-add-row">
+          <span class="agent-add-label">交给 Agent</span>
+          <div class="agent-add-chips">
+            <input id="agentAssistInput" class="text-input" type="text" placeholder="工具名或安装路径" autocomplete="off" />
+            <button id="agentAssistBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="新建一个任务，由 ${esc(assistLead)} 找到启动命令、登记并验证">让 ${esc(assistLead)} 接入</button>
+          </div>
         </div>
-        ${modelDatalist}${effortDatalist}
+        ${
+          otherPresets.length > 0
+            ? `<div class="agent-add-row">
+                <span class="agent-add-label">预设</span>
+                <div class="agent-add-chips">${otherPresets
+                  .map(
+                    (p) =>
+                      `<button type="button" class="filter-pill" data-fill-preset="${esc(p.id)}" title="${presetTitle(p)}（本机未检测到）">${esc(p.label)}</button>`,
+                  )
+                  .join("")}</div>
+              </div>`
+            : ""
+        }
+      </div>`
+      : "";
+
+  const fullMode = INTERACTIVE_STATE.formMode === "full";
+  const editingItem = editing ? list.find((a) => a.agent === INTERACTIVE_STATE.editingId) : null;
+  const discoveredIds = editingItem?.discoveredModelIds || [];
+  const fullFieldsHtml = fullMode
+    ? `
         <div class="agent-form-grid">
           <div class="agent-form-field">
-            <label>Agent ID (唯一标识)</label>
-            <input id="agentCfgId" class="text-input" type="text" placeholder="如 gemini / goose / my-agent" value="${esc(fv.id)}" ${INTERACTIVE_STATE.editingId ? "readonly" : ""} required />
-          </div>
-          <div class="agent-form-field">
             <label>显示名称</label>
-            <input id="agentCfgLabel" class="text-input" type="text" placeholder="如 gemini" value="${esc(fv.label)}" />
+            <input id="agentCfgLabel" class="text-input" type="text" value="${esc(fv.label)}" />
           </div>
           <div class="agent-form-field">
-            <label>启动命令 (Command)</label>
-            <input id="agentCfgCommand" class="text-input" type="text" placeholder="如 opencode / node / python" value="${esc(fv.command)}" />
+            <label>默认模型</label>
+            <input id="agentCfgDefaultModel" class="text-input" type="text" ${modelDatalist ? 'list="agentModelChoices"' : ""} placeholder="跟随 CLI" value="${esc(fv.defaultModel || "")}" />
           </div>
           <div class="agent-form-field">
-            <label>命令参数 (Args，空格或换行分隔)</label>
-            <input id="agentCfgArgs" class="text-input" type="text" placeholder="如 acp 或 --experimental-acp" value="${esc(fv.argsText)}" />
+            <label>默认思考强度</label>
+            <input id="agentCfgDefaultEffort" class="text-input" type="text" ${effortDatalist ? 'list="agentEffortChoices"' : ""} placeholder="跟随 CLI" value="${esc(fv.defaultEffort || "")}" />
           </div>
           <div class="agent-form-field">
-            <label>默认模型 ID (留空跟随 CLI)</label>
-            <input id="agentCfgDefaultModel" class="text-input" type="text" ${modelDatalist ? 'list="agentModelChoices"' : ""} placeholder="如 opus / gpt-6.1-sol / gemini-4-carbon" value="${esc(fv.defaultModel || "")}" />
-          </div>
-          <div class="agent-form-field">
-            <label>默认思考强度 (留空跟随 CLI)</label>
-            <input id="agentCfgDefaultEffort" class="text-input" type="text" ${effortDatalist ? 'list="agentEffortChoices"' : ""} placeholder="如 low / medium / high / xhigh / max" value="${esc(fv.defaultEffort || "")}" />
-          </div>
-          <div class="agent-form-field">
-            <label>徽章颜色 (Hex)</label>
+            <label>颜色</label>
             <input id="agentCfgColor" class="text-input" type="text" placeholder="#3f6212" value="${esc(fv.color)}" />
           </div>
           <div class="agent-form-field">
-            <label>说明备注</label>
-            <input id="agentCfgDesc" class="text-input" type="text" placeholder="简短描述该 Agent 的用途" value="${esc(fv.description)}" />
+            <label>备注</label>
+            <input id="agentCfgDesc" class="text-input" type="text" value="${esc(fv.description)}" />
           </div>
         </div>
-        <div class="agent-form-field" style="margin-bottom:8px">
-          <label>附加环境变量 (可选，每行 KEY=VALUE)</label>
-          <textarea id="agentCfgEnv" class="rule-editor-textarea" style="min-height:64px" placeholder="OPENAI_BASE_URL=https://...&#10;CUSTOM_API_KEY=...">${esc(fv.envText)}</textarea>
+        <div class="agent-form-field">
+          <label>可用模型（每行一个；留空表示 CLI 报告的全部模型）${
+            discoveredIds.length > 0
+              ? ` <button type="button" id="fillDiscoveredModelsBtn" class="link-btn">填入已发现的 ${discoveredIds.length} 个</button>`
+              : ""
+          }</label>
+          <textarea id="agentCfgModels" class="rule-editor-textarea" style="min-height:72px" placeholder="模型选择框只显示这里列出的模型">${esc(fv.modelsText || "")}</textarea>
         </div>
+        <div class="agent-form-field">
+          <label>环境变量（每行 KEY=VALUE）</label>
+          <textarea id="agentCfgEnv" class="rule-editor-textarea" style="min-height:64px">${esc(fv.envText)}</textarea>
+        </div>`
+    : "";
+
+  const formHtml = INTERACTIVE_STATE.showForm
+    ? `
+      ${addPanelHtml}
+      <form id="agentRegistryForm" class="rule-editor-box">
+        ${modelDatalist}${effortDatalist}
+        <div class="panel-toolbar agent-form-head">
+          <span class="agent-form-title">${editing ? `配置 ${esc(fv.label || fv.id)}` : "手动添加"}</span>
+          <div class="settings-seg" id="agentFormModeSeg">
+            <button type="button" data-form-mode="simple" class="${fullMode ? "" : "active"}">简化</button>
+            <button type="button" data-form-mode="full" class="${fullMode ? "active" : ""}">完整</button>
+          </div>
+        </div>
+        <div class="agent-form-grid">
+          <div class="agent-form-field">
+            <label>ID</label>
+            <input id="agentCfgId" class="text-input" type="text" placeholder="gemini" value="${esc(fv.id)}" ${editing ? "readonly" : ""} required />
+          </div>
+          <div class="agent-form-field">
+            <label>启动命令</label>
+            <input id="agentCfgCommand" class="text-input" type="text" placeholder="${editingItem?.builtin ? "内置默认" : "gemini"}" value="${esc(fv.command)}" />
+          </div>
+          <div class="agent-form-field">
+            <label>参数</label>
+            <input id="agentCfgArgs" class="text-input" type="text" placeholder="${editingItem?.builtin ? "内置默认" : "acp"}" value="${esc(fv.argsText)}" />
+          </div>
+        </div>
+        ${fullFieldsHtml}
         <div class="panel-toolbar">
-          <span class="mono" style="font-size:11px;color:var(--faint)">仅写入项目目录 .agent-hub/agents.json；任何支持 stdio ACP 协议的 CLI 均可接入并参与 peer_ask 委派与上下文统计</span>
+          <span></span>
           <div style="display:flex;gap:8px">
-            <button id="cancelAgentFormBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button">取消</button>
-            <button class="alma-btn alma-btn-primary alma-btn-sm" type="submit">保存接入配置</button>
+            <button id="cancelAgentFormBtn" class="alma-btn alma-btn-sm" type="button">取消</button>
+            <button class="alma-btn alma-btn-primary alma-btn-sm" type="submit">保存</button>
           </div>
         </div>
       </form>`
@@ -517,31 +649,33 @@ function renderAgentsView() {
   const cardsHtml = list
     .map((item) => {
       const probe = INTERACTIVE_STATE.probeResults.get(item.agent);
+      const isConfiguredLead = app.STATE.configuredDefaultLead === item.agent;
+      const isAutoLead = !app.STATE.configuredDefaultLead && app.STATE.defaultLead === item.agent;
       const tagHtml = app.agentTagHtml
         ? app.agentTagHtml(item.agent, item.label || item.agent)
         : `<span class="agent-tag" data-agent="${esc(item.agent)}">${esc(item.label || item.agent)}</span>`;
-      const cmdDisplay = Array.isArray(item.command) && item.command.length > 0 ? item.command.join(" ") : "(未解析到命令)";
+      const cmdDisplay = Array.isArray(item.command) && item.command.length > 0 ? item.command.join(" ") : "未解析到命令";
       let statusBadge = `<span class="cov-pill off">已停用</span>`;
       if (item.enabled !== false) {
         if (item.available && item.authReady) statusBadge = `<span class="cov-pill native">就绪</span>`;
-        else if (item.available) statusBadge = `<span class="cov-pill bridged">待鉴权</span>`;
-        else statusBadge = `<span class="cov-pill off">未检测到命令</span>`;
+        else if (item.available) statusBadge = `<span class="cov-pill bridged">未登录</span>`;
+        else statusBadge = `<span class="cov-pill off">未安装</span>`;
       }
 
-      const catalog = app.STATE.modelCatalogs?.get(item.agent) || item.modelCatalog;
+      const catalog = item.modelCatalog || app.STATE.modelCatalogs?.get(item.agent);
       const modelCount = Array.isArray(catalog?.models) ? catalog.models.length : 0;
-      const defaultModelText = item.defaultModel || catalog?.currentModelId || "CLI 默认";
+      const defaultModelText = item.defaultModel || catalog?.currentModelId || "跟随 CLI";
+      // 只在有内容可说时才占一行：握手结果，或未就绪的原因
       let probeClass = "agent-probe-status";
-      let probeText = item.authHint || item.reason || "点击「测试握手」实时验证 ACP initialize + session/new";
+      let probeText = item.authHint || item.reason || "";
       if (probe?.testing) {
-        probeText = "正在启动子进程并执行 ACP 握手...";
+        probeText = "正在握手…";
       } else if (probe && probe.ok === true) {
         probeClass += " ok";
-        const probedCount = probe.modelCatalog?.models?.length ?? modelCount;
-        probeText = `握手成功 (${probe.latencyMs}ms · ${probedCount} 个模型 · session=${probe.sessionId || "ok"})`;
+        probeText = `握手成功，${(probe.latencyMs / 1000).toFixed(1)} 秒`;
       } else if (probe && probe.ok === false) {
         probeClass += " err";
-        probeText = `握手失败: ${probe.error || "unknown error"}`;
+        probeText = `握手失败：${probe.error || "未知错误"}`;
       }
 
       return `
@@ -549,38 +683,34 @@ function renderAgentsView() {
           <div class="agent-cfg-head">
             <div class="agent-cfg-title">
               ${tagHtml}
-              <span class="agent-origin-badge">${item.builtin ? "内置" : "自定义"}</span>
               ${statusBadge}
+              ${isConfiguredLead ? `<span class="cov-pill native" title="新任务默认由它主导">默认主导</span>` : isAutoLead ? `<span class="cov-pill bridged" title="未指定默认主导，自动选中第一个就绪的 Agent">默认主导 · 自动</span>` : ""}
             </div>
-            <label class="toggle-wrap" title="启用/停用该 Agent">
+            <label class="toggle-wrap" title="启用或停用">
               <input type="checkbox" data-toggle-agent="${esc(item.agent)}" ${item.enabled === false ? "" : "checked"} />
-              <span>${item.enabled === false ? "停用" : "启用"}</span>
             </label>
           </div>
-          ${item.description ? `<div class="res-desc">${esc(item.description)}</div>` : ""}
-          <div class="res-meta">默认模型: ${esc(defaultModelText)}${item.defaultEffort ? ` (${esc(item.defaultEffort)})` : ""}${modelCount > 0 ? ` · 已发现 ${modelCount} 个模型` : ""}</div>
-          <div class="agent-cmd-line" title="实际拉起的 stdio ACP 命令">${esc(cmdDisplay)}</div>
-          <div class="${probeClass}">${esc(probeText)}</div>
+          <div class="res-meta">${esc(defaultModelText)}${item.defaultEffort ? ` · ${esc(item.defaultEffort)}` : ""}${modelCount > 0 ? `　${modelCount} 个模型可选${item.models?.length ? "（已限定）" : ""}` : ""}</div>
+          <div class="agent-cmd-line" title="${esc(cmdDisplay)}">${esc(cmdDisplay)}</div>
+          ${probeText ? `<div class="${probeClass}">${esc(probeText)}</div>` : ""}
           <div class="agent-cfg-actions">
-            <div style="display:flex;gap:6px">
-              <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-test-agent="${esc(item.agent)}" ${probe?.testing ? "disabled" : ""}>测试握手</button>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-test-agent="${esc(item.agent)}" ${probe?.testing ? "disabled" : ""}>测试</button>
               <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-edit-agent="${esc(item.agent)}">配置</button>
+              ${item.enabled === false ? "" : isConfiguredLead ? `<button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-default-lead="" title="恢复为自动选择第一个就绪的 Agent">取消默认主导</button>` : `<button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-default-lead="${esc(item.agent)}">设为默认主导</button>`}
             </div>
-            ${item.builtin ? `<span class="mono" style="font-size:10.5px;color:var(--faint)">id=${esc(item.agent)}</span>` : `<button type="button" class="alma-btn alma-btn-danger alma-btn-sm" data-del-agent="${esc(item.agent)}">移除</button>`}
+            ${item.builtin ? "" : `<button type="button" class="alma-btn alma-btn-danger alma-btn-sm" data-del-agent="${esc(item.agent)}">移除</button>`}
           </div>
         </div>`;
     })
     .join("");
 
   container.innerHTML = `
-    <div class="panel-sec-head">
-      <div>
-        <div class="panel-sec-title"><span class="num">04</span>/ ACP Agent 横向扩展接入</div>
-        <div class="panel-sec-sub">统一通过 stdio ACP 协议纳管本地 CLI（claude / codex / agy / opencode / kimi 及自定义 Agent），复用权限审批、资源桥接与 Token 统计</div>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0">
-        <button id="refreshAgentsBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button">刷新状态</button>
-        <button id="addCustomAgentBtn" class="alma-btn alma-btn-primary alma-btn-sm" type="button">${INTERACTIVE_STATE.showForm ? "收起表单" : "+ 接入自定义 Agent"}</button>
+    <div class="panel-toolbar agents-toolbar">
+      <span></span>
+      <div style="display:flex;gap:8px">
+        <button id="refreshAgentsBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button">刷新</button>
+        <button id="addCustomAgentBtn" class="alma-btn alma-btn-primary alma-btn-sm" type="button">${INTERACTIVE_STATE.showForm ? "收起" : "添加 Agent"}</button>
       </div>
     </div>
     ${formHtml}
@@ -598,6 +728,7 @@ function renderAgentsView() {
         INTERACTIVE_STATE.editingId = null;
         renderAgentsView();
       } else {
+        INTERACTIVE_STATE.formMode = "simple";
         openFormWithTemplate({
           id: "",
           label: "",
@@ -607,6 +738,7 @@ function renderAgentsView() {
           color: "#3f6212",
           description: "",
         });
+        void loadAgentPresets();
       }
     };
   }
@@ -623,15 +755,50 @@ function renderAgentsView() {
   const form = document.getElementById("agentRegistryForm");
   if (form) form.onsubmit = saveAgentForm;
 
-  container.querySelectorAll("[data-agent-tpl]").forEach((btn) => {
+  container.querySelectorAll("[data-form-mode]").forEach((btn) => {
     btn.onclick = () => {
-      const tpl = QUICK_TEMPLATES[Number(btn.dataset.agentTpl)];
-      if (tpl) openFormWithTemplate(tpl);
+      captureAgentFormValues();
+      INTERACTIVE_STATE.formMode = btn.dataset.formMode;
+      renderAgentsView();
     };
   });
+  const fillModelsBtn = document.getElementById("fillDiscoveredModelsBtn");
+  if (fillModelsBtn) {
+    fillModelsBtn.onclick = () => {
+      const area = document.getElementById("agentCfgModels");
+      if (area) area.value = discoveredIds.join("\n");
+    };
+  }
+
+  container.querySelectorAll("[data-add-preset]").forEach((btn) => {
+    btn.onclick = () => void addAgentPreset(btn.dataset.addPreset);
+  });
+  container.querySelectorAll("[data-fill-preset]").forEach((btn) => {
+    btn.onclick = () => {
+      const preset = (INTERACTIVE_STATE.presets || []).find((p) => p.id === btn.dataset.fillPreset);
+      if (preset) {
+        openFormWithTemplate({ ...preset, argsText: preset.args.join(" ") });
+      }
+    };
+  });
+  const assistInput = document.getElementById("agentAssistInput");
+  const assistBtn = document.getElementById("agentAssistBtn");
+  if (assistInput && assistBtn) {
+    assistBtn.onclick = () => void askAgentToRegister(assistInput.value);
+    assistInput.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void askAgentToRegister(assistInput.value);
+      }
+    };
+  }
 
   container.querySelectorAll("[data-toggle-agent]").forEach((el) => {
     el.onchange = () => void toggleAgentEnabled(el.dataset.toggleAgent, el.checked);
+  });
+
+  container.querySelectorAll("[data-default-lead]").forEach((btn) => {
+    btn.onclick = () => void setDefaultLeadAgent(btn.dataset.defaultLead);
   });
 
   container.querySelectorAll("[data-test-agent]").forEach((btn) => {
@@ -665,7 +832,7 @@ window.HUB_INTERACTIVE = {
   renderQuestions,
   renderAgentsView,
   onAgentsUpdated: () => {
-    if (app?.STATE.stageView === "agents") {
+    if (app?.isAgentsViewOpen?.()) {
       renderAgentsView();
     }
   },
@@ -675,13 +842,13 @@ if (app) {
   const prevOnStateChange = app.onStateChange;
   app.onStateChange = () => {
     prevOnStateChange?.();
-    if (app.STATE.stageView === "agents") {
+    if (app.isAgentsViewOpen?.()) {
       renderAgentsView();
     } else if (app.STATE.stageView === "chat") {
       renderQuestions();
     }
   };
-  if (app.STATE.stageView === "agents") {
+  if (app.isAgentsViewOpen?.()) {
     renderAgentsView();
   }
 }

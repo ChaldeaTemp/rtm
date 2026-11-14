@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -134,13 +134,17 @@ function resolveGenericCommand(
   const trimmed = rawCommand.trim();
   const isPathLike = trimmed.includes("/") || trimmed.includes("\\") || path.isAbsolute(trimmed);
   let resolvedCmd = trimmed;
+  // Windows cannot spawn an extensionless file (e.g. the POSIX shim npm puts next to
+  // `tool.cmd`), so a name without an extension resolves to its .exe/.cmd/.bat sibling first.
+  const winExts = process.platform === "win32" && !path.extname(trimmed) ? [".exe", ".cmd", ".bat"] : [];
   if (isPathLike) {
     resolvedCmd = path.isAbsolute(trimmed) ? trimmed : path.resolve(PROJECT_ROOT, trimmed);
+    const sibling = winExts.map((ext) => `${resolvedCmd}${ext}`).find((file) => fs.existsSync(file));
+    if (sibling) {
+      resolvedCmd = sibling;
+    }
   } else {
-    const pathCandidates =
-      process.platform === "win32"
-        ? [trimmed, `${trimmed}.exe`, `${trimmed}.cmd`, `${trimmed}.bat`]
-        : [trimmed];
+    const pathCandidates = [...winExts.map((ext) => `${trimmed}${ext}`), trimmed];
     resolvedCmd = findExecutableInPath(pathCandidates) ?? trimmed;
   }
 
@@ -239,10 +243,17 @@ export function resolveAdapterCommand(agent: AgentId, customDef?: AgentDefinitio
 
   if (agent === "opencode") {
     const opencodeExe = resolveOpencodeExecutable(localSecrets);
+    const env: Record<string, string> = { ...mergedEnv };
+    if (!env.OPENCODE_CONFIG_CONTENT && !process.env.OPENCODE_CONFIG_CONTENT) {
+      env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+        tools: { question: false },
+        permission: { question: "deny" },
+      });
+    }
     return {
       command: opencodeExe ?? (process.platform === "win32" ? "opencode.exe" : "opencode"),
       args: customDef?.args?.length ? customDef.args : ["acp"],
-      env: envOut,
+      env: Object.keys(env).length ? env : undefined,
     };
   }
 
@@ -289,7 +300,8 @@ export function resolveAdapterCommand(agent: AgentId, customDef?: AgentDefinitio
 }
 
 /**
- * Resolves the direct Node + tsx CLI command for spawning the local peer MCP server without .cmd shims.
+ * Resolves the direct Node launch command for the local peer MCP server,
+ * preferring freshly built dist/ JS to skip tsx/esbuild compilation overhead.
  */
 export function resolvePeerMcpLaunch(params: {
   hubUrl: string;
@@ -302,40 +314,40 @@ export function resolvePeerMcpLaunch(params: {
   const mcpTs = path.join(PROJECT_ROOT, "src", "mcp", "peer-mcp-server.ts");
   const mcpJs = path.join(PROJECT_ROOT, "dist", "mcp", "peer-mcp-server.js");
   const extraGroupArgs = params.groupId ? ["--group-id", params.groupId] : [];
+  const commonFlags = [
+    "--hub-url",
+    params.hubUrl,
+    "--caller",
+    params.callerAgent,
+    "--caller-session",
+    params.callerSession,
+    "--depth",
+    String(params.depth),
+    ...extraGroupArgs,
+  ];
 
-  if (fs.existsSync(mcpTs) && fs.existsSync(tsxCli)) {
+  const jsExists = fs.existsSync(mcpJs);
+  const tsExists = fs.existsSync(mcpTs);
+  const jsFresh =
+    jsExists && (!tsExists || fs.statSync(mcpJs).mtimeMs >= fs.statSync(mcpTs).mtimeMs - 500);
+
+  if (jsFresh) {
     return {
       command: process.execPath,
-      args: [
-        tsxCli,
-        mcpTs,
-        "--hub-url",
-        params.hubUrl,
-        "--caller",
-        params.callerAgent,
-        "--caller-session",
-        params.callerSession,
-        "--depth",
-        String(params.depth),
-        ...extraGroupArgs,
-      ],
+      args: [mcpJs, ...commonFlags],
+    };
+  }
+
+  if (tsExists && fs.existsSync(tsxCli)) {
+    return {
+      command: process.execPath,
+      args: [tsxCli, mcpTs, ...commonFlags],
     };
   }
 
   return {
     command: process.execPath,
-    args: [
-      mcpJs,
-      "--hub-url",
-      params.hubUrl,
-      "--caller",
-      params.callerAgent,
-      "--caller-session",
-      params.callerSession,
-      "--depth",
-      String(params.depth),
-      ...extraGroupArgs,
-    ],
+    args: [mcpJs, ...commonFlags],
   };
 }
 
@@ -360,14 +372,80 @@ function readClaudeSettingsEnv(): Record<string, string> {
   }
 }
 
-function checkAgentAuthReady(
+export interface AgentAuthResult {
+  authReady: boolean;
+  authHint?: string;
+}
+
+/**
+ * An auth check that needs a child process. Kept as data so the same probe can run
+ * synchronously (CLI `status`) or asynchronously (hub server, cached by the registry).
+ */
+export interface AuthProbeSpec {
+  /** Stable cache key: agent + probe kind + executable. */
+  key: string;
+  command: string;
+  args: string[];
+  timeoutMs: number;
+  /** Returns true when stdout of a zero-exit run proves the agent is logged in. */
+  interpret: (stdout: string) => boolean;
+  failHint: string;
+}
+
+export type AgentAuthPlan = { result: AgentAuthResult } | { probe: AuthProbeSpec };
+
+function interpretProbeOutput(
+  spec: AuthProbeSpec,
+  exitOk: boolean,
+  stdout: string | undefined | null,
+): AgentAuthResult {
+  try {
+    if (exitOk && stdout && spec.interpret(stdout)) {
+      return { authReady: true };
+    }
+  } catch {
+    // Fall through to authHint
+  }
+  return { authReady: false, authHint: spec.failHint };
+}
+
+export function runAuthProbeSync(spec: AuthProbeSpec): AgentAuthResult {
+  try {
+    const res = spawnSync(spec.command, spec.args, {
+      encoding: "utf8",
+      timeout: spec.timeoutMs,
+      windowsHide: true,
+    });
+    return interpretProbeOutput(spec, res.status === 0, res.stdout);
+  } catch {
+    return { authReady: false, authHint: spec.failHint };
+  }
+}
+
+export function runAuthProbe(spec: AuthProbeSpec): Promise<AgentAuthResult> {
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        spec.command,
+        spec.args,
+        { encoding: "utf8", timeout: spec.timeoutMs, windowsHide: true },
+        (err, stdout) => resolve(interpretProbeOutput(spec, !err, stdout)),
+      );
+    } catch {
+      resolve({ authReady: false, authHint: spec.failHint });
+    }
+  });
+}
+
+/**
+ * Cheap part of the auth check (env vars, secrets, credential files). Returns a final
+ * result when that is enough, otherwise the child-process probe that still has to run.
+ */
+export function planAgentAuth(
   agent: AgentId,
   localSecrets: Record<string, string>,
   customDef?: AgentDefinition,
-): {
-  authReady: boolean;
-  authHint?: string;
-} {
+): AgentAuthPlan {
   if (agent === "claude") {
     const claudeEnv = readClaudeSettingsEnv();
     const hasKey = Boolean(
@@ -379,59 +457,41 @@ function checkAgentAuthReady(
         claudeEnv.ANTHROPIC_AUTH_TOKEN,
     );
     if (hasKey) {
-      return { authReady: true };
+      return { result: { authReady: true } };
     }
 
     const reclaudeExe = resolveReclaudeExecutable(localSecrets);
     if (reclaudeExe) {
-      try {
-        const res = spawnSync(reclaudeExe, ["status"], {
-          encoding: "utf8",
-          timeout: 4000,
-          windowsHide: true,
-        });
-        if (res.status === 0 && res.stdout) {
-          const claudeBlock = res.stdout.match(/\[claude\]([\s\S]*?)(?:\r?\n\[|$)/i)?.[1] ?? "";
-          const hasLocalBind = /本机绑定[：:]\s*[1-9]\d*/.test(claudeBlock);
-          const hasDefaultOrg = /缺省组织[：:]\s*\S+/.test(claudeBlock) && !/未登录/.test(claudeBlock);
-          if (hasLocalBind || hasDefaultOrg) {
-            return { authReady: true };
-          }
-        }
-      } catch {
-        // Fall through to reclaude authHint
-      }
       return {
-        authReady: false,
-        authHint: "reclaude 未绑定 Claude 账号：请运行 reclaude login 完成绑定",
+        probe: {
+          key: `claude:reclaude:${reclaudeExe}`,
+          command: reclaudeExe,
+          args: ["status"],
+          timeoutMs: 4000,
+          interpret: (stdout) => {
+            const claudeBlock = stdout.match(/\[claude\]([\s\S]*?)(?:\r?\n\[|$)/i)?.[1] ?? "";
+            // reclaude localizes its output by LANG, so accept both the Chinese and English wording.
+            const hasLocalBind = /(?:本机绑定|local bindings?)[：:]\s*[1-9]\d*/i.test(claudeBlock);
+            const hasDefaultOrg =
+              /(?:缺省组织|default organization)[：:]\s*\S+/i.test(claudeBlock) &&
+              !/未登录|not logged in/i.test(claudeBlock);
+            return hasLocalBind || hasDefaultOrg;
+          },
+          failHint: "reclaude 未绑定 Claude 账号：请运行 reclaude login 完成绑定",
+        },
       };
     }
 
-    try {
-      const res =
-        process.platform === "win32"
-          ? spawnSync("cmd.exe", ["/d", "/c", "claude", "auth", "status"], {
-              encoding: "utf8",
-              timeout: 4000,
-              windowsHide: true,
-            })
-          : spawnSync("claude", ["auth", "status"], {
-              encoding: "utf8",
-              timeout: 4000,
-            });
-      if (res.status === 0 && res.stdout) {
-        const parsed = JSON.parse(res.stdout) as { loggedIn?: boolean };
-        if (parsed.loggedIn === true) {
-          return { authReady: true };
-        }
-      }
-    } catch {
-      // Fall through to authHint
-    }
-
+    const viaCmd = process.platform === "win32";
     return {
-      authReady: false,
-      authHint: "Claude CLI 未登录：请运行 claude login，或在 .agent-hub/secrets.json 配置 ANTHROPIC_API_KEY",
+      probe: {
+        key: "claude:cli-auth-status",
+        command: viaCmd ? "cmd.exe" : "claude",
+        args: viaCmd ? ["/d", "/c", "claude", "auth", "status"] : ["auth", "status"],
+        timeoutMs: 4000,
+        interpret: (stdout) => (JSON.parse(stdout) as { loggedIn?: boolean }).loggedIn === true,
+        failHint: "Claude CLI 未登录：请运行 claude login，或在 .agent-hub/secrets.json 配置 ANTHROPIC_API_KEY",
+      },
     };
   }
 
@@ -442,12 +502,14 @@ function checkAgentAuthReady(
         localSecrets.OPENAI_API_KEY ||
         fs.existsSync(codexAuthFile),
     );
-    return hasAuth
-      ? { authReady: true }
-      : {
-          authReady: false,
-          authHint: "Codex 未认证：请运行 codex login 或在环境变量/.agent-hub/secrets.json 配置 OPENAI_API_KEY",
-        };
+    return {
+      result: hasAuth
+        ? { authReady: true }
+        : {
+            authReady: false,
+            authHint: "Codex 未认证：请运行 codex login 或在环境变量/.agent-hub/secrets.json 配置 OPENAI_API_KEY",
+          },
+    };
   }
 
   if (agent === "opencode") {
@@ -462,12 +524,14 @@ function checkAgentAuthReady(
         fs.existsSync(ocDataAuth) ||
         fs.existsSync(ocConfig),
     );
-    return hasAuth
-      ? { authReady: true }
-      : {
-          authReady: false,
-          authHint: "OpenCode 未检测到配置或凭证：请运行 opencode auth login 或检查 ~/.config/opencode/opencode.json",
-        };
+    return {
+      result: hasAuth
+        ? { authReady: true }
+        : {
+            authReady: false,
+            authHint: "OpenCode 未检测到配置或凭证：请运行 opencode auth login 或检查 ~/.config/opencode/opencode.json",
+          },
+    };
   }
 
   if (agent === "kimi") {
@@ -490,65 +554,66 @@ function checkAgentAuthReady(
         hasCredDir(kimiCredsDir) ||
         hasCredDir(kimiLegacyCredsDir),
     );
-    return hasAuth
-      ? { authReady: true }
-      : {
-          authReady: false,
-          authHint: "Kimi CLI 未检测到登录凭证：请运行 kimi login 或在环境变量配置 KIMI_API_KEY",
-        };
+    return {
+      result: hasAuth
+        ? { authReady: true }
+        : {
+            authReady: false,
+            authHint: "Kimi CLI 未检测到登录凭证：请运行 kimi login 或在环境变量配置 KIMI_API_KEY",
+          },
+    };
   }
 
   if (agent === "agy") {
     const hasGeminiKey = Boolean(process.env.GEMINI_API_KEY || localSecrets.GEMINI_API_KEY);
     if (hasGeminiKey) {
-      return { authReady: true };
+      return { result: { authReady: true } };
     }
 
     const adapterMode = (process.env.AGY_ADAPTER_MODE || localSecrets.AGY_ADAPTER_MODE || "").toLowerCase();
     const agyExe = adapterMode === "sdk" ? undefined : resolveAgyExecutable(localSecrets);
     if (agyExe) {
+      const failHint =
+        "Antigravity CLI 已安装但未登录：请在终端运行 agy 或 agy acp --login 完成一次 Google 账号登录（无需配置 GEMINI_API_KEY）";
       if (process.platform === "win32") {
-        try {
-          const res = spawnSync("cmdkey", ["/list"], {
-            encoding: "utf8",
-            timeout: 3000,
-            windowsHide: true,
-          });
-          if (res.status === 0 && /gemini:antigravity/i.test(res.stdout ?? "")) {
-            return { authReady: true };
-          }
-        } catch {
-          // Fall through to authHint
-        }
-      } else {
-        const cliDir = path.join(os.homedir(), ".gemini", "antigravity-cli");
-        if (
-          fs.existsSync(path.join(cliDir, "oauth_creds.json")) ||
-          fs.existsSync(path.join(cliDir, "credentials.json"))
-        ) {
-          return { authReady: true };
-        }
+        return {
+          probe: {
+            key: "agy:cmdkey",
+            command: "cmdkey",
+            args: ["/list"],
+            timeoutMs: 3000,
+            interpret: (stdout) => /gemini:antigravity/i.test(stdout),
+            failHint,
+          },
+        };
       }
-      return {
-        authReady: false,
-        authHint:
-          "Antigravity CLI 已安装但未登录：请在终端运行 agy 或 agy acp --login 完成一次 Google 账号登录（无需配置 GEMINI_API_KEY）",
-      };
+      const cliDir = path.join(os.homedir(), ".gemini", "antigravity-cli");
+      const hasCreds =
+        fs.existsSync(path.join(cliDir, "oauth_creds.json")) ||
+        fs.existsSync(path.join(cliDir, "credentials.json"));
+      return { result: hasCreds ? { authReady: true } : { authReady: false, authHint: failHint } };
     }
 
     return {
-      authReady: false,
-      authHint: "未检测到 GEMINI_API_KEY：请在环境变量或 .agent-hub/secrets.json 中设置以启用 google-antigravity SDK",
+      result: {
+        authReady: false,
+        authHint: "未检测到 GEMINI_API_KEY：请在环境变量或 .agent-hub/secrets.json 中设置以启用 google-antigravity SDK",
+      },
     };
   }
 
-  return { authReady: true };
+  return { result: { authReady: true } };
 }
 
 /**
  * Checks whether local entrypoints for each adapter exist on disk and whether local auth is ready.
+ * Auth checks that need a child process go through `resolveProbe`; the default runs them
+ * synchronously (blocking), callers on a hot path pass a cache lookup instead.
  */
-export function checkAdaptersHealth(definitions?: AgentDefinition[]): AdapterHealth[] {
+export function checkAdaptersHealth(
+  definitions?: AgentDefinition[],
+  resolveProbe: (spec: AuthProbeSpec, def: AgentDefinition) => AgentAuthResult = runAuthProbeSync,
+): AdapterHealth[] {
   const localSecrets = loadLocalSecrets();
   const defs: AgentDefinition[] =
     definitions ??
@@ -565,7 +630,8 @@ export function checkAdaptersHealth(definitions?: AgentDefinition[]): AdapterHea
     const resolved = resolveAdapterCommand(agent, def);
     const argv = [resolved.command, ...resolved.args];
     const targetFile = resolved.entrypointFile;
-    const auth = checkAgentAuthReady(agent, localSecrets, def);
+    const plan = planAgentAuth(agent, localSecrets, def);
+    const auth = "result" in plan ? plan.result : resolveProbe(plan.probe, def);
     const base: Omit<AdapterHealth, "available"> = {
       agent,
       label: def.label,
@@ -581,6 +647,8 @@ export function checkAdaptersHealth(definitions?: AgentDefinition[]): AdapterHea
       customArgs: def.args,
       defaultModel: def.defaultModel,
       defaultEffort: def.defaultEffort,
+      models: def.models,
+      env: def.env,
     };
 
     const cmdExists =

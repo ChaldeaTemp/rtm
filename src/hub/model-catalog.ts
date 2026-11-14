@@ -98,11 +98,15 @@ export function extractModelCatalogFromConfigOptions(
     } else if (category === "thought_level" || EFFORT_ID_NAMES.has(id)) {
       const parsedEffort = flattenSelectOptions(item.options);
       if (parsedEffort.length > 0) {
+        const preferredFallback =
+          parsedEffort.find(
+            (o) => o.id === "default" || o.id === "auto" || o.id === "medium" || o.id === "normal",
+          ) ?? parsedEffort[0]!;
+        const rawCurrent = typeof item.currentValue === "string" ? item.currentValue.trim() : "";
         effort = {
           configId: id,
           name: typeof item.name === "string" && item.name.trim() ? item.name.trim() : id,
-          currentValue:
-            typeof item.currentValue === "string" ? item.currentValue.trim() : parsedEffort[0]!.id,
+          currentValue: rawCurrent || preferredFallback.id,
           options: parsedEffort,
         };
       }

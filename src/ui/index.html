@@ -1,19 +1,13 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" translate="no">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Agent Hub — 多 Agent 任务协同台</title>
-  <link id="appFavicon" rel="icon" type="image/svg+xml" href="/ui/icon.svg" />
+  <meta name="google" content="notranslate" />
+  <title>Quorum</title>
+  <link id="appFavicon" rel="icon" type="image/png" href="/ui/icon-64.png" />
+  <link rel="apple-touch-icon" href="/ui/icon-192.png" />
   <link rel="manifest" href="/manifest.webmanifest" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link
-    href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap"
-    rel="stylesheet"
-    media="print"
-    onload="this.media='all'"
-  />
   <link rel="stylesheet" href="/ui/styles.css" />
   <link rel="stylesheet" href="/ui/panels.css" />
 </head>
@@ -22,6 +16,7 @@
   <script>
     try {
       if (localStorage.getItem("agent-hub-theme") === "dark") document.body.classList.add("dark");
+      if (localStorage.getItem("agent-hub-skin") === "classic") document.body.dataset.skin = "classic";
     } catch (e) {}
   </script>
   <div id="workbench" class="workbench">
@@ -30,8 +25,8 @@
       <div class="brand-bar">
         <div class="brand-top">
           <div class="brand-title">
-            <span class="brand-mark">A</span>
-            <span>agent-hub</span>
+            <img class="brand-mark" src="/ui/icon-64.png" alt="" width="26" height="26" />
+            <span>Quorum</span>
           </div>
           <div class="ws-status">
             <span id="portBadge" class="mono"></span>
@@ -41,13 +36,13 @@
         </div>
         <div class="cwd-row">
           <div id="cwdPill" class="cwd-line" title="当前工作目录">-</div>
-          <button id="pickCwdBtn" class="mini-icon-btn cwd-pick-btn" type="button" title="选择并切换默认项目文件夹">目录</button>
+          <button id="pickCwdBtn" class="mini-icon-btn cwd-pick-btn" type="button" title="查看或修改这个任务的工作目录和附加目录">目录</button>
         </div>
       </div>
 
       <div class="new-task-area">
         <button id="toggleNewTaskBtn" class="alma-btn alma-btn-primary new-task-main" type="button">
-          + 新建并行任务
+          新建任务
         </button>
         <div id="quickLaunchRow" class="quick-launch-row" title="一键以指定主导 Agent 启动新的并行任务">
           <button class="quick-btn" data-quick-lead="claude" type="button">+ claude</button>
@@ -70,9 +65,17 @@
               type="text"
               placeholder="工作目录（留空沿用当前）"
               autocomplete="off"
+              list="projectChoices"
             />
             <button id="newTaskPickCwdBtn" type="button" class="alma-btn alma-btn-outline alma-btn-sm">浏览</button>
           </div>
+          <datalist id="projectChoices"></datalist>
+          <textarea
+            id="newTaskExtraDirsInput"
+            class="text-input new-task-extra-dirs"
+            rows="2"
+            placeholder="附加目录（可选，每行一个）"
+          ></textarea>
           <div class="popover-agents" id="newTaskAgents">
             <button type="button" class="popover-agent-opt active" data-agent="claude">claude</button>
             <button type="button" class="popover-agent-opt" data-agent="codex">codex</button>
@@ -86,7 +89,7 @@
       </div>
 
       <div class="section-label">
-        <span><span class="num">01</span>/ 任务分组</span>
+        <span>任务</span>
         <span id="groupCountBadge" class="mono">0</span>
       </div>
 
@@ -95,7 +98,7 @@
           id="groupSearchInput"
           class="text-input group-search-input"
           type="search"
-          placeholder="搜索任务 / Agent..."
+          placeholder="搜索"
           autocomplete="off"
         />
         <button id="toggleArchivedBtn" class="mini-filter-btn" type="button" title="查看或隐藏已归档任务" hidden>
@@ -112,11 +115,9 @@
           <span class="adapter-pill" data-adapter="agy"><span class="dot" data-auth-dot="agy"></span>agy</span>
         </div>
         <div class="footer-actions">
-          <span class="kbd-hint" title="Ctrl+K 快速切换任务 · Ctrl+N 新建任务 · Esc 停止当前运行">Ctrl+K 切换 · Esc 停止</span>
+          <span class="kbd-hint" title="Ctrl+K 快速切换任务 · Ctrl+N 新建任务 · Esc 停止当前运行">Ctrl+K</span>
           <div class="footer-actions-right">
-            <button id="themeToggleBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="切换浅色 / 深色主题">
-              深色
-            </button>
+            <button id="settingsBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="设置（外观、Agent、日志）">设置</button>
             <button id="quitHubBtn" class="alma-btn alma-btn-danger alma-btn-sm" type="button" title="停止后台服务并关闭应用" hidden>
               退出
             </button>
@@ -130,23 +131,18 @@
       <nav class="stage-mode-bar" aria-label="工作台视图">
         <div class="mode-tabs">
           <button class="mode-tab active" data-stage-view="chat" type="button">
-            <span class="num">01</span>
-            <span>协同对话</span>
+            <span>对话</span>
           </button>
           <button class="mode-tab" data-stage-view="resources" type="button">
-            <span class="num">02</span>
-            <span>共享资源</span>
+            <span>资源</span>
             <span id="navResBadge" class="mode-badge">0</span>
           </button>
           <button class="mode-tab" data-stage-view="telemetry" type="button">
-            <span class="num">03</span>
-            <span>上下文与消耗</span>
+            <span>用量</span>
             <span id="navTokBadge" class="mode-badge">0</span>
           </button>
-          <button class="mode-tab" data-stage-view="agents" type="button">
-            <span class="num">04</span>
-            <span>Agent 接入</span>
-            <span id="navAgentsBadge" class="mode-badge">5</span>
+          <button class="mode-tab" data-stage-view="workflow" type="button">
+            <span>工作流</span>
           </button>
         </div>
         <button id="liveContextPill" class="context-pill" type="button" title="查看当前会话上下文注入与 Token 消耗">
@@ -157,7 +153,7 @@
       <header id="chatStageHeader" class="stage-header">
         <div class="stage-title-group">
           <h1 id="stageTaskTitle" class="stage-task-title" title="点击重命名当前任务">-</h1>
-          <span id="streamBadge" class="stream-badge">主导会话</span>
+          <span id="streamBadge" class="stream-badge"></span>
         </div>
 
         <div class="stage-controls">
@@ -173,13 +169,13 @@
           </button>
 
           <select id="permSelect" class="perm-select" title="工具审批策略">
-            <option value="approve-all">权限：自动批准</option>
-            <option value="approve-reads">权限：仅只读放行</option>
-            <option value="manual">权限：全部人工确认</option>
+            <option value="approve-all">自动批准</option>
+            <option value="approve-reads">只读放行</option>
+            <option value="manual">逐项确认</option>
           </select>
 
           <button id="exportGroupBtn" class="alma-btn alma-btn-outline" type="button" title="将当前任务对话与委派记录导出为 Markdown">
-            导出 MD
+            导出
           </button>
 
           <button id="toggleInspectorBtn" class="alma-btn alma-btn-outline" type="button">
@@ -197,7 +193,7 @@
 
       <section id="resourcesView" class="stage-panel" hidden></section>
       <section id="telemetryView" class="stage-panel" hidden></section>
-      <section id="agentsView" class="stage-panel" hidden></section>
+      <section id="workflowView" class="stage-panel" hidden></section>
 
       <footer id="chatComposerWrap" class="composer-wrap">
         <div class="alma-box composer-box">
@@ -206,54 +202,111 @@
           <span class="alma-box-corner-tr">+</span>
           <span class="alma-box-corner-bl">+</span>
           <span class="alma-box-corner-br">+</span>
+          <div id="composerAttachments" class="composer-attachments" hidden></div>
           <textarea
             id="promptInput"
             class="composer-input"
             rows="2"
-            placeholder="输入任务指令，Enter 发送，Shift+Enter 换行；当前任务与其它并行任务互不阻塞。"
+            placeholder="给 Agent 发消息"
           ></textarea>
           <div class="composer-foot">
             <div class="composer-model-bar">
               <select id="modelSelect" class="perm-select model-select" title="选择当前会话 / 主导 Agent 模型"></select>
               <select id="effortSelect" class="perm-select effort-select" title="选择思考 / 推理强度" hidden></select>
-              <button id="refreshModelsBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="实时握手探测并刷新该 Agent 可用模型">↻ 模型</button>
+              <button id="refreshModelsBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="实时握手探测并刷新该 Agent 可用模型" aria-label="刷新模型列表">↻</button>
+              <input id="imageFileInput" type="file" multiple hidden />
+              <button id="attachImageBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="添加图片或文件（也可以直接粘贴，或拖到输入框里）">附件</button>
             </div>
             <div class="composer-actions">
               <button id="stopSessionBtn" class="alma-btn alma-btn-danger" type="button" hidden>停止</button>
-              <button id="sendBtn" class="alma-btn alma-btn-primary" type="button">发送 ↵</button>
+              <button id="sendBtn" class="alma-btn alma-btn-primary" type="button">发送</button>
             </div>
           </div>
+        </div>
+        <div id="archivedBar" class="archived-bar" hidden>
+          <span>这个任务已归档，只能查看。</span>
+          <button id="restoreArchivedBtn" class="alma-btn alma-btn-primary alma-btn-sm" type="button">恢复任务</button>
         </div>
         <div id="composerHint" class="composer-hint">主导会话可调用 peer_ask / peer_dispatch 委派子会话</div>
         <button id="jumpLatestBtn" class="jump-latest-btn" type="button" hidden>↓ 回到最新消息</button>
       </footer>
     </main>
 
-    <!-- Right Inspector -->
+    <!-- Right Inspector: everything about the session on screen -->
     <aside class="inspector">
-      <div class="inspector-section sessions-sec">
-        <div class="section-label">
-          <span><span class="num">01</span>/ 当前任务会话</span>
-          <span id="inspSessionCount" class="mono">0</span>
-        </div>
-        <div id="inspSessions" class="inspector-list"></div>
-      </div>
-
-      <div class="inspector-section tasks-sec">
-        <div class="section-label">
-          <span><span class="num">02</span>/ 协同委派记录</span>
-          <span id="inspTaskCount" class="mono">0</span>
-        </div>
-        <div id="inspTasks" class="inspector-list"></div>
-      </div>
-
-      <div class="inspector-section logs-sec">
-        <div class="section-label">
-          <span><span class="num">03</span>/ 事件日志</span>
-        </div>
-        <div id="logFeed" class="log-feed"></div>
+      <div id="inspHead" class="insp-head"></div>
+      <div class="insp-scroll">
+        <details class="insp-sec" open>
+          <summary><span>进度</span><span id="inspProgressCount" class="insp-count"></span></summary>
+          <div id="inspProgress" class="insp-body"></div>
+        </details>
+        <details class="insp-sec" open>
+          <summary><span>上下文</span></summary>
+          <div id="inspContext" class="insp-body"></div>
+        </details>
+        <details class="insp-sec" open>
+          <summary><span>子代理</span><span id="inspSessionCount" class="insp-count">0</span></summary>
+          <div id="inspSessions" class="insp-body"></div>
+        </details>
+        <details class="insp-sec" open>
+          <summary><span>文件</span><span id="inspFileCount" class="insp-count">0</span></summary>
+          <div id="inspFiles" class="insp-body"></div>
+        </details>
+        <details class="insp-sec" open>
+          <summary><span>产物</span><span id="inspArtifactCount" class="insp-count">0</span></summary>
+          <div id="inspArtifacts" class="insp-body"></div>
+        </details>
       </div>
     </aside>
+  </div>
+
+  <!-- Settings dialog: appearance, general, agents, log -->
+  <div id="settingsBackdrop" class="alma-modal-backdrop settings-backdrop" hidden>
+    <div class="settings-dialog" role="dialog" aria-modal="true" aria-label="设置">
+      <nav class="settings-nav" aria-label="设置分类">
+        <div class="settings-nav-title">设置</div>
+        <button type="button" data-settings-tab="general" class="active">通用</button>
+        <button type="button" data-settings-tab="agents">Agent <span id="navAgentsBadge" class="mode-badge">5</span></button>
+        <button type="button" data-settings-tab="logs">日志</button>
+      </nav>
+      <div class="settings-main">
+        <button id="settingsCloseBtn" class="settings-close" type="button" aria-label="关闭设置">×</button>
+        <section class="settings-pane" data-settings-pane="general">
+          <h2>通用</h2>
+          <div class="settings-row">
+            <div>
+              <div class="settings-label">风格</div>
+              <div class="settings-note">经典是原来的米色背景和方角框线。</div>
+            </div>
+            <div class="settings-seg" id="skinSeg">
+              <button type="button" data-skin="modern">简约</button>
+              <button type="button" data-skin="classic">经典</button>
+            </div>
+          </div>
+          <div class="settings-row">
+            <div class="settings-label">主题</div>
+            <button id="themeToggleBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button" title="切换浅色 / 深色主题">
+              深色
+            </button>
+          </div>
+          <label class="settings-row">
+            <div>
+              <div class="settings-label">自动命名任务</div>
+              <div class="settings-note">首轮对话结束时由主导 Agent 为任务起一个短标题。</div>
+            </div>
+            <input id="autoTitleToggle" type="checkbox" />
+          </label>
+        </section>
+        <section class="settings-pane" data-settings-pane="agents" hidden>
+          <h2>Agent</h2>
+          <section id="agentsView" class="settings-agents"></section>
+        </section>
+        <section class="settings-pane" data-settings-pane="logs" hidden>
+          <h2>日志</h2>
+          <div id="logFeed" class="log-feed"></div>
+        </section>
+      </div>
+    </div>
   </div>
 
   <!-- In-App Dialog Modal (replaces native prompt / confirm) -->
