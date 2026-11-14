@@ -52,9 +52,64 @@ async function addAgentPreset(id) {
     app.renderAgentControls?.();
     renderAgentsView();
     void loadAgentPresets();
+    // 刚加进来的 Agent 如果还没登录，直接带着走完登录，不用自己去终端里敲命令
+    const added = (app.STATE.agents || []).find((a) => a.agent === id);
+    if (added && added.available && !added.authReady && added.canLogin) {
+      const go = await app.showConfirmModal({
+        title: `${added.label || id} 还没有登录`,
+        message: "登录后才能使用。现在打开登录窗口吗？",
+        confirmText: "去登录",
+        cancelText: "稍后",
+      });
+      if (go) await loginAgent(id);
+    }
     void probeAgentHandshake(id);
   } catch (err) {
     app.appendLog(`添加 ${id} 异常: ${err.message}`);
+  }
+}
+
+// 登录：后端在本机打开一个终端窗口跑这个 Agent 的登录命令；这里等用户说登录好了再复查状态
+async function loginAgent(id) {
+  const label = (app.STATE.agents || []).find((a) => a.agent === id)?.label || id;
+  try {
+    const res = await fetch("/api/agents/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      await app.showConfirmModal({ title: "没能打开登录窗口", message: data.error || `HTTP ${res.status}`, confirmText: "知道了" });
+      return;
+    }
+    for (;;) {
+      const done = await app.showConfirmModal({
+        title: `正在登录 ${label}`,
+        message: "已经打开一个终端窗口，按里面的提示完成登录（通常会跳转到浏览器）。完成后回到这里。",
+        confirmText: "我已登录",
+        cancelText: "稍后再说",
+      });
+      if (!done) return;
+      const check = await (await fetch("/api/agents/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).json();
+      app.STATE.agents = check.agents || app.STATE.agents;
+      app.renderAgentControls?.();
+      renderAgentsView();
+      const now = (app.STATE.agents || []).find((a) => a.agent === id);
+      if (now?.authReady) {
+        void probeAgentHandshake(id);
+        return;
+      }
+      const again = await app.showConfirmModal({
+        title: "还没有检测到登录",
+        message: now?.authHint || "登录窗口里的流程可能还没走完。",
+        confirmText: "再检查一次",
+        cancelText: "关闭",
+      });
+      if (!again) return;
+    }
+  } catch (err) {
+    app.appendLog(`登录 ${id} 异常: ${err.message}`);
   }
 }
 
@@ -695,6 +750,7 @@ function renderAgentsView() {
           ${probeText ? `<div class="${probeClass}">${esc(probeText)}</div>` : ""}
           <div class="agent-cfg-actions">
             <div style="display:flex;gap:6px;flex-wrap:wrap">
+              ${item.enabled !== false && item.available && !item.authReady && item.canLogin ? `<button type="button" class="alma-btn alma-btn-primary alma-btn-sm" data-login-agent="${esc(item.agent)}">登录</button>` : ""}
               <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-test-agent="${esc(item.agent)}" ${probe?.testing ? "disabled" : ""}>测试</button>
               <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-edit-agent="${esc(item.agent)}">配置</button>
               ${item.enabled === false ? "" : isConfiguredLead ? `<button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-default-lead="" title="恢复为自动选择第一个就绪的 Agent">取消默认主导</button>` : `<button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-default-lead="${esc(item.agent)}">设为默认主导</button>`}
@@ -799,6 +855,10 @@ function renderAgentsView() {
 
   container.querySelectorAll("[data-default-lead]").forEach((btn) => {
     btn.onclick = () => void setDefaultLeadAgent(btn.dataset.defaultLead);
+  });
+
+  container.querySelectorAll("[data-login-agent]").forEach((btn) => {
+    btn.onclick = () => void loginAgent(btn.dataset.loginAgent);
   });
 
   container.querySelectorAll("[data-test-agent]").forEach((btn) => {

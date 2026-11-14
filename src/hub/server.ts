@@ -36,7 +36,7 @@ import { ThreadLedger } from "./ledger.js";
 import { MemoryMonitor, type MemoryStatus } from "./memory.js";
 import { WorkflowTemplateStore } from "./workflow-templates.js";
 import { checkPortAvailable, findAvailablePort, pickNativeDirectory } from "./port-finder.js";
-import { PROJECT_ROOT } from "./process-tree.js";
+import { openTerminalWindow, PROJECT_ROOT, resolveAgentLoginCommand } from "./process-tree.js";
 import { WorkflowManager } from "./workflow.js";
 import { TaskContextStore } from "./task-context.js";
 import { HubStateStore } from "./state-store.js";
@@ -4462,6 +4462,26 @@ export class AgentHubServer {
           deleted,
           agents: this.registry.getHealthList(true),
         });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/agents/login") {
+        const input = AgentIdOnlySchema.parse(await readJsonBody(req));
+        const def = this.registry.getDefinition(input.id.trim().toLowerCase());
+        if (!def) throw new Error(`Unknown agent: ${input.id}`);
+        const login = resolveAgentLoginCommand(def.id);
+        if (!login) {
+          throw new Error(`RTM 不知道 ${def.label || def.id} 的登录命令，请按它的文档在终端里登录`);
+        }
+        const commandLine = openTerminalWindow(`RTM - ${def.label || def.id} login`, login.command, login.args);
+        sendJson(res, 200, { ok: true, commandLine });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/agents/refresh") {
+        await this.registry.refreshHealth();
+        this.broadcastAgentsUpdated();
+        sendJson(res, 200, { ok: true, agents: this.registry.getHealthList(true) });
         return;
       }
 

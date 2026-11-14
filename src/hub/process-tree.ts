@@ -1,4 +1,4 @@
-import { execFile, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -127,6 +127,63 @@ export function resolveKimiExecutable(localSecrets: Record<string, string>): str
   return findExecutableInPath(process.platform === "win32" ? ["kimi.exe"] : ["kimi"]);
 }
 
+let devinInstallDirCache: string | null | undefined;
+
+/** Where Devin Desktop is installed according to the Windows uninstall registry, if at all. */
+function devinInstallDirFromRegistry(): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  if (devinInstallDirCache !== undefined) return devinInstallDirCache ?? undefined;
+  devinInstallDirCache = null;
+  for (const hive of ["HKCU", "HKLM"]) {
+    try {
+      const out = spawnSync(
+        "reg",
+        ["query", `${hive}\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall`, "/s", "/f", "Devin", "/d"],
+        { encoding: "utf8", windowsHide: true, timeout: 5000 },
+      ).stdout;
+      const dir = /InstallLocation\s+REG_SZ\s+(.+)/i.exec(String(out ?? ""))?.[1]?.trim();
+      if (dir && fs.existsSync(dir)) {
+        devinInstallDirCache = dir;
+        return dir;
+      }
+    } catch {
+      // Registry not readable: fall through to the other locations.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The Devin CLI is not put on PATH by the Devin Desktop installer; it ships inside the app.
+ * Looks on PATH first, then in the places the installers use.
+ */
+export function resolveDevinExecutable(localSecrets: Record<string, string> = {}): string | undefined {
+  const explicit = process.env.DEVIN_EXECUTABLE || localSecrets.DEVIN_EXECUTABLE;
+  if (explicit?.trim() && fs.existsSync(explicit.trim())) {
+    return explicit.trim();
+  }
+  const exeName = process.platform === "win32" ? "devin.exe" : "devin";
+  const onPath = findExecutableInPath([exeName]);
+  if (onPath) return onPath;
+  const inApp = (appDir: string) => path.join(appDir, "resources", "app", "extensions", "windsurf", "devin", "bin", exeName);
+  const candidates = [path.join(os.homedir(), ".local", "bin", exeName)];
+  if (process.platform === "win32") {
+    const registryDir = devinInstallDirFromRegistry();
+    if (registryDir) candidates.push(inApp(registryDir));
+    if (process.env.LOCALAPPDATA) candidates.push(inApp(path.join(process.env.LOCALAPPDATA, "Programs", "Devin")));
+  } else if (process.platform === "darwin") {
+    candidates.push(
+      path.join("/Applications", "Devin.app", "Contents", "Resources", "app", "extensions", "windsurf", "devin", "bin", exeName),
+    );
+  }
+  return candidates.find((candidate) => fs.existsSync(candidate));
+}
+
+/** Agents whose CLI lives somewhere an installer chose rather than on PATH. */
+function knownInstallFor(commandName: string): string | undefined {
+  return commandName.toLowerCase() === "devin" ? resolveDevinExecutable(loadLocalSecrets()) : undefined;
+}
+
 function resolveGenericCommand(
   rawCommand: string,
   args: string[],
@@ -146,7 +203,7 @@ function resolveGenericCommand(
     }
   } else {
     const pathCandidates = [...winExts.map((ext) => `${trimmed}${ext}`), trimmed];
-    resolvedCmd = findExecutableInPath(pathCandidates) ?? trimmed;
+    resolvedCmd = findExecutableInPath(pathCandidates) ?? knownInstallFor(trimmed) ?? trimmed;
   }
 
   if (process.platform === "win32" && /\.(cmd|bat)$/i.test(resolvedCmd)) {
@@ -603,7 +660,100 @@ export function planAgentAuth(
     };
   }
 
+  if (agent === "devin") {
+    // `devin auth login` stores its token here; the CLI answers every prompt with
+    // "Please log in" without it.
+    const credentials =
+      process.platform === "win32" && process.env.APPDATA
+        ? path.join(process.env.APPDATA, "devin", "credentials.toml")
+        : path.join(os.homedir(), ".config", "devin", "credentials.toml");
+    let loggedIn = false;
+    try {
+      loggedIn = fs.statSync(credentials).size > 0;
+    } catch {
+      loggedIn = false;
+    }
+    const exe = resolveDevinExecutable(localSecrets);
+    return {
+      result: loggedIn
+        ? { authReady: true }
+        : {
+            authReady: false,
+            authHint: `Devin 命令行未登录：请在终端运行 "${exe ?? "devin"}" auth login`,
+          },
+    };
+  }
+
   return { result: { authReady: true } };
+}
+
+/**
+ * The command that signs an agent's CLI in, for the agents whose command is known. Signing in
+ * is interactive (it opens a browser or asks for a code), so it runs in a terminal window the
+ * user can see, never inside the hub.
+ */
+export function resolveAgentLoginCommand(
+  agent: AgentId,
+  localSecrets: Record<string, string> = loadLocalSecrets(),
+): { command: string; args: string[] } | undefined {
+  if (agent === "devin") {
+    const exe = resolveDevinExecutable(localSecrets);
+    return exe ? { command: exe, args: ["auth", "login"] } : undefined;
+  }
+  if (agent === "kimi") {
+    const exe = resolveKimiExecutable(localSecrets);
+    return exe ? { command: exe, args: ["login"] } : undefined;
+  }
+  if (agent === "opencode") {
+    const exe = resolveOpencodeExecutable(localSecrets);
+    return exe ? { command: exe, args: ["auth", "login"] } : undefined;
+  }
+  if (agent === "codex") {
+    const entry = path.join(PROJECT_ROOT, "node_modules", "@openai", "codex", "bin", "codex.js");
+    return fs.existsSync(entry) ? { command: process.execPath, args: [entry, "login"] } : undefined;
+  }
+  if (agent === "agy") {
+    const exe = resolveAgyExecutable(localSecrets);
+    return exe ? { command: exe, args: [] } : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Opens a terminal window running `command`. Returns the command line as shown to the user.
+ * The window stays open afterwards so the result can be read.
+ */
+export function openTerminalWindow(title: string, command: string, args: string[]): string {
+  const quote = (s: string) => (/[\s"&()^]/.test(s) || s === "" ? `"${s.replace(/"/g, '\\"')}"` : s);
+  const line = [command, ...args].map(quote).join(" ");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rtm-login-"));
+  if (process.platform === "win32") {
+    const script = path.join(dir, "login.cmd");
+    fs.writeFileSync(
+      script,
+      ["@echo off", "chcp 65001 >nul", `title ${title}`, line, "echo.", "echo Done. You can close this window and go back to RTM.", "pause >nul", ""].join("\r\n"),
+      "utf8",
+    );
+    const child = spawn("cmd.exe", ["/c", "start", "", script], { detached: true, stdio: "ignore", windowsHide: false });
+    child.unref();
+    return line;
+  }
+  const script = path.join(dir, "login.command");
+  fs.writeFileSync(
+    script,
+    ["#!/bin/sh", line, "echo", 'echo "Done. You can close this window and go back to RTM."', ""].join("\n"),
+    { encoding: "utf8", mode: 0o755 },
+  );
+  if (process.platform === "darwin") {
+    spawn("open", [script], { detached: true, stdio: "ignore" }).unref();
+    return line;
+  }
+  const terminal = findExecutableInPath(["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"]);
+  if (!terminal) {
+    throw new Error(`没有找到可用的终端程序，请手动运行：${line}`);
+  }
+  spawn(terminal, ["-e", script], { detached: true, stdio: "ignore" }).unref();
+  return line;
 }
 
 /**
@@ -643,6 +793,7 @@ export function checkAdaptersHealth(
       enabled: def.enabled,
       authReady: auth.authReady,
       authHint: auth.authHint,
+      canLogin: Boolean(resolveAgentLoginCommand(agent, localSecrets)),
       command: argv,
       customCommand: def.command,
       customArgs: def.args,

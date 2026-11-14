@@ -170,6 +170,8 @@ export interface AdapterHealth {
   available: boolean;
   authReady: boolean;
   authHint?: string;
+  /** The hub knows this agent's sign-in command and can open it in a terminal window. */
+  canLogin?: boolean;
   command: string[];
   customCommand?: string;
   customArgs?: string[];
