@@ -65,14 +65,14 @@ async function askAgentToRegister(rawName) {
   const lead = app.STATE.defaultLead || app.STATE.newTaskLead;
   const origin = location.origin;
   const prompt = [
-    `请把本机的命令行工具「${name}」接入 Quorum（${origin}）。`,
+    `请把本机的命令行工具「${name}」接入 RTM（${origin}）。`,
     "",
     "1. 找到它的可执行文件，查它的 --help 或文档，确认以 stdio 方式启动 ACP（Agent Client Protocol）服务的命令和参数。",
     `2. 登记：POST ${origin}/api/agents/save，JSON 请求体形如 {"id":"小写字母数字","label":"显示名","command":"可执行文件","args":["acp"]}。`,
     `3. 验证：POST ${origin}/api/agents/test，请求体 {"id":"上一步的 id"}。返回 ok 为 false 时按 error 调整命令或参数后重试。`,
     "4. 最后告诉我登记的 id、启动命令和握手结果。如果这个工具不支持 ACP，直接说明。",
     "",
-    "只需要调用上面两个接口，不要阅读 Quorum 的源码，也不要修改任何文件。",
+    "只需要调用上面两个接口，不要阅读 RTM 的源码，也不要修改任何文件。",
   ].join("\n");
   INTERACTIVE_STATE.showForm = false;
   await app.createTaskGroup({ title: `接入 ${name}`, leadAgent: lead });

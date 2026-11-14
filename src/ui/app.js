@@ -1595,7 +1595,7 @@ function renderStageHeaderAndTabs() {
   renderModelSelectorBar();
 }
 
-const BASE_DOC_TITLE = "Quorum";
+const BASE_DOC_TITLE = "RTM";
 const DEFAULT_FAVICON_HREF = "/ui/icon-64.png";
 const ALERT_FAVICON_HREF = "/ui/icon-alert.png";
 
@@ -1669,7 +1669,7 @@ function syncAttentionIndicators(notifyPayload = null) {
       playSoftAlertChime();
       if ("Notification" in window && Notification.permission === "granted") {
         try {
-          const n = new Notification("Quorum 需要你的确认", {
+          const n = new Notification("RTM 需要你的确认", {
             body: notifyPayload.body,
             tag: "agent-hub-pending",
             renotify: true,

@@ -2970,9 +2970,9 @@ export class AgentHubServer {
 
       if (method === "GET" && pathname === "/manifest.webmanifest") {
         const manifest = {
-          name: "Quorum",
-          short_name: "Quorum",
-          description: "Multi-agent collaborative workbench on ACP",
+          name: "RTM",
+          short_name: "RTM",
+          description: "Round Table Meeting: a multi-agent collaborative workbench on ACP",
           start_url: "/",
           display: "standalone",
           background_color: "#f7f8f9",
@@ -3065,7 +3065,7 @@ export class AgentHubServer {
         }
         res.writeHead(200, {
           "Content-Type": "text/markdown; charset=utf-8",
-          "Content-Disposition": `attachment; filename="quorum-export.md"; filename*=UTF-8''${encodeURIComponent(exported.filename)}`,
+          "Content-Disposition": `attachment; filename="rtm-export.md"; filename*=UTF-8''${encodeURIComponent(exported.filename)}`,
           "Cache-Control": "no-store",
         });
         res.end(exported.markdown, "utf8");

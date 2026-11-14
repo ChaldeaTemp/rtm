@@ -1,11 +1,12 @@
 {
-  "name": "quorum",
+  "name": "rtm",
   "version": "0.1.0",
-  "description": "Multi-agent collaborative hub built on ACP / acpx with unified MCP peer messaging and interactive UI",
+  "description": "RTM (Round Table Meeting): a local workbench where several CLI coding agents work on one task together, built on ACP",
+  "license": "MIT",
   "type": "module",
   "private": true,
   "bin": {
-    "quorum": "./dist/index.js",
+    "rtm": "./dist/index.js",
     "agent-hub": "./dist/index.js"
   },
   "scripts": {

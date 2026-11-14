@@ -234,7 +234,7 @@ $okColor = [System.Drawing.Color]::FromArgb(13, 113, 72)
 $errColor = [System.Drawing.Color]::FromArgb(185, 28, 28)
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = U "Quorum \u684c\u9762\u542f\u52a8\u5668"
+$form.Text = U "RTM \u684c\u9762\u542f\u52a8\u5668"
 $iconPath = Join-Path $RootDir "src\ui\icon.ico"
 if (Test-Path $iconPath) { $form.Icon = New-Object System.Drawing.Icon($iconPath) }
 $form.ClientSize = New-Object System.Drawing.Size(520, 350)
@@ -249,7 +249,7 @@ $form.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9.5)
 $yOffset = 18
 
 $titleLabel = New-Object System.Windows.Forms.Label
-$titleLabel.Text = "Quorum"
+$titleLabel.Text = "RTM"
 $titleLabel.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 14, [System.Drawing.FontStyle]::Bold)
 $titleLabel.Location = New-Object System.Drawing.Point(24, $yOffset)
 $titleLabel.AutoSize = $true
@@ -420,7 +420,7 @@ $autoPortBtn.Add_Click({
 
 $browseBtn.Add_Click({
   $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-  $dlg.Description = U "\u9009\u62e9 Quorum \u9ed8\u8ba4\u5de5\u4f5c\u533a\u76ee\u5f55"
+  $dlg.Description = U "\u9009\u62e9 RTM \u9ed8\u8ba4\u5de5\u4f5c\u533a\u76ee\u5f55"
   if ($cwdBox.Text -and (Test-Path $cwdBox.Text)) {
     $dlg.SelectedPath = $cwdBox.Text
   }
@@ -434,14 +434,14 @@ $browseBtn.Add_Click({
 $shortcutBtn.Add_Click({
   try {
     $desktopDir = [Environment]::GetFolderPath("Desktop")
-    $lnkPath = Join-Path $desktopDir "Quorum.lnk"
+    $lnkPath = Join-Path $desktopDir "RTM.lnk"
     $vbsPath = Join-Path $RootDir "AgentHub.vbs"
     $wsh = New-Object -ComObject WScript.Shell
     $sc = $wsh.CreateShortcut($lnkPath)
     $sc.TargetPath = "wscript.exe"
     $sc.Arguments = '//nologo "' + $vbsPath + '"'
     $sc.WorkingDirectory = $RootDir
-    $sc.Description = "Quorum Desktop Workbench"
+    $sc.Description = "RTM Desktop Workbench"
     if (Test-Path $iconPath) { $sc.IconLocation = $iconPath }
     $sc.Save()
     $launchErrorLabel.ForeColor = $okColor

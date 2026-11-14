@@ -411,7 +411,7 @@ async function main(): Promise<void> {
     "ui_render_artifact",
     {
       description:
-        "Render an interactive HTML/SVG/Mermaid widget directly inside the Quorum workbench chat stream inside a sandboxed iframe.",
+        "Render an interactive HTML/SVG/Mermaid widget directly inside the RTM workbench chat stream inside a sandboxed iframe.",
       inputSchema: {
         title: z.string().min(1).describe("Short descriptive title for the interactive widget."),
         kind: z.enum(["html", "svg", "mermaid"]).optional().default("html").describe("Widget content type."),
@@ -453,7 +453,7 @@ async function main(): Promise<void> {
     "hub_ask_user",
     {
       description:
-        "Show an interactive structured questionnaire card in the Quorum workbench UI and wait for the user's choices or text input.",
+        "Show an interactive structured questionnaire card in the RTM workbench UI and wait for the user's choices or text input.",
       inputSchema: {
         title: z.string().optional().describe("Optional card header title."),
         questions: z

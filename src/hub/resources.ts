@@ -843,7 +843,7 @@ export class SharedResourceManager {
     );
     const enabledSkills = this.discover(resolvedCwd).filter((i) => i.enabled && i.kind === "skill");
 
-    const lines: string[] = [MANAGED_START, "## Quorum Shared Rules & Skills (Synced)"];
+    const lines: string[] = [MANAGED_START, "## RTM Shared Rules & Skills (Synced)"];
     if (enabledRules.length === 0) {
       lines.push("", "_No Hub-authored shared rules yet._");
     } else {

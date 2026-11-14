@@ -176,7 +176,7 @@ async function main(): Promise<void> {
     if (opts.command === "exec") {
       const prompt = opts.positionals.join(" ").trim();
       if (!prompt) {
-        throw new Error("Usage: quorum exec [--lead claude|codex|agy] \"<prompt>\"");
+        throw new Error("Usage: rtm exec [--lead claude|codex|agy] \"<prompt>\"");
       }
       const res = await hub.runLeadChat({ prompt, leadAgent: defaultLead });
       console.log(res.outputText);
@@ -184,7 +184,7 @@ async function main(): Promise<void> {
     }
 
     if (opts.desktopMode) {
-      console.log(`Quorum desktop server listening at ${url} (cwd: ${hub.baseCwd})`);
+      console.log(`RTM desktop server listening at ${url} (cwd: ${hub.baseCwd})`);
       if (opts.openUi && !opts.noOpen) {
         const launched = openInteractiveWindow(url, true);
         console.log(`Interactive UI opened (${launched.mode}) at ${url}`);
@@ -207,6 +207,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error("[quorum] Fatal:", err instanceof Error ? err.message : String(err));
+  console.error("[rtm] Fatal:", err instanceof Error ? err.message : String(err));
   process.exit(1);
 });

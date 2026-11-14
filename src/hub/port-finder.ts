@@ -110,7 +110,7 @@ export async function pickNativeDirectory(
       "$owner.StartPosition = 'Manual'",
       "$owner.Location = New-Object System.Drawing.Point(-32000, -32000)",
       "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog",
-      "$dlg.Description = 'Quorum Workspace'",
+      "$dlg.Description = 'RTM Workspace'",
       "$dlg.ShowNewFolderButton = $true",
       `$initPath = ${JSON.stringify(safeInitial)}`,
       "if (Test-Path -LiteralPath $initPath -PathType Container) { $dlg.SelectedPath = $initPath }",
