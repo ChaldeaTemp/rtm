@@ -82,6 +82,8 @@ const DEFAULT_WORKFLOW_PARALLEL = 3;
 const DEFAULT_IDLE_SUB_MINUTES = 15;
 /** Under memory pressure an idle sub-session is released after this long, whatever the setting. */
 const PRESSURE_IDLE_MS = 60_000;
+/** Under memory pressure an idle lead session is released after this long, whatever the setting. */
+const PRESSURE_IDLE_LEAD_MS = 10 * 60_000;
 const SUB_RECAP_MAX_CHARS = 8000;
 const SUB_RECAP_MESSAGE_CHARS = 2000;
 
@@ -854,7 +856,10 @@ export class AgentHubServer {
   private progressByGroup = new Map<string, TaskProgress>();
   private readonly memory = new MemoryMonitor((status) => {
     this.broadcast({ type: "memory_status", memory: status, timestamp: Date.now() });
-    if (status.level !== "ok") this.sweepIdleSubSessions();
+    if (status.level !== "ok") {
+      this.sweepIdleSubSessions();
+      this.sweepIdleLeadSessions();
+    }
     if (status.level === "ok") this.pumpBoard();
   });
   private idleSweepTimer?: ReturnType<typeof setInterval>;
@@ -1127,7 +1132,7 @@ export class AgentHubServer {
    * Releases the agent processes of sub-sessions nobody has used for a while. Each one holds a
    * few hundred MB whether or not it is doing anything. The session stays in the list as
    * asleep; the next message starts it again and gives it back what was said in it.
-   * Lead sessions are never touched: they hold the task's main context.
+   * Lead sessions are handled separately by sweepIdleLeadSessions under their own setting.
    */
   sweepIdleSubSessions(now = Date.now()): string[] {
     const underPressure = this.memory.get().level !== "ok";
@@ -1145,6 +1150,59 @@ export class AgentHubServer {
       released.push(session.sessionKey);
       void this.pool.closeSession(session.sessionKey).then(() => {
         // The pool's own close event does not carry the reason.
+        this.broadcast({ type: "session_updated", session: { ...asleep }, timestamp: Date.now() });
+      });
+    }
+    return released;
+  }
+
+  /**
+   * Releases idle lead sessions once they exceed `idleLeadMinutes` (0 = never, unless memory is
+   * under pressure, which uses a fixed 10-minute threshold). Leads waiting on an unanswered
+   * question, a pending permission, or an active reply are left alone.
+   */
+  sweepIdleLeadSessions(now = Date.now()): string[] {
+    const underPressure = this.memory.get().level !== "ok";
+    const minutes = clampIdleLeadMinutes(this.settings.idleLeadMinutes);
+    if (!underPressure && minutes === 0) return [];
+    const idleMs = underPressure ? PRESSURE_IDLE_LEAD_MS : minutes * 60_000;
+    const sessionGroups = new Map(this.pool.listSessions().map((s) => [s.sessionKey, s.groupId]));
+    const waitingPermSessions = new Set<string>();
+    const waitingPermGroups = new Set<string>();
+    for (const p of this.pool.getPendingPermissions()) {
+      waitingPermSessions.add(p.sessionKey);
+      const gId = sessionGroups.get(p.sessionKey) ?? this.permissionGroupByRequestId.get(p.requestId);
+      if (gId) waitingPermGroups.add(gId);
+    }
+    const waitingQuestionSessions = new Set<string>();
+    const waitingQuestionGroups = new Set<string>();
+    for (const entry of this.pendingQuestions.values()) {
+      waitingQuestionSessions.add(entry.info.sessionKey);
+      waitingQuestionGroups.add(entry.info.groupId);
+    }
+    const released: string[] = [];
+    for (const session of this.pool.listSessions()) {
+      if (session.role !== "lead" || session.status !== "idle") continue;
+      if (now - session.updatedAt < idleMs) continue;
+      if (
+        waitingPermSessions.has(session.sessionKey) ||
+        waitingPermGroups.has(session.groupId) ||
+        waitingQuestionSessions.has(session.sessionKey) ||
+        waitingQuestionGroups.has(session.groupId) ||
+        this.activeAssistantBySession.has(session.sessionKey)
+      ) {
+        continue;
+      }
+      const asleep: SessionRecord = {
+        ...session,
+        status: "closed",
+        closedReason: "idle",
+        pid: undefined,
+        updatedAt: now,
+      };
+      this.archivedSessions.set(session.sessionKey, asleep);
+      released.push(session.sessionKey);
+      void this.pool.closeSession(session.sessionKey).then(() => {
         this.broadcast({ type: "session_updated", session: { ...asleep }, timestamp: Date.now() });
       });
     }
@@ -1966,9 +2024,6 @@ export class AgentHubServer {
     if (!group.board) {
       throw new Error("This task is not on the task board.");
     }
-    if (input.action === "resume") {
-      throw new Error("not implemented");
-    }
     const prevStatus = group.board.status;
     let earliestQueuedAt: number | undefined;
     for (const candidate of this.groups.values()) {
@@ -1988,6 +2043,21 @@ export class AgentHubServer {
       earliestQueuedAt,
     });
     group.board = nextBoard;
+
+    if (input.action === "resume") {
+      delete group.board.stalled;
+      this.autoLeadTurns.delete(group.groupId);
+      const baseDetail =
+        "The workbench was restarted while this task was running, and the user has now asked you to continue. Your previous session is gone; the history above is what was said. Check what is already done in the working directory, finish the task, and call `task_report` when done.";
+      const hasTurns = (this.ledgers.get(group.groupId)?.getAllTurns().length ?? 0) > 0;
+      const detail = hasTurns
+        ? baseDetail
+        : `${baseDetail}\n\nOriginal task brief:\n${group.board.brief}`;
+      this.notifyLead(group.groupId, {
+        summary: t("boardResumeSummary"),
+        detail,
+      });
+    }
 
     if (input.action === "cancel") {
       this.leadInbox.delete(group.groupId);
@@ -2669,6 +2739,10 @@ export class AgentHubServer {
       // An agent removed since the last run cannot lead; fall back instead of breaking the task.
       if (!knownAgent(group.leadAgent)) {
         group.leadAgent = this.getDefaultLead();
+      }
+      if (group.board?.status === "running") {
+        group.board.interrupted = true;
+        delete group.board.stalled;
       }
       this.syncGroupLeadModelFields(group);
       this.groups.set(group.groupId, group);
@@ -3780,11 +3854,6 @@ export class AgentHubServer {
     if (!input.notice && !input.handoff) {
       // The user is driving again: hub-started turns may resume.
       this.autoLeadTurns.delete(group.groupId);
-      if (group.board && (group.board.stalled || group.board.interrupted)) {
-        delete group.board.stalled;
-        delete group.board.interrupted;
-        this.boardChanged(group);
-      }
     }
     const forced = /^\/lead\s+(\S+)\s*$/i.exec((input.prompt ?? "").trim());
     if (forced && !input.handoff) {
@@ -3824,6 +3893,12 @@ export class AgentHubServer {
 
     const prepared = this.resolveTurnInputForChat(streamKey, input);
     const { savedImages, savedFiles, displayUserText, effectiveUserPrompt, promptForAgent } = prepared;
+
+    if (!input.notice && !input.handoff && group.board && (group.board.stalled || group.board.interrupted)) {
+      delete group.board.stalled;
+      delete group.board.interrupted;
+      this.boardChanged(group);
+    }
 
     const ledger = this.getOrCreateLedger(group.groupId);
     let promptDerivedTitle: string | undefined;
@@ -5502,7 +5577,10 @@ export class AgentHubServer {
     this.url = `http://127.0.0.1:${boundPort}`;
     this.pool.setHubUrl(this.url);
     this.memory.start();
-    this.idleSweepTimer = setInterval(() => this.sweepIdleSubSessions(), 60_000);
+    this.idleSweepTimer = setInterval(() => {
+      this.sweepIdleSubSessions();
+      this.sweepIdleLeadSessions();
+    }, 60_000);
     this.idleSweepTimer.unref();
     this.pumpBoard();
 

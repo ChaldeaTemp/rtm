@@ -270,6 +270,96 @@ async function main(): Promise<void> {
     check("direct user message succeeds", (await userChatPromise).ok === true);
     await act(silent, "cancel");
     await act(slotHolder, "cancel");
+
+    console.log("=== 6. Restart and sleeping leads ===");
+    await post("/api/settings", { boardParallel: 2 });
+    res = await post("/api/board/publish", {
+      items: [
+        { brief: "Remember OSPREY-58. VERYSLOW", cwd },
+        { brief: "VERYSLOW direct-msg", cwd },
+        { brief: "VERYSLOW waits behind", cwd },
+      ],
+    });
+    const [running, runningDirect, behind]: string[] = res.groups.map((g: Json) => g.groupId);
+    check("first is running", await until(async () =>
+      (await card(running))?.board.status === "running" &&
+      (await card(runningDirect))?.board.status === "running" &&
+      hub.getMessages({ streamKey: `lead:${running}` }).length > 0));
+    await post("/api/settings", { boardParallel: 1 });
+    await hub.stop();
+
+    const stateJsonRaw = fs.readFileSync(path.join(process.env.RTM_DATA_DIR!, "state.json"), "utf8");
+    check("waiting state is never persisted to disk", !/"waiting"\s*:/.test(stateJsonRaw) && !/"waitingReason"\s*:/.test(stateJsonRaw));
+
+    const hub2 = new AgentHubServer({ baseCwd: cwd, port: 0, writeRuntimeFile: false, persistState: true, defaultLead: "mock-a" });
+    const url2 = await hub2.start(0);
+    const post2 = (p: string, body: unknown): Promise<Json> =>
+      fetch(url2 + p, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json() as Promise<Json>);
+    const card2 = async (id: string): Promise<Json | undefined> =>
+      ((await (await fetch(url2 + "/api/board")).json() as Json).cards as Json[] ?? []).find((c: Json) => c.groupId === id);
+    try {
+      if (!(hub2 as any).registry.isEnabledAgent("mock-a")) {
+        await post2("/api/agents/save", {
+          id: "mock-a", label: "MOCK-A", description: "mock", enabled: true,
+          command: process.execPath, args: [MOCK], env: { MOCK_STATE_DIR: stateDir },
+        });
+      }
+      check("after a restart the running task waits for the user",
+        (await card2(running))?.board.status === "running" &&
+        (await card2(running))?.waiting === true &&
+        (await card2(running))?.waitingReason === "interrupted");
+      check("it is not restarted by itself",
+        (hub2 as any).listVisibleSessions().every((s: Json) => s.groupId !== running || s.status === "closed"));
+      check("the queued task starts", await until(async () => (await card2(behind))?.board.status === "running", 5000));
+
+      const directChatPromise = post2("/api/chat", { groupId: runningDirect, prompt: "SLOW continue directly" });
+      check("a user message clears interrupted even over the parallel limit", await until(async () => {
+        const c = await card2(runningDirect);
+        return c?.board.status === "running" && c?.waiting === false && c?.waitingReason === undefined;
+      }, 5000));
+      check("direct message to interrupted task succeeds", (await directChatPromise).ok === true);
+      await post2("/api/board/action", { groupId: runningDirect, action: "cancel" });
+
+      const beforeResume = updates().length;
+      res = await post2("/api/board/action", { groupId: running, action: "resume" });
+      check("resume clears the mark", res.ok === true && res.group?.board.interrupted === undefined, res.error);
+      check("the resumed lead is given what was said before", await until(() =>
+        updates().slice(beforeResume).some((u) => /OSPREY-58/.test(u)), 30000));
+      await post2("/api/board/action", { groupId: running, action: "cancel" });
+      await post2("/api/board/action", { groupId: behind, action: "cancel" });
+
+      console.log("=== 7. Idle leads ===");
+      const plainTask = (await post2("/api/groups", { title: "plain", leadAgent: "mock-a", cwd })).group;
+      await post2("/api/chat", { groupId: plainTask.groupId, prompt: "hello" });
+      const leadKey = `mock-a:${plainTask.groupId}__lead`;
+      check("lead is idle", await until(() => (hub2 as any).listVisibleSessions().find((s: Json) => s.sessionKey === leadKey)?.status === "idle"));
+      check("leads are kept by default", typeof (hub2 as any).sweepIdleLeadSessions === "function" && (hub2 as any).sweepIdleLeadSessions(Date.now() + 24 * 3600_000).length === 0);
+      await post2("/api/settings", { idleLeadMinutes: 30 });
+      check("kept while recently used", typeof (hub2 as any).sweepIdleLeadSessions === "function" && (hub2 as any).sweepIdleLeadSessions().length === 0);
+      const holdQ = hub2.askUserQuestion({
+        groupId: plainTask.groupId,
+        sessionKey: leadKey,
+        title: "Hold?",
+        questions: [{ id: "q", question: "Q?", type: "text" }],
+      });
+      check("kept while waiting on a question", typeof (hub2 as any).sweepIdleLeadSessions === "function" && (hub2 as any).sweepIdleLeadSessions(Date.now() + 31 * 60_000).length === 0);
+      const holdQId = hub2.listPendingQuestions().find((q) => q.groupId === plainTask.groupId)?.questionId ?? "";
+      await post2("/api/questions/resolve", { questionId: holdQId, answers: { q: "ok" } });
+      await holdQ;
+      check("released after the idle time", typeof (hub2 as any).sweepIdleLeadSessions === "function" && (hub2 as any).sweepIdleLeadSessions(Date.now() + 31 * 60_000).includes(leadKey));
+
+      await post2("/api/settings", { idleLeadMinutes: 0 });
+      const plainTask2 = (await post2("/api/groups", { title: "plain-mem", leadAgent: "mock-a", cwd })).group;
+      await post2("/api/chat", { groupId: plainTask2.groupId, prompt: "hello mem" });
+      const leadKey2 = `mock-a:${plainTask2.groupId}__lead`;
+      await until(() => (hub2 as any).listVisibleSessions().find((s: Json) => s.sessionKey === leadKey2)?.status === "idle");
+      (hub2 as any).memory.sampler = async () => ({ availableMB: 3000, totalMB: 57000 });
+      await (hub2 as any).memory.sample();
+      check("under memory pressure kept under 10 minutes", typeof (hub2 as any).sweepIdleLeadSessions === "function" && (hub2 as any).sweepIdleLeadSessions(Date.now() + 5 * 60_000).length === 0);
+      check("under memory pressure released after 10 minutes", typeof (hub2 as any).sweepIdleLeadSessions === "function" && (hub2 as any).sweepIdleLeadSessions(Date.now() + 11 * 60_000).includes(leadKey2));
+    } finally {
+      await hub2.stop();
+    }
   } finally {
     await hub.stop();
     try { fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* ignore on windows */ }
