@@ -188,6 +188,54 @@ async function main(): Promise<void> {
     check("failed needs a reason", (await report(ids[2], { outcome: "failed", summary: "x" })).ok === false);
     const plain = (await post("/api/groups", { title: "plain2", leadAgent: "mock-a", cwd })).group;
     check("a task that is not on the board is refused", (await report(plain.groupId, { outcome: "delivered", summary: "x" })).ok === false);
+
+    console.log("=== 4. Waiting and user actions ===");
+    const act = (groupId: string, action: string, note?: string) => post("/api/board/action", { groupId, action, note });
+    check("third task is running", await until(async () => (await card(ids[2]))?.board.status === "running"));
+    res = await post("/api/board/publish", { items: [{ brief: "fourth", cwd }] });
+    const fourth: string = res.groups[0].groupId;
+    const pendingQ = hub.askUserQuestion({
+      groupId: ids[2],
+      sessionKey: `mock-a:${ids[2]}__lead`,
+      title: "Pick",
+      questions: [{ id: "a", question: "A?", type: "text" }],
+    });
+    check("a question makes the task wait", await until(async () => {
+      const c = await card(ids[2]);
+      return c?.waiting === true && c?.waitingReason === "question";
+    }, 5000));
+    check("its slot goes to the next task", await until(async () => (await card(fourth))?.board.status === "running", 5000));
+    const qid = hub.listPendingQuestions().find((q) => q.groupId === ids[2])?.questionId ?? "";
+    await post("/api/questions/resolve", { questionId: qid, answers: { a: "x" } });
+    await pendingQ;
+    check("answering ends the wait; both now run", await until(async () => (await card(ids[2]))?.waiting === false) && (await card(fourth))?.board.status === "running");
+
+    check("confirm", (await act(ids[0], "confirm")).group?.board.status === "done");
+    check("confirm twice is refused", (await act(ids[0], "confirm")).ok === false);
+    check("retry puts a failed task at the tail", (await act(ids[1], "retry")).group?.board.status === "queued");
+    await report(fourth, { outcome: "delivered", summary: "ok" });
+    check("reject needs a note", (await act(fourth, "reject")).ok === false);
+    res = await act(fourth, "reject", "add tests");
+    check("rejected task is queued ahead of the retried one", res.group?.board.rejectCount === 1 &&
+      (await cards()).filter((c) => c.board.status === "queued").map((c) => c.groupId).join() === [fourth, ids[1]].join());
+    check("cancel a running task", (await act(ids[2], "cancel")).group?.board.status === "failed");
+    check("the rejected task restarts with the note", await until(() =>
+      hub.getMessages({ streamKey: `lead:${fourth}` }).some((m: Json) => m.role === "user" && /add tests/.test(m.text))));
+    res = await post("/api/board/publish", { items: [{ brief: "to cancel", cwd }] });
+    const queuedOne: string = res.groups[0].groupId;
+    check("cancelling a queued task archives it", (await act(queuedOne, "cancel")).group?.archived === true && !(await cards()).some((c) => c.groupId === queuedOne));
+
+    res = await post("/api/board/publish", { items: [{ brief: "to archive", cwd }, { brief: "to delete", cwd }, { brief: "after them", cwd }] });
+    const [toArchive, toDelete, afterThem]: string[] = res.groups.map((g: Json) => g.groupId);
+    await post("/api/groups/update", { groupId: ids[1], archived: true });
+    await post("/api/groups/update", { groupId: toArchive, archived: true });
+    await post("/api/groups/delete", { groupId: toDelete });
+    await report(fourth, { outcome: "delivered", summary: "ok2" });
+    check("archived and deleted queued tasks never start and the queue moves on",
+      await until(async () => (await card(afterThem))?.board.status === "running") &&
+      hub.getGroup(toArchive)?.board?.status === "queued" &&
+      hub.getGroup(toDelete) === undefined);
+    await act(afterThem, "cancel");
   } finally {
     await hub.stop();
     try { fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* ignore on windows */ }

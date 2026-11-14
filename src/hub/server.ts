@@ -49,7 +49,9 @@ import { WorkflowManager } from "./workflow.js";
 import { TaskContextStore } from "./task-context.js";
 import { HubStateStore } from "./state-store.js";
 import {
+  type BoardAction,
   DEFAULT_BOARD_PARALLEL,
+  applyBoardAction,
   clampBoardParallel,
   clampIdleLeadMinutes,
   missingDeliverables,
@@ -261,6 +263,12 @@ const ReportBoardBodySchema = z.object({
     .max(50)
     .optional(),
   reason: z.string().optional(),
+});
+
+const BoardActionBodySchema = z.object({
+  groupId: z.string().min(1),
+  action: z.enum(["confirm", "reject", "cancel", "retry", "resume"]),
+  note: z.string().optional(),
 });
 
 const SessionChatBodySchema = z
@@ -851,6 +859,7 @@ export class AgentHubServer {
   private idleSweepTimer?: ReturnType<typeof setInterval>;
   private pumpingBoard = false;
   private pumpPending = false;
+  private permissionGroupByRequestId = new Map<string, string>();
   private readonly workflowTemplates = new WorkflowTemplateStore(WORKFLOW_TEMPLATES_FILE);
   readonly mcpServers = new McpServerManager(MCP_SERVERS_FILE);
   /** Handoffs the current lead asked for; carried out when its turn ends. */
@@ -1063,7 +1072,21 @@ export class AgentHubServer {
           event.groupId = active.groupId;
         }
       }
+      let permissionBoardGroupId: string | undefined;
+      if (event.type === "permission_requested") {
+        const gId = this.pool.getSession(event.permission.sessionKey)?.groupId;
+        if (gId) {
+          this.permissionGroupByRequestId.set(event.permission.requestId, gId);
+          permissionBoardGroupId = gId;
+        }
+      } else if (event.type === "permission_resolved") {
+        permissionBoardGroupId = this.permissionGroupByRequestId.get(event.requestId);
+        this.permissionGroupByRequestId.delete(event.requestId);
+      }
       this.broadcast(event);
+      if (permissionBoardGroupId) {
+        this.refreshBoardIfRelevant(permissionBoardGroupId);
+      }
     });
   }
 
@@ -1715,8 +1738,34 @@ export class AgentHubServer {
     return cards.sort((a, b) => a.board.queuedAt - b.board.queuedAt);
   }
 
-  private boardWaiting(_groupId: string): BoardWaitingReason | undefined {
+  private boardWaiting(groupId: string): BoardWaitingReason | undefined {
+    const group = this.groups.get(groupId);
+    if (!group || !group.board || group.board.status !== "running") {
+      return undefined;
+    }
+    if (group.board.interrupted) return "interrupted";
+    if (group.board.stalled) return "stalled";
+    for (const entry of this.pendingQuestions.values()) {
+      if (entry.info.groupId === groupId) return "question";
+    }
+    const pendingPerms = this.pool.getPendingPermissions();
+    if (pendingPerms.length > 0) {
+      const sessionGroups = new Map(this.pool.listSessions().map((s) => [s.sessionKey, s.groupId]));
+      for (const perm of pendingPerms) {
+        const gId = sessionGroups.get(perm.sessionKey) ?? this.permissionGroupByRequestId.get(perm.requestId);
+        if (gId === groupId) return "permission";
+      }
+    }
     return undefined;
+   }
+
+  private refreshBoardIfRelevant(groupId: string | undefined): void {
+    if (!groupId) return;
+    const group = this.groups.get(groupId);
+    if (group?.board) {
+      this.broadcastBoardUpdated();
+      this.pumpBoard();
+    }
   }
 
   private broadcastBoardUpdated(): void {
@@ -1879,6 +1928,70 @@ export class AgentHubServer {
     return { ...group.board };
   }
 
+  async actOnBoardTask(input: { groupId: string; action: BoardAction; note?: string }): Promise<TaskGroup> {
+    const group = this.groups.get(input.groupId);
+    if (!group) {
+      throw new Error(`Unknown task group: ${input.groupId}`);
+    }
+    if (!group.board) {
+      throw new Error("This task is not on the task board.");
+    }
+    if (input.action === "resume") {
+      throw new Error("not implemented");
+    }
+    const prevStatus = group.board.status;
+    let earliestQueuedAt: number | undefined;
+    for (const candidate of this.groups.values()) {
+      if (
+        !candidate.archived &&
+        candidate.board?.status === "queued" &&
+        candidate.groupId !== group.groupId
+      ) {
+        if (earliestQueuedAt === undefined || candidate.board.queuedAt < earliestQueuedAt) {
+          earliestQueuedAt = candidate.board.queuedAt;
+        }
+      }
+    }
+    const nextBoard = applyBoardAction(group.board, input.action, {
+      now: Date.now(),
+      note: input.note,
+      earliestQueuedAt,
+    });
+    group.board = nextBoard;
+
+    if (input.action === "cancel") {
+      this.leadInbox.delete(group.groupId);
+      this.autoLeadTurns.delete(group.groupId);
+      this.pendingHandoffs.delete(group.groupId);
+      if (prevStatus === "queued") {
+        return this.updateGroup({ groupId: group.groupId, archived: true });
+      }
+      if (prevStatus === "running") {
+        this.workflows.cancel(group.groupId);
+        for (const [questionId, entry] of this.pendingQuestions.entries()) {
+          if (entry.info.groupId === group.groupId) {
+            clearTimeout(entry.timer);
+            this.pendingQuestions.delete(questionId);
+            this.broadcast({
+              type: "question_resolved",
+              questionId,
+              cancelled: true,
+              answers: {},
+              timestamp: Date.now(),
+            });
+            entry.resolve({ cancelled: true, answers: {} });
+          }
+        }
+        const groupSessions = this.pool.listSessions().filter((s) => s.groupId === group.groupId);
+        await Promise.all(groupSessions.map((s) => this.pool.cancelSession(s.sessionKey).catch(() => false)));
+        this.releaseBoardSessions(group.groupId);
+      }
+    }
+
+    this.boardChanged(group);
+    return { ...group, board: { ...group.board } };
+  }
+
   updateGroup(input: {
     groupId: string;
     title?: string;
@@ -1950,6 +2063,10 @@ export class AgentHubServer {
       this.setGroupLeadAgent(group.groupId, input.leadAgent);
       group = this.groups.get(group.groupId)!;
     }
+    if (changed && group.board) {
+      this.broadcastBoardUpdated();
+      this.pumpBoard();
+    }
     return { ...group };
   }
 
@@ -2007,6 +2124,9 @@ export class AgentHubServer {
         previousLead,
         timestamp: now,
       });
+    }
+    if (group.board) {
+      this.broadcastBoardUpdated();
     }
     return { ...group };
   }
@@ -2079,6 +2199,7 @@ export class AgentHubServer {
     if (!targetGroup) {
       throw new Error(`Unknown task group: ${groupId}`);
     }
+    const hadBoard = Boolean(targetGroup.board);
     const sessionsToClose = this.pool.listSessions().filter((s) => s.groupId === groupId);
     await Promise.all(sessionsToClose.map((s) => this.pool.closeSession(s.sessionKey)));
 
@@ -2115,6 +2236,12 @@ export class AgentHubServer {
     this.workflows.forget(groupId);
     this.taskContext.forget(groupId);
     this.progressByGroup.delete(groupId);
+    this.leadInbox.delete(groupId);
+    this.autoLeadTurns.delete(groupId);
+    this.pendingHandoffs.delete(groupId);
+    for (const [reqId, gId] of this.permissionGroupByRequestId) {
+      if (gId === groupId) this.permissionGroupByRequestId.delete(reqId);
+    }
     for (const [key, session] of this.archivedSessions) {
       if (session.groupId === groupId) this.archivedSessions.delete(key);
     }
@@ -2202,6 +2329,11 @@ export class AgentHubServer {
     } else if (groupId === this.defaultGroupId) {
       const firstRemaining = this.groups.values().next().value as TaskGroup;
       this.defaultGroupId = firstRemaining.groupId;
+    }
+
+    if (hadBoard) {
+      this.broadcastBoardUpdated();
+      this.pumpBoard();
     }
   }
 
@@ -2804,6 +2936,7 @@ export class AgentHubServer {
             answers: {},
             timestamp: Date.now(),
           });
+          this.refreshBoardIfRelevant(groupId);
           entry.resolve({ cancelled: true, answers: {} });
         }, timeoutMs);
 
@@ -2818,6 +2951,7 @@ export class AgentHubServer {
           question: info,
           timestamp: now,
         });
+        this.refreshBoardIfRelevant(groupId);
 
         // A sub-session that stops to ask is blocked work the lead should know about; it may
         // well hold the answer. The user sees the question either way.
@@ -2845,6 +2979,7 @@ export class AgentHubServer {
     if (!entry) {
       throw new Error(`Unknown or expired question: ${input.questionId}`);
     }
+    const groupId = entry.info.groupId;
     clearTimeout(entry.timer);
     this.pendingQuestions.delete(input.questionId);
     const answers = input.cancelled ? {} : input.answers;
@@ -2855,6 +2990,7 @@ export class AgentHubServer {
       answers,
       timestamp: Date.now(),
     });
+    this.refreshBoardIfRelevant(groupId);
     entry.resolve({ cancelled: input.cancelled, answers });
     return { resolved: true, questionId: input.questionId };
   }
@@ -4470,6 +4606,13 @@ export class AgentHubServer {
         return;
       }
 
+      if (method === "POST" && pathname === "/api/board/action") {
+        const body = BoardActionBodySchema.parse(await readJsonBody(req));
+        const group = await this.actOnBoardTask(body);
+        sendJson(res, 200, { ok: true, group });
+        return;
+      }
+
       if (method === "GET" && pathname === "/api/groups") {
         sendJson(res, 200, {
           ok: true,
@@ -5347,6 +5490,7 @@ export class AgentHubServer {
       entry.resolve({ cancelled: true, answers: {} });
       this.pendingQuestions.delete(questionId);
     }
+    this.permissionGroupByRequestId.clear();
     // Save before the sessions are torn down, so they are recorded as they were.
     this.stateStore?.flush();
     await this.pool.disposeAll();
