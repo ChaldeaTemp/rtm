@@ -1080,7 +1080,7 @@ export class AgentHubServer {
       }
       let permissionBoardGroupId: string | undefined;
       if (event.type === "permission_requested") {
-        const gId = this.pool.getSession(event.permission.sessionKey)?.groupId;
+        const gId = this.findGroupIdForSessionKey(event.permission.sessionKey);
         if (gId) {
           this.permissionGroupByRequestId.set(event.permission.requestId, gId);
           permissionBoardGroupId = gId;
@@ -1252,7 +1252,25 @@ export class AgentHubServer {
 
   /** Closes every live session of a task group (their records stay, marked closed). */
   private closeGroupSessions(groupId: string): void {
-    for (const session of this.pool.listSessions()) {
+    const liveSessions = this.pool.listSessions();
+    const liveKeys = new Set(liveSessions.map((s) => s.sessionKey));
+    const group = this.groups.get(groupId);
+    if (group) {
+      const leadKey = buildSessionKey(group.leadAgent, `${groupId}__lead`);
+      if (!liveKeys.has(leadKey)) {
+        void this.pool.cancelSession(leadKey).catch(() => false);
+      }
+    }
+    for (const task of this.tasks.values()) {
+      if (
+        task.groupId === groupId &&
+        (task.status === "running" || task.status === "queued") &&
+        !liveKeys.has(task.targetSessionKey)
+      ) {
+        void this.pool.cancelSession(task.targetSessionKey).catch(() => false);
+      }
+    }
+    for (const session of liveSessions) {
       if (session.groupId !== groupId) continue;
       this.archivedSessions.set(session.sessionKey, { ...session, status: "closed", pid: undefined });
       void this.pool.closeSession(session.sessionKey);
@@ -1797,6 +1815,43 @@ export class AgentHubServer {
     return cards.sort((a, b) => a.board.queuedAt - b.board.queuedAt);
   }
 
+  private findGroupIdForSessionKey(sessionKey: string): string | undefined {
+    const direct =
+      this.pool.getSession(sessionKey)?.groupId ??
+      this.archivedSessions.get(sessionKey)?.groupId;
+    if (direct) return direct;
+    for (const group of this.groups.values()) {
+      if (
+        sessionKey === buildSessionKey(group.leadAgent, `${group.groupId}__lead`) ||
+        sessionKey.endsWith(`:${group.groupId}__lead`)
+      ) {
+        return group.groupId;
+      }
+    }
+    for (const task of this.tasks.values()) {
+      if (task.targetSessionKey === sessionKey) return task.groupId;
+    }
+    return undefined;
+  }
+
+  private cancelGroupPermissions(groupId: string): void {
+    const sessionGroups = new Map(this.pool.listSessions().map((s) => [s.sessionKey, s.groupId]));
+    for (const perm of this.pool.getPendingPermissions()) {
+      const gId =
+        sessionGroups.get(perm.sessionKey) ??
+        this.permissionGroupByRequestId.get(perm.requestId) ??
+        this.findGroupIdForSessionKey(perm.sessionKey);
+      if (gId === groupId) {
+        this.pool.resolvePermission(perm.requestId, "cancel");
+      }
+    }
+    for (const [reqId, gId] of this.permissionGroupByRequestId) {
+      if (gId === groupId) {
+        this.permissionGroupByRequestId.delete(reqId);
+      }
+    }
+  }
+
   private boardWaiting(groupId: string): BoardWaitingReason | undefined {
     const group = this.groups.get(groupId);
     if (!group || !group.board || group.board.status !== "running") {
@@ -1811,12 +1866,15 @@ export class AgentHubServer {
     if (pendingPerms.length > 0) {
       const sessionGroups = new Map(this.pool.listSessions().map((s) => [s.sessionKey, s.groupId]));
       for (const perm of pendingPerms) {
-        const gId = sessionGroups.get(perm.sessionKey) ?? this.permissionGroupByRequestId.get(perm.requestId);
+        const gId =
+          sessionGroups.get(perm.sessionKey) ??
+          this.permissionGroupByRequestId.get(perm.requestId) ??
+          this.findGroupIdForSessionKey(perm.sessionKey);
         if (gId === groupId) return "permission";
       }
     }
     return undefined;
-   }
+  }
 
   private refreshBoardIfRelevant(groupId: string | undefined): void {
     if (!groupId) return;
@@ -1881,8 +1939,9 @@ export class AgentHubServer {
             : "";
           const prompt = `${rejectPrefix}${group.board.brief}\n\n<task_board>\nThis task was published on the task board. When the work is finished, call the \`task_report\` tool with outcome "delivered", a short summary, and every deliverable (files as paths relative to the working directory). If the task cannot be done, call \`task_report\` with outcome "failed" and the reason. Do not end without calling it: the board only frees this task's slot when you report.\n</task_board>`;
 
+          const startedBoard = group.board;
           void this.runLeadChat({ groupId, prompt }).catch((err) => {
-            if (group.board?.status === "running") {
+            if (group.board === startedBoard && group.board.status === "running") {
               group.board.status = "failed";
               group.board.failReason = err instanceof Error ? err.message : String(err);
               group.board.closedAt = Date.now();
@@ -1898,7 +1957,25 @@ export class AgentHubServer {
 
   private releaseBoardSessions(groupId: string): void {
     const now = Date.now();
-    for (const session of this.pool.listSessions()) {
+    const liveSessions = this.pool.listSessions();
+    const liveKeys = new Set(liveSessions.map((s) => s.sessionKey));
+    const group = this.groups.get(groupId);
+    if (group) {
+      const leadKey = buildSessionKey(group.leadAgent, `${groupId}__lead`);
+      if (!liveKeys.has(leadKey)) {
+        void this.pool.cancelSession(leadKey).catch(() => false);
+      }
+    }
+    for (const task of this.tasks.values()) {
+      if (
+        task.groupId === groupId &&
+        (task.status === "running" || task.status === "queued") &&
+        !liveKeys.has(task.targetSessionKey)
+      ) {
+        void this.pool.cancelSession(task.targetSessionKey).catch(() => false);
+      }
+    }
+    for (const session of liveSessions) {
       if (session.groupId !== groupId) continue;
       const asleep: SessionRecord = {
         ...session,
@@ -1909,7 +1986,9 @@ export class AgentHubServer {
       };
       this.archivedSessions.set(session.sessionKey, asleep);
       void this.pool.closeSession(session.sessionKey).then(() => {
-        this.broadcast({ type: "session_updated", session: { ...asleep }, timestamp: Date.now() });
+        if (!this.pool.getSession(session.sessionKey)) {
+          this.broadcast({ type: "session_updated", session: { ...asleep }, timestamp: Date.now() });
+        }
       });
     }
   }
@@ -1958,6 +2037,9 @@ export class AgentHubServer {
     if (!group || !group.board) {
       throw new Error("This task is not on the task board; nothing to report.");
     }
+    if (group.archived) {
+      throw new Error("This task is archived.");
+    }
     if (group.board.status !== "running") {
       throw new Error(`This task is ${group.board.status}; it can only be reported while running.`);
     }
@@ -2005,12 +2087,13 @@ export class AgentHubServer {
     }
     this.leadInbox.delete(group.groupId);
     this.boardChanged(group);
-    const hasActiveSession = this.pool.listSessions().some(
-      (s) =>
-        s.groupId === group.groupId &&
-        (s.status === "busy" || s.status === "starting" || this.activeAssistantBySession.has(s.sessionKey)),
-    );
-    if (!hasActiveSession) {
+    const leadKey = buildSessionKey(group.leadAgent, `${group.groupId}__lead`);
+    const leadSession = this.pool.getSession(leadKey);
+    const leadBusy =
+      this.activeAssistantBySession.has(leadKey) ||
+      leadSession?.status === "busy" ||
+      leadSession?.status === "starting";
+    if (!leadBusy) {
       this.releaseBoardSessions(group.groupId);
     }
     return { ...group.board };
@@ -2023,6 +2106,9 @@ export class AgentHubServer {
     }
     if (!group.board) {
       throw new Error("This task is not on the task board.");
+    }
+    if (group.archived) {
+      throw new Error("This task is archived.");
     }
     const prevStatus = group.board.status;
     let earliestQueuedAt: number | undefined;
@@ -2082,8 +2168,20 @@ export class AgentHubServer {
             entry.resolve({ cancelled: true, answers: {} });
           }
         }
-        const groupSessions = this.pool.listSessions().filter((s) => s.groupId === group.groupId);
-        await Promise.all(groupSessions.map((s) => this.pool.cancelSession(s.sessionKey).catch(() => false)));
+        this.cancelGroupPermissions(group.groupId);
+        const sessionKeysToCancel = new Set<string>(
+          this.pool
+            .listSessions()
+            .filter((s) => s.groupId === group.groupId)
+            .map((s) => s.sessionKey),
+        );
+        sessionKeysToCancel.add(buildSessionKey(group.leadAgent, `${group.groupId}__lead`));
+        for (const task of this.tasks.values()) {
+          if (task.groupId === group.groupId && (task.status === "running" || task.status === "queued")) {
+            sessionKeysToCancel.add(task.targetSessionKey);
+          }
+        }
+        await Promise.all([...sessionKeysToCancel].map((key) => this.pool.cancelSession(key).catch(() => false)));
         this.releaseBoardSessions(group.groupId);
       }
     }
@@ -2139,7 +2237,9 @@ export class AgentHubServer {
       changed = true;
       if (input.archived) {
         // An archived task holds no agent processes and runs nothing.
+        this.leadInbox.delete(group.groupId);
         this.workflows.cancel(group.groupId);
+        this.cancelGroupPermissions(group.groupId);
         this.closeGroupSessions(group.groupId);
       }
       if (input.archived && this.defaultGroupId === group.groupId) {
@@ -2300,6 +2400,7 @@ export class AgentHubServer {
       throw new Error(`Unknown task group: ${groupId}`);
     }
     const hadBoard = Boolean(targetGroup.board);
+    this.cancelGroupPermissions(groupId);
     const sessionsToClose = this.pool.listSessions().filter((s) => s.groupId === groupId);
     await Promise.all(sessionsToClose.map((s) => this.pool.closeSession(s.sessionKey)));
 
@@ -3293,7 +3394,7 @@ export class AgentHubServer {
     const queued = this.leadInbox.get(groupId);
     if (!queued || queued.length === 0) return;
     const group = this.groups.get(groupId);
-    if (!group || group.archived) {
+    if (!group || group.archived || (group.board && (group.board.status !== "running" || group.board.interrupted))) {
       this.leadInbox.delete(groupId);
       return;
     }
@@ -3365,7 +3466,10 @@ export class AgentHubServer {
     if (task.status === "cancelled" || task.callerAgent === "user") return;
     if (this.workflowTaskIds.has(task.taskId) || this.selfServedTaskIds.has(task.taskId)) return;
     const group = this.groups.get(task.groupId);
-    if (!group || task.callerSession !== buildSessionKey(group.leadAgent, `${group.groupId}__lead`)) return;
+    if (!group || group.archived || (group.board && (group.board.status !== "running" || group.board.interrupted))) {
+      return;
+    }
+    if (task.callerSession !== buildSessionKey(group.leadAgent, `${group.groupId}__lead`)) return;
     const session = this.pool.getSession(task.targetSessionKey) ?? this.archivedSessions.get(task.targetSessionKey);
     const name = `${this.agentLabel(task.targetAgent)} · ${session?.label || session?.name || task.targetSessionKey}`;
     const body =
@@ -3381,6 +3485,10 @@ export class AgentHubServer {
 
   /** A workflow run ended: the lead sums up, or decides what to do about a failure. */
   private reportWorkflowToLead(workflow: WorkflowRecord): void {
+    const group = this.groups.get(workflow.groupId);
+    if (!group || group.archived || (group.board && (group.board.status !== "running" || group.board.interrupted))) {
+      return;
+    }
     const failed = workflow.steps.filter((s) => s.status === "failed");
     const held = workflow.steps.filter((s) => s.status === "skipped" || s.status === "cancelled" || s.status === "pending");
     const done = workflow.steps.filter((s) => s.status === "completed");
@@ -3840,6 +3948,7 @@ export class AgentHubServer {
     const targetGroupId =
       input.groupId && this.groups.has(input.groupId) ? input.groupId : this.defaultGroupId;
     const group = this.groups.get(targetGroupId)!;
+    const boardAtTurnStart = group.board;
 
     if (input.leadAgent) {
       this.setGroupLeadAgent(group.groupId, input.leadAgent);
@@ -4070,9 +4179,13 @@ export class AgentHubServer {
       if (this.activeAssistantBySession.get(sessionKey)?.messageId === assistantMsg.messageId) {
         this.activeAssistantBySession.delete(sessionKey);
       }
-      if (group.board?.status === "delivered" || group.board?.status === "failed") {
+      if (
+        group.board &&
+        group.board === boardAtTurnStart &&
+        (group.board.status === "delivered" || group.board.status === "failed")
+      ) {
         this.releaseBoardSessions(group.groupId);
-      } else if (endedNormally && !handedOff) {
+      } else if (endedNormally && !handedOff && group.board === boardAtTurnStart) {
         this.checkBoardStall(group.groupId);
       }
       setImmediate(() => this.flushLeadInbox(group.groupId));

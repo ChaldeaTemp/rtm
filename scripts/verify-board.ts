@@ -241,6 +241,85 @@ async function main(): Promise<void> {
       hub.getGroup(toArchive)?.board?.status === "queued" &&
       hub.getGroup(toDelete) === undefined);
     await act(afterThem, "cancel");
+    check("archived board tasks refuse report and actions",
+      (await report(toArchive, { outcome: "delivered", summary: "x" })).ok === false &&
+      (await act(toArchive, "cancel")).ok === false &&
+      (await act(ids[1], "retry")).ok === false);
+
+    res = await post("/api/board/publish", { items: [{ brief: "VERYSLOW perm-first", cwd }, { brief: "VERYSLOW perm-second", cwd }] });
+    const [permTask, permNext]: string[] = res.groups.map((g: Json) => g.groupId);
+    await until(() => (hub as any).pool.getSession(`mock-a:${permTask}__lead`)?.status === "busy", 5000);
+    (hub as any).pool.setPermissionMode("manual");
+    const permPromise = (hub as any).pool.handlePermissionRequest(
+      `mock-a:${permTask}__lead`,
+      "mock-a",
+      {
+        sessionId: "s-perm",
+        toolCall: { toolCallId: "tc-perm", title: "write_file", kind: "edit" },
+        options: [
+          { optionId: "allow", name: "Allow", kind: "allow_once" },
+          { optionId: "reject", name: "Reject", kind: "reject_once" },
+        ],
+      },
+    );
+    check("a pending permission makes the task wait and frees its slot", await until(async () => {
+      const c = await card(permTask);
+      return c?.waiting === true && c?.waitingReason === "permission" && (await card(permNext))?.board.status === "running";
+    }, 5000));
+    await act(permTask, "cancel");
+    await act(permNext, "cancel");
+    check("cancelling resolves pending permissions", (await permPromise)?.outcome?.outcome === "cancelled" && (hub as any).pool.getPendingPermissions().length === 0);
+    (hub as any).pool.setPermissionMode("approve-all");
+    await act(permTask, "retry");
+    const permBehind: string = (await post("/api/board/publish", { items: [{ brief: "VERYSLOW perm-behind", cwd }] })).groups[0].groupId;
+    await sleep(300);
+    check("retried task after permission cancel occupies its slot and survives old turn catch",
+      (await card(permTask))?.board.status === "running" &&
+      (await card(permTask))?.waiting === false &&
+      (await card(permBehind))?.board.status === "queued");
+    await act(permTask, "cancel");
+    await act(permBehind, "cancel");
+
+    const [startingGroup] = hub.publishBoardTasks({ items: [{ brief: "CODEWORD? OSPREY-99", cwd }] });
+    await hub.actOnBoardTask({ groupId: startingGroup.groupId, action: "cancel" });
+    await sleep(500);
+    check("cancelling during session startup aborts the first turn",
+      (await card(startingGroup.groupId))?.board.status === "failed" &&
+      !hub.getMessages({ streamKey: `lead:${startingGroup.groupId}` }).some((m: Json) => m.role === "assistant" && /OSPREY-99/.test(m.text)));
+
+    const subCancelTask: string = (await post("/api/board/publish", { items: [{ brief: "VERYSLOW sub-cancel", cwd }] })).groups[0].groupId;
+    await until(() => (hub as any).pool.getSession(`mock-a:${subCancelTask}__lead`)?.status === "busy", 5000);
+    hub.dispatchPeerTask({
+      callerAgent: "mock-a",
+      callerSession: `mock-a:${subCancelTask}__lead`,
+      targetAgent: "mock-a",
+      groupId: subCancelTask,
+      prompt: "VERYSLOW sub-worker",
+      depth: 0,
+    });
+    await until(() => (hub as any).pool.listSessions().some((s: Json) => s.groupId === subCancelTask && s.role === "sub" && s.status === "busy"), 5000);
+    await act(subCancelTask, "cancel");
+    await sleep(400);
+    check("sub-session failure on cancel does not wake the closed lead",
+      sessions().filter((s) => s.groupId === subCancelTask).every((s) => s.status === "closed") &&
+      hub.getMessages({ streamKey: `lead:${subCancelTask}` }).filter((m: Json) => m.role === "assistant").length === 1);
+
+    const subDeliverTask: string = (await post("/api/board/publish", { items: [{ brief: "SLOW sub-deliver", cwd }] })).groups[0].groupId;
+    await until(() => (hub as any).pool.getSession(`mock-a:${subDeliverTask}__lead`)?.status === "busy", 5000);
+    hub.dispatchPeerTask({
+      callerAgent: "mock-a",
+      callerSession: `mock-a:${subDeliverTask}__lead`,
+      targetAgent: "mock-a",
+      groupId: subDeliverTask,
+      prompt: "VERYSLOW sub-worker-2",
+      depth: 0,
+    });
+    await until(() => (hub as any).pool.listSessions().some((s: Json) => s.groupId === subDeliverTask && s.role === "sub" && s.status === "busy"), 5000);
+    await report(subDeliverTask, { outcome: "delivered", summary: "delivered with active sub" });
+    check("sub-session closed after delivery does not wake the closed lead",
+      await until(() => sessions().filter((s) => s.groupId === subDeliverTask).every((s) => s.status === "closed"), 5000) &&
+      (await sleep(400), sessions().filter((s) => s.groupId === subDeliverTask).every((s) => s.status === "closed")) &&
+      hub.getMessages({ streamKey: `lead:${subDeliverTask}` }).filter((m: Json) => m.role === "assistant").length === 1);
 
     console.log("=== 5. A lead that ends without reporting ===");
     await post("/api/settings", { boardParallel: 8 });
