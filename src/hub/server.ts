@@ -11,6 +11,8 @@ import {
   type AgentId,
   type ArtifactKind,
   type ArtifactRecord,
+  type BoardCard,
+  type BoardWaitingReason,
   type ChatImageAttachment,
   type ChatMessagePart,
   type ChatMessageRecord,
@@ -44,6 +46,12 @@ import { openTerminalWindow, PROJECT_ROOT, resolveAgentLoginCommand } from "./pr
 import { WorkflowManager } from "./workflow.js";
 import { TaskContextStore } from "./task-context.js";
 import { HubStateStore } from "./state-store.js";
+import {
+  DEFAULT_BOARD_PARALLEL,
+  clampBoardParallel,
+  clampIdleLeadMinutes,
+  pickToStart,
+} from "./task-board.js";
 import { SharedResourceManager, estimateTokens } from "./resources.js";
 import {
   inspectWorktreeChanges,
@@ -61,7 +69,7 @@ const STATE_FILE = path.join(installDataDir(PROJECT_ROOT), "state.json");
 const WORKFLOW_TEMPLATES_FILE = path.join(installDataDir(PROJECT_ROOT), "workflow-templates.json");
 const MCP_SERVERS_FILE = path.join(installDataDir(PROJECT_ROOT), "mcp-servers.json");
 /** Events that never change what is persisted; everything else schedules a save. */
-const TRANSIENT_EVENT_TYPES = new Set(["agent_chunk", "tool_event", "snapshot", "models_updated"]);
+const TRANSIENT_EVENT_TYPES = new Set(["agent_chunk", "tool_event", "snapshot", "models_updated", "board_updated"]);
 /** Session-name suffix of the throwaway session that names a task; never shown in the UI. */
 const TITLE_SESSION_SUFFIX = "__title";
 
@@ -90,6 +98,8 @@ function loadHubSettings(): HubSettings {
       autoTitle: parsed.autoTitle === true,
       workflowParallel: clampWorkflowParallel(parsed.workflowParallel),
       idleSubSessionMinutes: clampIdleSubMinutes(parsed.idleSubSessionMinutes),
+      boardParallel: clampBoardParallel(parsed.boardParallel),
+      idleLeadMinutes: clampIdleLeadMinutes(parsed.idleLeadMinutes),
       recentProjects: Array.isArray(parsed.recentProjects)
         ? parsed.recentProjects.filter((p) => p && typeof p.path === "string").slice(0, 20)
         : [],
@@ -99,6 +109,8 @@ function loadHubSettings(): HubSettings {
       autoTitle: false,
       workflowParallel: DEFAULT_WORKFLOW_PARALLEL,
       idleSubSessionMinutes: DEFAULT_IDLE_SUB_MINUTES,
+      boardParallel: DEFAULT_BOARD_PARALLEL,
+      idleLeadMinutes: 0,
     };
   }
 }
@@ -210,6 +222,24 @@ const GroupModelBodySchema = z.object({
 
 const DeleteGroupBodySchema = z.object({
   groupId: z.string().min(1),
+});
+
+const PublishBoardBodySchema = z.object({
+  items: z
+    .array(
+      z.object({
+        brief: z.string(),
+        title: z.string().optional(),
+        leadAgent: AgentIdSchema.optional(),
+        leadModel: z.string().optional(),
+        leadEffort: z.string().optional(),
+        cwd: z.string().optional(),
+        extraDirs: z.array(z.string()).max(8).optional(),
+      }),
+    )
+    .min(1)
+    .max(50),
+  common: z.string().optional(),
 });
 
 const SessionChatBodySchema = z
@@ -795,8 +825,11 @@ export class AgentHubServer {
   private readonly memory = new MemoryMonitor((status) => {
     this.broadcast({ type: "memory_status", memory: status, timestamp: Date.now() });
     if (status.level !== "ok") this.sweepIdleSubSessions();
+    if (status.level === "ok") this.pumpBoard();
   });
   private idleSweepTimer?: ReturnType<typeof setInterval>;
+  private pumpingBoard = false;
+  private pumpPending = false;
   private readonly workflowTemplates = new WorkflowTemplateStore(WORKFLOW_TEMPLATES_FILE);
   readonly mcpServers = new McpServerManager(MCP_SERVERS_FILE);
   /** Handoffs the current lead asked for; carried out when its turn ends. */
@@ -1218,6 +1251,12 @@ export class AgentHubServer {
     if (patch.idleSubSessionMinutes !== undefined) {
       this.settings.idleSubSessionMinutes = clampIdleSubMinutes(patch.idleSubSessionMinutes);
     }
+    if (patch.boardParallel !== undefined) {
+      this.settings.boardParallel = clampBoardParallel(patch.boardParallel);
+    }
+    if (patch.idleLeadMinutes !== undefined) {
+      this.settings.idleLeadMinutes = clampIdleLeadMinutes(patch.idleLeadMinutes);
+    }
     try {
       fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
       fs.writeFileSync(SETTINGS_FILE, JSON.stringify(this.settings, null, 2), "utf8");
@@ -1225,6 +1264,9 @@ export class AgentHubServer {
       // Not persisted; the setting still applies until the hub restarts.
     }
     this.broadcast({ type: "settings_updated", settings: this.getSettings(), timestamp: Date.now() });
+    if (patch.boardParallel !== undefined) {
+      this.pumpBoard();
+    }
     return this.getSettings();
   }
 
@@ -1558,6 +1600,171 @@ export class AgentHubServer {
       timestamp: now,
     });
     return { ...group };
+  }
+
+  publishBoardTasks(input: {
+    items: Array<{
+      brief: string;
+      title?: string;
+      leadAgent?: AgentId;
+      leadModel?: string;
+      leadEffort?: string;
+      cwd?: string;
+      extraDirs?: string[];
+    }>;
+    common?: string;
+  }): TaskGroup[] {
+    if (!input || !Array.isArray(input.items) || input.items.length === 0) {
+      throw new Error("publishBoardTasks requires at least one item");
+    }
+
+    for (const item of input.items) {
+      if (!item || typeof item.brief !== "string" || !item.brief.trim()) {
+        throw new Error("Task brief must not be empty");
+      }
+      const resolvedCwd = this.requireDirectory(item.cwd?.trim() ? item.cwd : this.baseCwd);
+      if (item.extraDirs) {
+        this.normalizeExtraDirs(item.extraDirs, resolvedCwd);
+      }
+      const targetLead = item.leadAgent?.trim() ? this.requireKnownAgent(item.leadAgent) : this.getDefaultLead();
+      if (!this.registry.isEnabledAgent(targetLead)) {
+        throw new Error(`Lead agent ${targetLead} is not enabled`);
+      }
+    }
+
+    const cleanCommon = input.common?.trim();
+    const now = Date.now();
+    const groups: TaskGroup[] = [];
+
+    for (let idx = 0; idx < input.items.length; idx++) {
+      const item = input.items[idx];
+      const created = this.createGroup({
+        title: item.title,
+        leadAgent: item.leadAgent?.trim() || undefined,
+        leadModel: item.leadModel,
+        leadEffort: item.leadEffort,
+        cwd: item.cwd,
+        extraDirs: item.extraDirs,
+      });
+      const group = this.groups.get(created.groupId)!;
+      const trimmedBrief = item.brief.trim();
+      group.board = {
+        status: "queued",
+        brief: cleanCommon ? `${cleanCommon}\n\n${trimmedBrief}` : trimmedBrief,
+        queuedAt: now + idx,
+        rejectCount: 0,
+      };
+      if (cleanCommon) {
+        this.taskContext.put(group.groupId, {
+          key: "common",
+          content: cleanCommon,
+          updatedBy: "user",
+        });
+      }
+      group.updatedAt = Date.now();
+      this.broadcast({
+        type: "group_updated",
+        group: { ...group },
+        timestamp: group.updatedAt,
+      });
+      groups.push({ ...group, board: { ...group.board } });
+    }
+
+    this.broadcastBoardUpdated();
+    this.pumpBoard();
+    return groups;
+  }
+
+  listBoardCards(): BoardCard[] {
+    const cards: BoardCard[] = [];
+    for (const group of this.groups.values()) {
+      if (group.board && !group.archived) {
+        const waitingReason = this.boardWaiting(group.groupId);
+        cards.push({
+          groupId: group.groupId,
+          title: group.title,
+          leadAgent: group.leadAgent,
+          cwd: group.cwd,
+          board: { ...group.board },
+          waiting: Boolean(waitingReason),
+          waitingReason,
+        });
+      }
+    }
+    return cards.sort((a, b) => a.board.queuedAt - b.board.queuedAt);
+  }
+
+  private boardWaiting(_groupId: string): BoardWaitingReason | undefined {
+    return undefined;
+  }
+
+  private broadcastBoardUpdated(): void {
+    this.broadcast({
+      type: "board_updated",
+      cards: this.listBoardCards(),
+      timestamp: Date.now(),
+    });
+  }
+
+  private boardChanged(group: TaskGroup): void {
+    group.updatedAt = Date.now();
+    this.broadcast({
+      type: "group_updated",
+      group: { ...group },
+      timestamp: group.updatedAt,
+    });
+    this.broadcastBoardUpdated();
+    this.pumpBoard();
+  }
+
+  private pumpBoard(): void {
+    if (this.pumpingBoard) {
+      this.pumpPending = true;
+      return;
+    }
+    this.pumpingBoard = true;
+    try {
+      do {
+        this.pumpPending = false;
+        if (this.memory.get().level !== "ok") {
+          return;
+        }
+        const waitingIds = new Set<string>();
+        for (const group of this.groups.values()) {
+          if (group.board && !group.archived && this.boardWaiting(group.groupId)) {
+            waitingIds.add(group.groupId);
+          }
+        }
+        const toStart = pickToStart(
+          [...this.groups.values()],
+          waitingIds,
+          clampBoardParallel(this.settings.boardParallel),
+        );
+        for (const groupId of toStart) {
+          const group = this.groups.get(groupId);
+          if (!group || !group.board || group.board.status !== "queued") continue;
+          group.board.status = "running";
+          group.board.startedAt = Date.now();
+          this.boardChanged(group);
+
+          const rejectPrefix = group.board.rejectNote
+            ? `<rejected>\nThe user sent your previous delivery back. Their note: ${group.board.rejectNote}\n</rejected>\n\n`
+            : "";
+          const prompt = `${rejectPrefix}${group.board.brief}\n\n<task_board>\nThis task was published on the task board. When the work is finished, call the \`task_report\` tool with outcome "delivered", a short summary, and every deliverable (files as paths relative to the working directory). If the task cannot be done, call \`task_report\` with outcome "failed" and the reason. Do not end without calling it: the board only frees this task's slot when you report.\n</task_board>`;
+
+          void this.runLeadChat({ groupId, prompt }).catch((err) => {
+            if (group.board?.status === "running") {
+              group.board.status = "failed";
+              group.board.failReason = err instanceof Error ? err.message : String(err);
+              group.board.closedAt = Date.now();
+              this.boardChanged(group);
+            }
+          });
+        }
+      } while (this.pumpPending);
+    } finally {
+      this.pumpingBoard = false;
+    }
   }
 
   updateGroup(input: {
@@ -4125,6 +4332,22 @@ export class AgentHubServer {
         return;
       }
 
+      if (method === "GET" && pathname === "/api/board") {
+        sendJson(res, 200, {
+          ok: true,
+          cards: this.listBoardCards(),
+          parallel: clampBoardParallel(this.settings.boardParallel),
+        });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/board/publish") {
+        const body = PublishBoardBodySchema.parse(await readJsonBody(req));
+        const groups = this.publishBoardTasks(body);
+        sendJson(res, 200, { ok: true, groups });
+        return;
+      }
+
       if (method === "GET" && pathname === "/api/groups") {
         sendJson(res, 200, {
           ok: true,
@@ -4736,6 +4959,8 @@ export class AgentHubServer {
             autoTitle: z.boolean().optional(),
             workflowParallel: z.number().optional(),
             idleSubSessionMinutes: z.number().optional(),
+            boardParallel: z.number().optional(),
+            idleLeadMinutes: z.number().optional(),
           })
           .parse(await readJsonBody(req));
         sendJson(res, 200, { ok: true, settings: this.updateSettings(input) });
@@ -4963,6 +5188,7 @@ export class AgentHubServer {
     this.memory.start();
     this.idleSweepTimer = setInterval(() => this.sweepIdleSubSessions(), 60_000);
     this.idleSweepTimer.unref();
+    this.pumpBoard();
 
     if (this.writeRuntimeFile) {
       fs.mkdirSync(path.dirname(RUNTIME_FILE), { recursive: true });
