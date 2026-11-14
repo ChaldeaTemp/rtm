@@ -1,3 +1,4 @@
+import { DEFAULT_LOCALE, translate } from "../ui/locale.js";
 import { execFile, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -376,6 +377,7 @@ function readClaudeSettingsEnv(): Record<string, string> {
 export interface AgentAuthResult {
   authReady: boolean;
   authHint?: string;
+  authHintKey?: string;
 }
 
 /**
@@ -390,10 +392,14 @@ export interface AuthProbeSpec {
   timeoutMs: number;
   /** Returns true when stdout of a zero-exit run proves the agent is logged in. */
   interpret: (stdout: string) => boolean;
-  failHint: string;
+  failHintKey: string;
 }
 
 export type AgentAuthPlan = { result: AgentAuthResult } | { probe: AuthProbeSpec };
+
+function authFailure(key: string): AgentAuthResult {
+  return { authReady: false, authHint: translate(DEFAULT_LOCALE, key), authHintKey: key };
+}
 
 function interpretProbeOutput(
   spec: AuthProbeSpec,
@@ -407,7 +413,7 @@ function interpretProbeOutput(
   } catch {
     // Fall through to authHint
   }
-  return { authReady: false, authHint: spec.failHint };
+  return authFailure(spec.failHintKey);
 }
 
 export function runAuthProbeSync(spec: AuthProbeSpec): AgentAuthResult {
@@ -419,7 +425,7 @@ export function runAuthProbeSync(spec: AuthProbeSpec): AgentAuthResult {
     });
     return interpretProbeOutput(spec, res.status === 0, res.stdout);
   } catch {
-    return { authReady: false, authHint: spec.failHint };
+    return authFailure(spec.failHintKey);
   }
 }
 
@@ -433,7 +439,7 @@ export function runAuthProbe(spec: AuthProbeSpec): Promise<AgentAuthResult> {
         (err, stdout) => resolve(interpretProbeOutput(spec, !err, stdout)),
       );
     } catch {
-      resolve({ authReady: false, authHint: spec.failHint });
+      resolve(authFailure(spec.failHintKey));
     }
   });
 }
@@ -478,7 +484,7 @@ export function planAgentAuth(
               !/未登录|not logged in/i.test(claudeBlock);
             return hasLocalBind || hasDefaultOrg;
           },
-          failHint: "reclaude 未绑定 Claude 账号：请运行 reclaude login 完成绑定",
+          failHintKey: "authReclaude",
         },
       };
     }
@@ -491,7 +497,7 @@ export function planAgentAuth(
         args: viaCmd ? ["/d", "/c", "claude", "auth", "status"] : ["auth", "status"],
         timeoutMs: 4000,
         interpret: (stdout) => (JSON.parse(stdout) as { loggedIn?: boolean }).loggedIn === true,
-        failHint: "Claude CLI 未登录：请运行 claude login，或在 .rtm/secrets.json 配置 ANTHROPIC_API_KEY",
+        failHintKey: "authClaude",
       },
     };
   }
@@ -506,10 +512,7 @@ export function planAgentAuth(
     return {
       result: hasAuth
         ? { authReady: true }
-        : {
-            authReady: false,
-            authHint: "Codex 未认证：请运行 codex login 或在环境变量/.rtm/secrets.json 配置 OPENAI_API_KEY",
-          },
+        : authFailure("authCodex"),
     };
   }
 
@@ -528,10 +531,7 @@ export function planAgentAuth(
     return {
       result: hasAuth
         ? { authReady: true }
-        : {
-            authReady: false,
-            authHint: "OpenCode 未检测到配置或凭证：请运行 opencode auth login 或检查 ~/.config/opencode/opencode.json",
-          },
+        : authFailure("authOpenCode"),
     };
   }
 
@@ -558,10 +558,7 @@ export function planAgentAuth(
     return {
       result: hasAuth
         ? { authReady: true }
-        : {
-            authReady: false,
-            authHint: "Kimi CLI 未检测到登录凭证：请运行 kimi login 或在环境变量配置 KIMI_API_KEY",
-          },
+        : authFailure("authKimi"),
     };
   }
 
@@ -574,8 +571,7 @@ export function planAgentAuth(
     const adapterMode = (process.env.AGY_ADAPTER_MODE || localSecrets.AGY_ADAPTER_MODE || "").toLowerCase();
     const agyExe = adapterMode === "sdk" ? undefined : resolveAgyExecutable(localSecrets);
     if (agyExe) {
-      const failHint =
-        "Antigravity CLI 已安装但未登录：请在终端运行 agy 或 agy acp --login 完成一次 Google 账号登录（无需配置 GEMINI_API_KEY）";
+      const failHintKey = "authAntigravity";
       if (process.platform === "win32") {
         return {
           probe: {
@@ -584,7 +580,7 @@ export function planAgentAuth(
             args: ["/list"],
             timeoutMs: 3000,
             interpret: (stdout) => /gemini:antigravity/i.test(stdout),
-            failHint,
+            failHintKey,
           },
         };
       }
@@ -592,15 +588,10 @@ export function planAgentAuth(
       const hasCreds =
         fs.existsSync(path.join(cliDir, "oauth_creds.json")) ||
         fs.existsSync(path.join(cliDir, "credentials.json"));
-      return { result: hasCreds ? { authReady: true } : { authReady: false, authHint: failHint } };
+      return { result: hasCreds ? { authReady: true } : authFailure(failHintKey) };
     }
 
-    return {
-      result: {
-        authReady: false,
-        authHint: "未检测到 GEMINI_API_KEY：请在环境变量或 .rtm/secrets.json 中设置以启用 google-antigravity SDK",
-      },
-    };
+    return { result: authFailure("authGeminiKey") };
   }
 
   return { result: { authReady: true } };
@@ -643,6 +634,7 @@ export function checkAdaptersHealth(
       enabled: def.enabled,
       authReady: auth.authReady,
       authHint: auth.authHint,
+      authHintKey: auth.authHintKey,
       command: argv,
       customCommand: def.command,
       customArgs: def.args,

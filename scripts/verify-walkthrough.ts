@@ -8,6 +8,9 @@ import path from "node:path";
 import WebSocket from "ws";
 
 import { AgentHubServer } from "../src/hub/server.js";
+import { negotiateLocale } from "../src/hub/i18n.js";
+import { setLanguagePreference, th } from "../src/ui/i18n.js";
+import { messages } from "../src/ui/messages.js";
 import {
   buildInlinePreviewSrcdoc,
   computeDiffStats,
@@ -371,6 +374,17 @@ async function registerMockAgent(
 }
 
 async function main(): Promise<void> {
+  assert.equal(negotiateLocale("fr, en-US;q=0.8, zh;q=0.5"), "en");
+  assert.equal(negotiateLocale("en;q=0, zh-TW;q=0.5"), "zh-CN");
+  assert.equal(negotiateLocale("fr"), "zh-CN");
+  for (const [key, [chinese, english]] of Object.entries(messages)) {
+    const placeholders = (value: string) => [...value.matchAll(/\{\d+\}/g)].map(([token]) => token).sort();
+    assert.deepEqual(placeholders(chinese), placeholders(english), key);
+  }
+  setLanguagePreference("en");
+  assert.match(renderMarkdown("> [!WARNING]\n> 保留原文"), /Warning[\s\S]*保留原文/);
+  assert.equal(th("directoriesFor", "<test & test>"), "Directories for “&lt;test &amp; test&gt;”");
+  setLanguagePreference("zh-CN");
   runMarkdownUnitTests();
 
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "rtm-verify-walkthrough-"));
@@ -441,6 +455,29 @@ async function main(): Promise<void> {
     });
     const grpAJson = (await grpAResp.json()) as { group: { groupId: string } };
     const grpA = grpAJson.group.groupId;
+
+    console.log("=== Verify locale negotiation, exports and workflow errors ===");
+    await Promise.all([
+      ["en-US", "# Task 1", "## 1. Lead session history", "This workflow has no steps yet"],
+      ["zh-CN", "# 任务 1", "## 一、主导会话记录", "工作流还没有步骤"],
+    ].map(async ([language, title, heading, errorText]) => {
+      const headers = { "Accept-Language": language, "Content-Type": "application/json" };
+      const exported = await fetch(`${url}/api/groups/export`, { headers });
+      assert.equal(exported.status, 200);
+      assert.equal(exported.headers.get("content-language"), negotiateLocale(language));
+      const markdown = await exported.text();
+      assert.ok(markdown.startsWith(title));
+      assert.ok(markdown.includes(heading));
+      const namedGroup = await fetch(`${url}/api/groups/export?groupId=${grpA}`, { headers });
+      assert.ok((await namedGroup.text()).startsWith("# Group A"));
+      const workflow = await fetch(`${url}/api/workflows/run`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ groupId: grpA }),
+      });
+      assert.equal(workflow.status, 400);
+      assert.equal((await workflow.json() as { error: string }).error, errorText);
+    }));
 
     const artCreateResp = await fetch(`${url}/api/artifacts`, {
       method: "POST",

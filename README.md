@@ -86,6 +86,10 @@ npm run shortcut
 
 「设置 → 通用」里有三套风格可选：简约、经典、圆桌，各自都有浅色和深色。
 
+在同一页的「语言」中可以切换简体中文或英文，也可以跟随浏览器。RTM 会记住选择，导出 Markdown 也会使用当前界面语言。
+
+终端命令可以通过环境变量 `RTM_LANG` 选择语言，支持 `zh-CN` 和 `en`。
+
 ![圆桌皮肤，深色](docs/screenshots/skin-roundtable.png)
 
 ## 使用前请知道

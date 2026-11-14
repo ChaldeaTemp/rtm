@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -145,7 +146,7 @@ function assertWorktreeInsideRepo(repoRoot: string, worktreePath: string): strin
     return normTarget.startsWith(normParent + path.sep);
   });
   if (!insideAllowed) {
-    throw new Error(`拒绝访问非托管目录之外的 worktree：${resolvedTarget}`);
+    throw new Error(t("accessDeniedToWorktreeOutsideTheManaged", resolvedTarget));
   }
   return resolvedTarget;
 }
@@ -192,7 +193,7 @@ export function inspectWorktreeChanges(baseCwd: string, worktreePath: string): W
   const repoRoot = runGit(path.resolve(baseCwd), ["rev-parse", "--show-toplevel"]);
   const resolvedTarget = assertWorktreeInsideRepo(repoRoot, worktreePath);
   if (!fs.existsSync(resolvedTarget)) {
-    throw new Error("该会话关联的 worktree 目录已不存在");
+    throw new Error(t("theWorktreeForThisSessionNoLonger"));
   }
 
   const branch = runGit(resolvedTarget, ["rev-parse", "--abbrev-ref", "HEAD"]) || "(detached)";
@@ -221,17 +222,17 @@ export function inspectWorktreeChanges(baseCwd: string, worktreePath: string): W
     try {
       const stat = fs.statSync(absPath);
       if (!stat.isFile() || stat.size > 64 * 1024) {
-        untrackedChunks.push(`--- /dev/null\n+++ b/${relPath}\n@@ -0,0 +1 @@\n+[新增文件 (${stat.size} 字节)]`);
+        untrackedChunks.push(t("untrackedFileDiff", relPath, stat.size));
         continue;
       }
       const raw = fs.readFileSync(absPath);
       if (raw.includes(0)) {
-        untrackedChunks.push(`--- /dev/null\n+++ b/${relPath}\n@@ -0,0 +1 @@\n+[新增二进制文件 (${stat.size} 字节)]`);
+        untrackedChunks.push(t("untrackedBinaryDiff", relPath, stat.size));
         continue;
       }
       const lines = raw.toString("utf8").split(/\r?\n/);
       const preview = lines.slice(0, 200).map((line) => `+${line}`).join("\n");
-      const more = lines.length > 200 ? `\n+...（共 ${lines.length} 行，预览已省略后续内容）` : "";
+      const more = lines.length > 200 ? t("diffLineLimit", lines.length) : "";
       untrackedChunks.push(`diff --git a/${relPath} b/${relPath}\nnew file mode 100644\n--- /dev/null\n+++ b/${relPath}\n@@ -0,0 +1,${lines.length} @@\n${preview}${more}`);
     } catch {
       // Ignore unreadable untracked entry
@@ -241,7 +242,7 @@ export function inspectWorktreeChanges(baseCwd: string, worktreePath: string): W
   let combined = [diff.trimEnd(), ...untrackedChunks].filter(Boolean).join("\n\n");
   let truncated = false;
   if (combined.length > MAX_DIFF_CHARS) {
-    combined = `${combined.slice(0, MAX_DIFF_CHARS)}\n\n... [Diff 输出超过 ${MAX_DIFF_CHARS} 字符，已截断]`;
+    combined = t("diffCharacterLimit", combined.slice(0, MAX_DIFF_CHARS), MAX_DIFF_CHARS);
     truncated = true;
   }
 
@@ -264,12 +265,12 @@ export function mergeSessionWorktree(baseCwd: string, worktreePath: string): Wor
   const repoRoot = runGit(path.resolve(baseCwd), ["rev-parse", "--show-toplevel"]);
   const resolvedTarget = assertWorktreeInsideRepo(repoRoot, worktreePath);
   if (!fs.existsSync(resolvedTarget)) {
-    throw new Error("该会话关联的 worktree 目录已不存在，无法合入");
+    throw new Error(t("cannotMergeBecauseTheSessionsWorktreeNo"));
   }
 
   const branch = runGit(resolvedTarget, ["rev-parse", "--abbrev-ref", "HEAD"]);
   if (!branch || branch === "HEAD") {
-    throw new Error("Worktree 处于 detached HEAD 状态，无法自动合入");
+    throw new Error(t("cannotMergeAutomaticallyFromADetachedHead"));
   }
 
   const worktreeStatus = runGit(resolvedTarget, ["status", "--short"]);
@@ -291,7 +292,7 @@ export function mergeSessionWorktree(baseCwd: string, worktreePath: string): Wor
       alreadyUpToDate: true,
       branch,
       commit: baseHead,
-      summary: "Worktree 分支相对于主工作区没有新的改动，无需合入。",
+      summary: t("theWorktreeBranchHasNoChangesTo"),
     };
   } catch {
     // Has new commits ahead of baseHead; proceed to merge
@@ -304,7 +305,7 @@ export function mergeSessionWorktree(baseCwd: string, worktreePath: string): Wor
       merged: true,
       branch,
       commit: newHead,
-      summary: mergeOutput || `已成功将分支 ${branch} 合入当前主分支。`,
+      summary: mergeOutput || t("mergedBranchIntoTheCurrentMainBranch", branch),
     };
   } catch (err) {
     try {
@@ -313,7 +314,7 @@ export function mergeSessionWorktree(baseCwd: string, worktreePath: string): Wor
       // Ignore if merge state did not enter conflicted state (e.g., dirty worktree error)
     }
     const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`合入分支「${branch}」失败，已自动回滚保持主工作区不变：${detail}`);
+    throw new Error(t("couldNotMergeBranchTheMergeWas", branch, detail));
   }
 }
 

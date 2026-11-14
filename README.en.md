@@ -88,6 +88,10 @@ The long-term default lead is set in the same place.
 
 Settings → General offers three skins, each with a light and a dark variant: Simple, Classic and Round Table.
 
+Open **Settings → General → Language** to choose English, Simplified Chinese, or the browser language. RTM remembers your choice and uses it for Markdown exports.
+
+Set `RTM_LANG` to `en` or `zh-CN` to choose the language for terminal commands.
+
 ![Round Table skin, dark](docs/screenshots/skin-roundtable.png)
 
 ## Before you use it

@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 import type { AgentId, TaskContext, TaskContextSection } from "../types.js";
 
 /** The section every sub-session of a task receives. */
@@ -62,10 +63,10 @@ export class TaskContextStore {
   ): TaskContext {
     const key = input.key.trim().toLowerCase();
     if (!SECTION_KEY_RE.test(key)) {
-      throw new Error(`分区名「${input.key}」只能用小写字母、数字、- _ . :，且不超过 48 个字符`);
+      throw new Error(t("sectionKeyMustBeAtMost48", input.key));
     }
     if (key.startsWith(RESULT_PREFIX)) {
-      throw new Error("以 result: 开头的分区由步骤结果自动写入，不能手动修改");
+      throw new Error(t("keysStartingWithResultAreReservedFor"));
     }
     const sections = this.ensure(groupId);
     const content = input.content.trim();
@@ -73,7 +74,7 @@ export class TaskContextStore {
       sections.delete(key);
     } else {
       if (!sections.has(key) && sections.size >= MAX_SECTIONS) {
-        throw new Error(`一个任务最多 ${MAX_SECTIONS} 个分区`);
+        throw new Error(t("aTaskCanContainUpToSections", MAX_SECTIONS));
       }
       const isCommon = key === COMMON_SECTION_KEY;
       sections.set(key, {

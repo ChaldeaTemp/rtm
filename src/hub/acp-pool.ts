@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 import fs from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -826,7 +827,7 @@ export class AcpPool extends EventEmitter {
     // the agent were not installed. Say what is actually wrong.
     if (!fs.existsSync(workspace.effectiveCwd)) {
       throw new Error(
-        `工作目录不存在：${workspace.effectiveCwd}。请在任务的「目录」里改成一个存在的目录。`,
+        t("workingDirectoryDoesNotExistChooseAn", workspace.effectiveCwd),
       );
     }
     const resolvedCmd = this.registry

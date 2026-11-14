@@ -1,3 +1,5 @@
+import { getLocale, th, t } from "./i18n.js";
+
 // Pure ESM markdown, syntax highlighting, inline preview, unified diff, and retry-fold helpers.
 // Safe to import in both the browser UI and Node/tsx verification scripts.
 
@@ -100,7 +102,7 @@ svg { max-width: 100%; height: auto; }
     const mermaidSrc = `${origin}/ui/vendor/mermaid.min.js`;
     const mermaidTheme = dark ? "dark" : "default";
     return `<!doctype html>
-<html data-theme="${dark ? "dark" : "light"}" data-skin="${escapeHtml(skin)}">
+<html lang="${getLocale()}" data-theme="${dark ? "dark" : "light"}" data-skin="${escapeHtml(skin)}">
 <head>
 <meta charset="utf-8" />
 ${baseCss}
@@ -121,7 +123,7 @@ body { display: flex; justify-content: center; align-items: flex-start; min-heig
     await window.mermaid.run({ nodes: [el] });
   } catch (err) {
     el.className = "mermaid-error";
-    el.textContent = "Mermaid render error: " + (err && err.message ? err.message : String(err)) + "\\n\\n" + ${JSON.stringify(code)};
+    el.textContent = ${JSON.stringify(t("mermaidRenderError"))} + (err && err.message ? err.message : String(err)) + "\\n\\n" + ${JSON.stringify(code)};
   }
 })();
 </script>
@@ -131,7 +133,7 @@ body { display: flex; justify-content: center; align-items: flex-start; min-heig
 
   if (normalizedLang === "svg") {
     return `<!doctype html>
-<html data-theme="${dark ? "dark" : "light"}" data-skin="${escapeHtml(skin)}">
+<html lang="${getLocale()}" data-theme="${dark ? "dark" : "light"}" data-skin="${escapeHtml(skin)}">
 <head><meta charset="utf-8" />${baseCss}
 <style>body { display: flex; justify-content: center; align-items: center; min-height: 100vh; }</style>
 </head>
@@ -150,7 +152,7 @@ body { display: flex; justify-content: center; align-items: flex-start; min-heig
   }
 
   return `<!doctype html>
-<html data-theme="${dark ? "dark" : "light"}" data-skin="${escapeHtml(skin)}">
+<html lang="${getLocale()}" data-theme="${dark ? "dark" : "light"}" data-skin="${escapeHtml(skin)}">
 <head><meta charset="utf-8" />${baseCss}</head>
 <body>${code}</body>
 </html>`;
@@ -364,7 +366,7 @@ function renderCodeBlockHtml(lang, code, opts) {
   if (canPreview) {
     const srcdoc = buildInlinePreviewSrcdoc(normalizedLang, code, opts);
     const defaultOpen = normalizedLang === "mermaid" || normalizedLang === "svg";
-    toggleBtnHtml = `<button class="md-preview-toggle" type="button" data-preview-toggle>${defaultOpen ? "查看源码" : "实时预览"}</button>`;
+    toggleBtnHtml = `<button class="md-preview-toggle" type="button" data-preview-toggle>${defaultOpen ? t("viewSource") : t("livePreview")}</button>`;
     previewHtml = `<div class="md-preview-box"${defaultOpen ? "" : " hidden"}>
       <iframe class="md-preview-frame" sandbox="allow-scripts" referrerpolicy="no-referrer" srcdoc="${escapeHtml(srcdoc)}"></iframe>
     </div>`;
@@ -378,7 +380,7 @@ function renderCodeBlockHtml(lang, code, opts) {
       <span class="md-code-lang">${langBadge}</span>
       <div class="md-code-actions">
         ${toggleBtnHtml}
-        <button class="md-copy-btn" type="button" data-copy-code>复制</button>
+        <button class="md-copy-btn" type="button" data-copy-code>${th("copy")}</button>
       </div>
     </div>
     ${previewHtml}
@@ -419,11 +421,11 @@ export function decodeUtf8Base64(b64) {
 }
 
 const ALERT_TITLES = {
-  NOTE: "提示",
-  TIP: "建议",
-  IMPORTANT: "重要",
-  WARNING: "注意",
-  CAUTION: "警告",
+  NOTE: "alertNote",
+  TIP: "alertTip",
+  IMPORTANT: "alertImportant",
+  WARNING: "alertWarning",
+  CAUTION: "alertCaution",
 };
 
 function renderBlockquote(rawLines, opts) {
@@ -435,7 +437,7 @@ function renderBlockquote(rawLines, opts) {
     const bodyLines = [...restFirst, ...rawLines.slice(1)];
     const bodyHtml = renderMarkdown(bodyLines.join("\n"), opts);
     return `<div class="md-alert md-alert-${kind.toLowerCase()}">
-      <div class="md-alert-title">${ALERT_TITLES[kind] || kind}</div>
+      <div class="md-alert-title">${th(ALERT_TITLES[kind] || kind)}</div>
       <div class="md-alert-body">${bodyHtml}</div>
     </div>`;
   }
@@ -766,7 +768,7 @@ export function computeDiffStats(oldText, newText) {
 export function renderUnifiedDiff(oldText, newText, filePath) {
   const ops = computeLineDiffOps(oldText, newText);
   if (ops.length === 0) {
-    return `<div class="diff-view"><div class="diff-empty">无文本变更</div></div>`;
+    return `<div class="diff-view"><div class="diff-empty">${th("noTextChanges")}</div></div>`;
   }
 
   const CONTEXT = 3;
@@ -782,7 +784,7 @@ export function renderUnifiedDiff(oldText, newText, filePath) {
   }
 
   if (!hasChanges) {
-    return `<div class="diff-view">${filePath ? `<div class="diff-file-head">${escapeHtml(filePath)}</div>` : ""}<div class="diff-empty">文件内容一致（无变更）</div></div>`;
+    return `<div class="diff-view">${filePath ? `<div class="diff-file-head">${escapeHtml(filePath)}</div>` : ""}<div class="diff-empty">${th("fileContentsAreIdentical")}</div></div>`;
   }
 
   let rowsHtml = "";
@@ -794,7 +796,7 @@ export function renderUnifiedDiff(oldText, newText, filePath) {
         skipped++;
         idx++;
       }
-      rowsHtml += `<tr class="diff-row-fold"><td class="diff-ln" colspan="2">⋯</td><td class="diff-sign"></td><td class="diff-code">省略 ${skipped} 行未修改内容</td></tr>`;
+      rowsHtml += `<tr class="diff-row-fold"><td class="diff-ln" colspan="2">⋯</td><td class="diff-sign"></td><td class="diff-code">${th("unchangedLinesHidden", skipped)}</td></tr>`;
       continue;
     }
     const op = ops[idx];
@@ -844,7 +846,7 @@ export function summarizeRetryErrorText(rawText) {
     .replace(/^\s*\[Error\]\s*/i, "")
     .replace(/\s+/g, " ")
     .trim();
-  if (!singleLine) return "会话执行失败";
+  if (!singleLine) return t("sessionFailed");
   return singleLine.length > 96 ? `${singleLine.slice(0, 93)}...` : singleLine;
 }
 

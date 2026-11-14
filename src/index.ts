@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import type { AgentId, PermissionMode } from "./types.js";
 import { findAvailablePort } from "./hub/port-finder.js";
+import { t } from "./hub/i18n.js";
 import { checkAdaptersHealth, PROJECT_ROOT } from "./hub/process-tree.js";
 import { AgentHubServer, readRuntimeFile } from "./hub/server.js";
 import { createDesktopShortcut, planDesktopLaunch, saveDesktopPrefs } from "./desktop.js";
@@ -126,7 +127,7 @@ async function main(): Promise<void> {
   const opts = parseCliFlags(process.argv.slice(2));
 
   if (opts.command === "shortcut") {
-    console.log(`Desktop shortcut created: ${createDesktopShortcut()}`);
+    console.log(t("cliShortcutCreated", createDesktopShortcut()));
     return;
   }
 
@@ -149,7 +150,7 @@ async function main(): Promise<void> {
     if (plan.reuseUrl) {
       // Already running: a second launch only brings up another window.
       if (!opts.noOpen) openInteractiveWindow(plan.reuseUrl, true);
-      console.log(`RTM is already running at ${plan.reuseUrl}`);
+      console.log(t("cliAlreadyRunning", plan.reuseUrl));
       return;
     }
     opts.desktopMode = true;
@@ -234,7 +235,7 @@ async function main(): Promise<void> {
     if (opts.command === "exec") {
       const prompt = opts.positionals.join(" ").trim();
       if (!prompt) {
-        throw new Error("Usage: rtm exec [--lead claude|codex|agy] \"<prompt>\"");
+        throw new Error(t("cliExecUsage"));
       }
       const res = await hub.runLeadChat({ prompt, leadAgent: defaultLead });
       console.log(res.outputText);
@@ -245,7 +246,7 @@ async function main(): Promise<void> {
       console.log(`RTM desktop server listening at ${url} (cwd: ${hub.baseCwd})`);
       if (opts.openUi && !opts.noOpen) {
         const launched = openInteractiveWindow(url, true);
-        console.log(`Interactive UI opened (${launched.mode}) at ${url}`);
+        console.log(t("cliInteractiveOpened", launched.mode, url));
       }
       await new Promise<void>(() => {});
       return;
@@ -253,7 +254,7 @@ async function main(): Promise<void> {
 
     if (opts.openUi && !opts.noOpen) {
       const launched = openInteractiveWindow(url, true);
-      console.log(`Interactive UI opened (${launched.mode}) at ${url}`);
+      console.log(t("cliInteractiveOpened", launched.mode, url));
     }
 
     await runRepl(hub);
@@ -265,6 +266,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error("[rtm] Fatal:", err instanceof Error ? err.message : String(err));
+  console.error(t("cliFatal"), err instanceof Error ? err.message : String(err));
   process.exit(1);
 });

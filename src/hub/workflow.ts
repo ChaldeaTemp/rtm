@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 import type { AgentId, TaskRecord, WorkflowRecord, WorkflowStep, WorkflowStepInput } from "../types.js";
 
 const MAX_STEPS = 20;
@@ -62,10 +63,10 @@ export class WorkflowManager {
   save(groupId: string, rawSteps: WorkflowStepInput[], proposedBy: AgentId | "user"): WorkflowRecord {
     const current = this.workflows.get(groupId);
     if (current?.status === "running") {
-      throw new Error("工作流正在运行，先停止或等它结束再修改");
+      throw new Error(t("stopTheWorkflowOrWaitForIt"));
     }
     if (rawSteps.length > MAX_STEPS) {
-      throw new Error(`一个工作流最多 ${MAX_STEPS} 步`);
+      throw new Error(t("aWorkflowCanContainUpToSteps", MAX_STEPS));
     }
 
     const steps: WorkflowStep[] = [];
@@ -73,15 +74,15 @@ export class WorkflowManager {
     rawSteps.forEach((raw, index) => {
       const id = (raw.id ?? "").trim().toLowerCase() || `step${index + 1}`;
       if (!STEP_ID_RE.test(id)) {
-        throw new Error(`步骤 ID「${raw.id}」只能用小写字母、数字、- 和 _`);
+        throw new Error(t("stepIdCanOnlyContainLowercaseLetters", raw.id));
       }
       if (seen.has(id)) {
-        throw new Error(`步骤 ID「${id}」重复`);
+        throw new Error(t("duplicateStepId", id));
       }
       seen.add(id);
       const agent = (raw.agent ?? "").trim().toLowerCase();
       if (!this.deps.isKnownAgent(agent)) {
-        throw new Error(`步骤「${id}」的 Agent「${raw.agent}」不存在`);
+        throw new Error(t("agentForStepDoesNotExist", id, raw.agent));
       }
       // A draft may still have empty steps; run() is where a missing task is refused.
       const prompt = (raw.prompt ?? "").trim();
@@ -101,7 +102,7 @@ export class WorkflowManager {
     for (const step of steps) {
       for (const dep of step.dependsOn) {
         if (dep === step.id || !seen.has(dep)) {
-          throw new Error(`步骤「${step.id}」依赖的「${dep}」不存在`);
+          throw new Error(t("stepDependsOnMissingStep", step.id, dep));
         }
       }
     }
@@ -117,21 +118,21 @@ export class WorkflowManager {
   run(groupId: string): WorkflowRecord {
     const workflow = this.workflows.get(groupId);
     if (!workflow || workflow.steps.length === 0) {
-      throw new Error("工作流还没有步骤");
+      throw new Error(t("thisWorkflowHasNoStepsYet"));
     }
     if (workflow.status === "running") {
-      throw new Error("工作流已经在运行");
+      throw new Error(t("theWorkflowIsAlreadyRunning"));
     }
     const empty = workflow.steps.filter((s) => !s.prompt.trim());
     if (empty.length > 0) {
-      throw new Error(`这些步骤还没有写任务内容：${empty.map((s) => s.name).join("、")}`);
+      throw new Error(t("stepsWithoutInstructions", empty.map((s) => s.name).join("、")));
     }
     const missing = new Set<string>();
     for (const step of workflow.steps) {
       for (const key of this.deps.missingContext(groupId, step.contextRefs ?? [])) missing.add(key);
     }
     if (missing.size > 0) {
-      throw new Error(`这些步骤引用的上下文分区不存在：${[...missing].join("、")}`);
+      throw new Error(t("referencedContextSectionsDoNotExist", [...missing].join("、")));
     }
     this.deps.clearResults(groupId);
     for (const step of workflow.steps) {
@@ -139,6 +140,7 @@ export class WorkflowManager {
       step.taskId = undefined;
       step.sessionKey = undefined;
       step.error = undefined;
+      step.errorKind = undefined;
       step.output = undefined;
       step.phase = undefined;
       step.round = undefined;
@@ -156,25 +158,25 @@ export class WorkflowManager {
   retryFailed(groupId: string): WorkflowRecord {
     const workflow = this.workflows.get(groupId);
     if (!workflow || workflow.steps.length === 0) {
-      throw new Error("工作流还没有步骤");
+      throw new Error(t("thisWorkflowHasNoStepsYet"));
     }
     if (workflow.status === "running") {
-      throw new Error("工作流正在运行，请先停止或等待当前步骤结束");
+      throw new Error(t("stopTheWorkflowOrWaitForThe"));
     }
     const incomplete = workflow.steps.filter((s) => s.status !== "completed");
     if (incomplete.length === 0) {
-      throw new Error("所有步骤均已完成，无需重试");
+      throw new Error(t("allStepsAreCompleteThereIsNothing"));
     }
     const empty = incomplete.filter((s) => !s.prompt.trim());
     if (empty.length > 0) {
-      throw new Error(`这些步骤还没有写任务内容：${empty.map((s) => s.name).join("、")}`);
+      throw new Error(t("stepsWithoutInstructions", empty.map((s) => s.name).join("、")));
     }
     const missing = new Set<string>();
     for (const step of incomplete) {
       for (const key of this.deps.missingContext(groupId, step.contextRefs ?? [])) missing.add(key);
     }
     if (missing.size > 0) {
-      throw new Error(`这些步骤引用的上下文分区不存在：${[...missing].join("、")}`);
+      throw new Error(t("referencedContextSectionsDoNotExist", [...missing].join("、")));
     }
     for (const step of workflow.steps) {
       if (step.status === "completed") {
@@ -187,6 +189,7 @@ export class WorkflowManager {
       step.taskId = undefined;
       step.sessionKey = undefined;
       step.error = undefined;
+      step.errorKind = undefined;
       step.output = undefined;
       step.phase = undefined;
       step.round = undefined;
@@ -205,14 +208,14 @@ export class WorkflowManager {
   resume(groupId: string): WorkflowRecord {
     const workflow = this.workflows.get(groupId);
     if (!workflow || workflow.steps.length === 0) {
-      throw new Error("工作流还没有步骤");
+      throw new Error(t("thisWorkflowHasNoStepsYet"));
     }
     if (workflow.status === "running") {
-      throw new Error("工作流已经在运行");
+      throw new Error(t("theWorkflowIsAlreadyRunning"));
     }
     const unfinished = workflow.steps.filter((s) => s.status !== "completed");
     if (workflow.status === "draft" || unfinished.length === 0) {
-      throw new Error("没有可以继续的步骤");
+      throw new Error(t("thereAreNoStepsToResume"));
     }
     for (const step of workflow.steps) {
       if (step.status === "completed") {
@@ -225,6 +228,7 @@ export class WorkflowManager {
       step.taskId = undefined;
       step.sessionKey = undefined;
       step.error = undefined;
+      step.errorKind = undefined;
       step.output = undefined;
       step.phase = undefined;
       step.round = undefined;
@@ -257,7 +261,7 @@ export class WorkflowManager {
     const agent = (raw?.agent ?? "").trim().toLowerCase();
     if (!agent) return undefined;
     if (!this.deps.isKnownAgent(agent)) {
-      throw new Error(`步骤「${stepId}」的验收方「${raw?.agent}」不存在`);
+      throw new Error(t("reviewerForStepDoesNotExist", stepId, raw?.agent));
     }
     const rounds = Math.floor(Number(raw?.maxRounds));
     return {
@@ -312,13 +316,15 @@ export class WorkflowManager {
     }
     if (!verdict) {
       step.status = "failed";
-      step.error = "验收方没有给出 VERDICT 结论，需要人工判断";
+      step.errorKind = "reviewVerdictMissing";
+      step.error = t(step.errorKind);
       return;
     }
     const round = step.round ?? 1;
     if (round >= review.maxRounds) {
       step.status = "failed";
-      step.error = `验收未通过（已验收 ${round} 轮）`;
+      step.errorKind = "reviewAttemptsExhausted";
+      step.error = t(step.errorKind, round);
       return;
     }
     // Same session as before, so the agent still has its own context for the rework.
@@ -397,7 +403,8 @@ export class WorkflowManager {
         for (const step of workflow.steps) {
           if (step.status === "running" || step.status === "pending") {
             step.status = "cancelled";
-            step.error = "hub 重启时中断";
+            step.errorKind = "serviceRestarted";
+            step.error = t(step.errorKind);
           }
         }
         workflow.status = "failed";
@@ -462,7 +469,7 @@ export class WorkflowManager {
     while (remaining.size > 0) {
       const ready = [...remaining.entries()].filter(([, deps]) => deps.size === 0).map(([id]) => id);
       if (ready.length === 0) {
-        throw new Error(`步骤之间存在循环依赖：${[...remaining.keys()].join("、")}`);
+        throw new Error(t("workflowStepsContainADependencyCycle", [...remaining.keys()].join("、")));
       }
       for (const id of ready) {
         remaining.delete(id);

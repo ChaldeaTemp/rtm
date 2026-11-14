@@ -1,4 +1,6 @@
 import readline from "node:readline";
+import { getLocale, t } from "../hub/i18n.js";
+import { taskTitle } from "../ui/locale.js";
 import type { AgentId, HubEvent, PermissionMode } from "../types.js";
 import type { AgentHubServer } from "../hub/server.js";
 import { openInteractiveWindow } from "../ui/launcher.js";
@@ -47,7 +49,7 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
           wroteStreamLine = false;
         }
         process.stdout.write(
-          `\x1b[90m[${event.sessionKey}] tool: ${event.title}${event.status ? ` (${event.status})` : ""}\x1b[0m\n`,
+          t("cliTool", event.sessionKey, event.title, event.status ? ` (${event.status})` : ""),
         );
       }
     } else if (event.type === "task_updated") {
@@ -61,7 +63,7 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
           wroteStreamLine = false;
         }
         process.stdout.write(
-          `\x1b[36m[peer ${event.task.taskId} | ${event.task.groupId}] ${event.task.callerAgent} -> ${event.task.targetAgent}: ${event.task.status}\x1b[0m\n`,
+          t("cliPeer", event.task.taskId, event.task.groupId, event.task.callerAgent, event.task.targetAgent, event.task.status),
         );
       }
     } else if (event.type === "permission_requested") {
@@ -71,7 +73,7 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
       }
       const p = event.permission;
       process.stdout.write(
-        `\x1b[33m[permission] ${p.sessionKey} requests "${p.toolTitle}". Open /ui to approve or resolve via API (requestId=${p.requestId}).\x1b[0m\n`,
+        t("cliPermission", p.sessionKey, p.toolTitle, p.requestId),
       );
     } else if (event.type === "artifact_created") {
       if (wroteStreamLine) {
@@ -79,7 +81,7 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
         wroteStreamLine = false;
       }
       process.stdout.write(
-        `\x1b[35m[artifact] ${event.artifact.title} (${event.artifact.kind}) -> ${hub.getUrl()}/artifacts/${event.artifact.artifactId}\x1b[0m\n`,
+        t("cliArtifact", event.artifact.title, event.artifact.kind, hub.getUrl(), event.artifact.artifactId),
       );
     } else if (event.type === "question_requested") {
       if (wroteStreamLine) {
@@ -87,7 +89,7 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
         wroteStreamLine = false;
       }
       process.stdout.write(
-        `\x1b[33m[question] ${event.question.title} (questionId=${event.question.questionId}) - open /ui to answer.\x1b[0m\n`,
+        t("cliQuestion", event.question.title, event.question.questionId),
       );
     }
   };
@@ -100,13 +102,13 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
     const activeModel = leadSess?.currentModelId || grp.leadModel;
     const modelSuffix = activeModel ? `(${activeModel})` : "";
     rl.setPrompt(
-      `[${grp.title} (${grp.groupId}) | lead:${grp.leadAgent}${modelSuffix} | ${hub.pool.getPermissionMode()}] > `,
+      t("cliPrompt", taskTitle(getLocale(), grp), grp.groupId, grp.leadAgent, modelSuffix, hub.pool.getPermissionMode()),
     );
     rl.prompt();
   };
 
-  console.log(`RTM started at ${hub.getUrl()} (cwd: ${hub.baseCwd})`);
-  console.log(`Type a prompt, or /help for commands (/tasks, /new, /use, /lead, /models, /model, /subs, /ui, /quit).`);
+  console.log(t("cliStarted", hub.getUrl(), hub.baseCwd));
+  console.log(t("cliIntro"));
   printPrompt();
 
   for await (const rawLine of rl) {
@@ -128,24 +130,24 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
         const enabledIds = hub.registry.listEnabledIds().join("|");
         console.log(
           [
-            "Commands:",
-            "  /tasks                       List all task groups and sub-session counts",
-            `  /new [${enabledIds}] [title]  Create a new parallel task group and switch to it`,
-            "  /use <groupId>               Switch active task group",
-            `  /lead <${enabledIds}>        Switch the lead agent of the current task group`,
-            "  /models [agent] [--refresh]  Discover available models & effort levels for an agent",
-            "  /model [id|auto] [effort]    Inspect or switch model/effort for the current task group",
-            "  /subs                        List all sub-sessions in the current task group",
-            "  /agents                      List built-in and custom ACP agents & availability",
-            "  /ui | /pop                   Open interactive desktop app window",
-            "  /browser                     Open interactive workbench in default browser",
-            "  /sessions                    List all active ACP sessions and worktrees",
-            "  /worktrees                   List sessions isolated in git worktrees",
-            "  /resources                   List shared rules & skills and per-agent budgets",
-            "  /usage                       Show token consumption and context injection summary",
-            "  /approve <all|reads|manual>  Set tool permission policy",
-            "  /cancel <sessionKey>         Cancel a busy session",
-            "  /quit                        Stop hub and exit",
+            t("cliCommands"),
+            t("cliHelpTasks"),
+            t("cliHelpNew", enabledIds),
+            t("cliHelpUse"),
+            t("cliHelpLead", enabledIds),
+            t("cliHelpModels"),
+            t("cliHelpModel"),
+            t("cliHelpSubs"),
+            t("cliHelpAgents"),
+            t("cliHelpUi"),
+            t("cliHelpBrowser"),
+            t("cliHelpSessions"),
+            t("cliHelpWorktrees"),
+            t("cliHelpResources"),
+            t("cliHelpUsage"),
+            t("cliHelpApprove"),
+            t("cliHelpCancel"),
+            t("cliHelpQuit"),
           ].join("\n"),
         );
       } else if (cmd === "/tasks") {
@@ -154,7 +156,7 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
         for (const g of groups) {
           const subs = sessions.filter((s) => s.groupId === g.groupId && s.role === "sub").length;
           const marker = g.groupId === currentGroupId ? "*" : " ";
-          console.log(`${marker} ${g.groupId}  ${g.title}  lead=${g.leadAgent}  subs=${subs}`);
+          console.log(t("cliTaskRow", marker, g.groupId, taskTitle(getLocale(), g), g.leadAgent, subs));
         }
       } else if (cmd === "/new") {
         let leadAgent: AgentId | undefined;
@@ -166,24 +168,24 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
         const title = titleParts.join(" ").trim() || undefined;
         const created = hub.createGroup({ title, leadAgent });
         currentGroupId = created.groupId;
-        console.log(`Created & switched to task ${created.groupId} (${created.title}, lead=${created.leadAgent})`);
+        console.log(t("cliCreatedTask", created.groupId, taskTitle(getLocale(), created), created.leadAgent));
       } else if (cmd === "/use") {
         if (!arg || !hub.getGroup(arg)) {
-          console.log("Usage: /use <groupId> (run /tasks to see group IDs)");
+          console.log(t("cliUseUsage"));
         } else {
           currentGroupId = arg;
           const g = hub.getGroup(arg)!;
-          console.log(`Switched to task ${g.groupId} (${g.title}, lead=${g.leadAgent})`);
+          console.log(t("cliSwitchedTask", g.groupId, taskTitle(getLocale(), g), g.leadAgent));
         }
       } else if (cmd === "/lead") {
         const g = ensureValidGroup();
         if (!arg || !hub.registry.isEnabledAgent(arg)) {
           console.log(
-            `Usage: /lead <${hub.registry.listEnabledIds().join("|")}> (current for ${g.groupId}: ${g.leadAgent})`,
+            t("cliLeadUsage", hub.registry.listEnabledIds().join("|"), g.groupId, g.leadAgent),
           );
         } else {
           hub.setGroupLeadAgent(g.groupId, arg);
-          console.log(`Lead for task ${g.groupId} switched to ${arg}`);
+          console.log(t("cliChangedLead", g.groupId, arg));
         }
       } else if (cmd === "/models") {
         const g = ensureValidGroup();
@@ -191,15 +193,15 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
         const candidateAgent = rest.find((r) => r !== "--refresh");
         const targetAgent =
           candidateAgent && hub.registry.isKnownAgent(candidateAgent) ? candidateAgent : g.leadAgent;
-        console.log(`Probing/loading models for ${targetAgent}...`);
+        console.log(t("cliProbingModels", targetAgent));
         const catalog = await hub.registry.discoverModels(targetAgent, hub.baseCwd, refresh);
-        console.log(`Models for ${targetAgent} (current/default=${catalog.currentModelId ?? "auto"}):`);
+        console.log(t("cliModelList", targetAgent, catalog.currentModelId ?? "auto"));
         for (const m of catalog.models) {
           console.log(`  - ${m.id}${m.name && m.name !== m.id ? ` (${m.name})` : ""}`);
         }
         if (catalog.effort) {
           console.log(
-            `Effort (${catalog.effort.configId}, current=${catalog.effort.currentValue}): ${catalog.effort.options.map((o) => o.id).join(", ")}`,
+            t("cliModelEffort", catalog.effort.configId, catalog.effort.currentValue, catalog.effort.options.map((o) => o.id).join(", ")),
           );
         }
       } else if (cmd === "/model") {
@@ -207,7 +209,7 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
         const leadSess = hub.pool.getSession(`${g.leadAgent}:${g.groupId}__lead`);
         if (!arg) {
           console.log(
-            `Task ${g.groupId} lead=${g.leadAgent}: configured=(model=${g.leadModel ?? "auto"}, effort=${g.leadEffort ?? "auto"}), liveSession=(model=${leadSess?.currentModelId ?? "-"}, effort=${leadSess?.currentEffort ?? "-"})`,
+            t("cliModelSettings", g.groupId, g.leadAgent, g.leadModel ?? "auto", g.leadEffort ?? "auto", leadSess?.currentModelId ?? "-", leadSess?.currentEffort ?? "-"),
           );
         } else {
           const modelVal = arg === "auto" || arg === "reset" ? "" : arg;
@@ -218,46 +220,47 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
             : undefined;
           const res = await hub.setGroupModel(g.groupId, { model: modelVal, effort: effortVal });
           console.log(
-            `Task ${g.groupId} (${res.group.leadAgent}) updated: model=${res.group.leadModel ?? "auto"}, effort=${res.group.leadEffort ?? "auto"}${res.session ? ` [live session switched -> ${res.session.currentModelId ?? "-"}]` : ""}`,
+            t("cliModelUpdated", g.groupId, res.group.leadAgent, res.group.leadModel ?? "auto", res.group.leadEffort ?? "auto", res.session ? t("cliModelLive", res.session.currentModelId ?? "-") : ""),
           );
         }
       } else if (cmd === "/agents") {
         for (const a of hub.registry.getHealthList(true)) {
-          const status = !a.enabled ? "disabled" : a.available ? "ready" : "unavailable";
-          console.log(`- ${a.agent} (${a.label}) [${status}${a.builtin ? ", builtin" : ", custom"}]: ${a.reason ?? "OK"}`);
+          const status = t(!a.enabled ? "cliDisabled" : a.available ? "cliReady" : "cliUnavailable");
+          const origin = t(a.builtin ? "cliBuiltin" : "cliCustom");
+          console.log(`- ${a.agent} (${a.label}) [${status}, ${origin}]: ${a.reason ?? "OK"}`);
         }
       } else if (cmd === "/subs") {
         const subs = hub.pool
           .listSessions()
           .filter((s) => s.groupId === currentGroupId && s.role === "sub");
         if (subs.length === 0) {
-          console.log(`No sub-sessions in task ${currentGroupId}.`);
+          console.log(t("cliNoSubsessions", currentGroupId));
         } else {
           for (const s of subs) {
-            console.log(`- ${s.sessionKey} [${s.status}] label=${s.label}${s.branch ? ` branch=${s.branch}` : ""}`);
+            console.log(t("cliSubsessionRow", s.sessionKey, s.status, s.label, s.branch ? ` branch=${s.branch}` : ""));
           }
         }
       } else if (cmd === "/ui" || cmd === "/pop") {
         const res = openInteractiveWindow(hub.getUrl(), true);
-        console.log(`Opened workbench (${res.mode}) at ${hub.getUrl()}`);
+        console.log(t("cliOpenedWorkbench", res.mode, hub.getUrl()));
       } else if (cmd === "/browser") {
         const res = openInteractiveWindow(hub.getUrl(), false);
-        console.log(`Opened workbench (${res.mode}) at ${hub.getUrl()}`);
+        console.log(t("cliOpenedWorkbench", res.mode, hub.getUrl()));
       } else if (cmd === "/sessions") {
         const sessions = hub.pool.listSessions();
         if (sessions.length === 0) {
-          console.log("No active sessions.");
+          console.log(t("cliNoSessions"));
         } else {
           for (const s of sessions) {
             console.log(
-              `- ${s.sessionKey} [${s.groupId}:${s.role}] [${s.status}] cwd=${s.effectiveCwd}${s.branch ? ` branch=${s.branch}` : ""}`,
+              t("cliSessionRow", s.sessionKey, s.groupId, s.role, s.status, s.effectiveCwd, s.branch ? ` branch=${s.branch}` : ""),
             );
           }
         }
       } else if (cmd === "/worktrees") {
         const wts = hub.pool.listSessions().filter((s) => s.isWorktree);
         if (wts.length === 0) {
-          console.log("No active worktree sessions.");
+          console.log(t("cliNoWorktrees"));
         } else {
           for (const s of wts) {
             console.log(`- ${s.sessionKey}: ${s.effectiveCwd} (${s.branch ?? "detached"})`);
@@ -268,40 +271,40 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
         const budgets = hub.resources.getAgentBudgets();
         const rules = items.filter((i) => i.kind === "rule");
         const skills = items.filter((i) => i.kind === "skill");
-        console.log(`Shared resources: ${rules.length} rules, ${skills.length} skills`);
+        console.log(t("cliSharedResources", rules.length, skills.length));
         for (const b of budgets) {
           console.log(
-            `  ${b.agent}: native=(${b.nativeRules}r/${b.nativeSkills}s) bridged=(${b.bridgedRules}r/${b.bridgedSkills}s) firstTurn~${b.firstTurnInjectionTokens} tok`,
+            t("cliResourceBudget", b.agent, b.nativeRules, b.nativeSkills, b.bridgedRules, b.bridgedSkills, b.firstTurnInjectionTokens),
           );
         }
       } else if (cmd === "/usage") {
         const snap = hub.getTelemetrySnapshot();
         console.log(
-          `Totals: turns=${snap.totals.turns} total=${snap.totals.totalTokens} (in=${snap.totals.inputTokens}, cache=${snap.totals.cachedReadTokens}, out=${snap.totals.outputTokens}, thought=${snap.totals.thoughtTokens})`,
+          t("cliUsageTotals", snap.totals.turns, snap.totals.totalTokens, snap.totals.inputTokens, snap.totals.cachedReadTokens, snap.totals.outputTokens, snap.totals.thoughtTokens),
         );
-        for (const [agent, t] of Object.entries(snap.byAgent)) {
-          if (!t) continue;
+        for (const [agent, usage] of Object.entries(snap.byAgent)) {
+          if (!usage) continue;
           console.log(
-            `  ${agent}: turns=${t.turns} total=${t.totalTokens} in=${t.inputTokens} cache=${t.cachedReadTokens} out=${t.outputTokens}`,
+            t("cliAgentUsage", agent, usage.turns, usage.totalTokens, usage.inputTokens, usage.cachedReadTokens, usage.outputTokens),
           );
         }
       } else if (cmd === "/approve") {
         const mode = parsePermissionMode(arg);
         if (!mode) {
-          console.log(`Usage: /approve <all|reads|manual> (current: ${hub.pool.getPermissionMode()})`);
+          console.log(t("cliApproveUsage", hub.pool.getPermissionMode()));
         } else {
           hub.pool.setPermissionMode(mode);
-          console.log(`Permission mode set to ${mode}`);
+          console.log(t("cliPermissionChanged", mode));
         }
       } else if (cmd === "/cancel") {
         if (!arg) {
-          console.log("Usage: /cancel <sessionKey>");
+          console.log(t("cliCancelUsage"));
         } else {
           const ok = await hub.pool.cancelSession(arg);
-          console.log(ok ? `Cancel sent to ${arg}` : `Session not found: ${arg}`);
+          console.log(ok ? t("cliCancelSent", arg) : t("cliSessionMissing", arg));
         }
       } else {
-        console.log(`Unknown command: ${cmd}. Try /help.`);
+        console.log(t("cliUnknownCommand", cmd));
       }
 
       printPrompt();
@@ -321,7 +324,7 @@ export async function runRepl(hub: AgentHubServer): Promise<void> {
         process.stdout.write("\n");
       }
     } catch (err) {
-      console.error(`\n[Error] ${err instanceof Error ? err.message : String(err)}`);
+      console.error(t("cliError", err instanceof Error ? err.message : String(err)));
     } finally {
       activeLeadStreaming = false;
       wroteStreamLine = false;
