@@ -1332,7 +1332,7 @@ function renderSidebarGroups() {
         subNode.innerHTML = `
           <span class="tree-node-left">
             <span class="dot ${dotCls}"></span>
-            <span class="tree-node-label">${escapeHtml(agentName(sub.agent))} · ${escapeHtml(sub.label || sub.name)}</span>
+            <span class="tree-node-label">${escapeHtml(agentName(sub.agent))} · ${escapeHtml(sub.label || sub.name)}${sessionHasPendingQuestion(sub.sessionKey) ? `<span class="wait-badge" title="${th("questionWaitingBadge")}">?</span>` : ""}</span>
           </span>
           ${sub.isWorktree ? '<span class="wt-pill">wt</span>' : ""}
         `;
@@ -1638,7 +1638,7 @@ function renderStageHeaderAndTabs() {
       tab.type = "button";
       tab.className = `session-tab is-sub${STATE.activeStreamKey === key ? " active" : ""}`;
       tab.title = sub.sessionKey;
-      tab.innerHTML = `<span class="dot ${subRunning ? "busy" : escapeHtml(sub.status)}"></span>${escapeHtml(agentName(sub.agent))} · ${escapeHtml(sub.label || sub.name)}${sub.isWorktree ? " [wt]" : ""}`;
+      tab.innerHTML = `<span class="dot ${subRunning ? "busy" : escapeHtml(sub.status)}"></span>${escapeHtml(agentName(sub.agent))} · ${escapeHtml(sub.label || sub.name)}${sub.isWorktree ? " [wt]" : ""}${sessionHasPendingQuestion(sub.sessionKey) ? `<span class="wait-badge" title="${th("questionWaitingBadge")}">?</span>` : ""}`;
       tab.onclick = () => selectGroup(group.groupId, key);
       els.sessionTabs.appendChild(tab);
     }
@@ -1710,6 +1710,14 @@ function playSoftAlertChime() {
   } catch {
     // ignore WebAudio restrictions
   }
+}
+
+// 某个会话是否有问题在等回答：用来在它的标签和侧栏条目上打标记
+function sessionHasPendingQuestion(sessionKey) {
+  for (const q of STATE.pendingQuestions.values()) {
+    if (q.sessionKey === sessionKey) return true;
+  }
+  return false;
 }
 
 function syncAttentionIndicators(notifyPayload = null) {
@@ -3693,6 +3701,7 @@ function connectWs() {
       if (msg.question) {
         STATE.pendingQuestions.set(msg.question.questionId, msg.question);
         window.HUB_INTERACTIVE?.renderQuestions?.();
+        scheduleUiRender(UI_REGION.sidebar | UI_REGION.header);
         syncAttentionIndicators({
           body: t("asked", msg.question.agent || "Agent", msg.question.title),
           groupId: STATE.sessions.get(msg.question.sessionKey)?.groupId,
@@ -3702,6 +3711,7 @@ function connectWs() {
     } else if (msg.type === "question_resolved") {
       STATE.pendingQuestions.delete(msg.questionId);
       window.HUB_INTERACTIVE?.renderQuestions?.();
+      scheduleUiRender(UI_REGION.sidebar | UI_REGION.header);
       syncAttentionIndicators();
       appendLog(msg.cancelled ? t("cancelledQuestion", msg.questionId) : t("submittedAnswerToQuestion", msg.questionId));
     } else if (msg.type === "telemetry_updated") {

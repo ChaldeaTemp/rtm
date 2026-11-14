@@ -22,6 +22,7 @@ import {
   type SessionUsageTotals,
   type TaskGroup,
   type TaskRecord,
+  type WorkflowRecord,
   type TelemetrySnapshot,
   type TurnTelemetryRecord,
   type TurnUsage,
@@ -718,6 +719,24 @@ function autoTitleFromPrompt(prompt: string): string {
  * Put in front of a message the user sent to redirect a turn they interrupted. The transcript
  * shows the user's words only; the agent also needs to know why its turn was cut short.
  */
+interface LeadNotice {
+  /** One line for the transcript. */
+  summary: string;
+  /** What the lead is told. */
+  detail: string;
+  taskId?: string;
+  questionId?: string;
+}
+
+/** Hub-started lead turns in a row before it waits for the user. */
+const MAX_AUTO_LEAD_TURNS = 8;
+
+function clipMiddle(text: string, max: number): string {
+  const clean = text.trim();
+  if (clean.length <= max) return clean;
+  return `${clean.slice(0, Math.floor(max * 0.6))}\n[... ${clean.length - max} characters omitted ...]\n${clean.slice(-Math.floor(max * 0.4))}`;
+}
+
 function buildHandoffPrompt(fromLabel: string, brief: string): string {
   return [
     "<lead_handoff>",
@@ -782,11 +801,19 @@ export class AgentHubServer {
   private readonly taskContext = new TaskContextStore((context) =>
     this.broadcast({ type: "context_updated", context, timestamp: Date.now() }),
   );
+  /** Things the lead of a task should hear about, kept until it is free to take a turn. */
+  private readonly leadInbox = new Map<string, LeadNotice[]>();
+  /** Tasks whose caller is waiting for the result itself (peer_ask) or already fetched it. */
+  private readonly selfServedTaskIds = new Set<string>();
+  /** Tasks started by the workflow engine; their results are reported per workflow, not per task. */
+  private readonly workflowTaskIds = new Set<string>();
+  /** Lead turns started by the hub in a row, per task, since the user last wrote. */
+  private readonly autoLeadTurns = new Map<string, number>();
   private readonly workflows = new WorkflowManager({
     dispatch: ({ groupId, agent, prompt, session, isolateWorktree, contextRefs, upstreamStepIds }) => {
       const group = this.groups.get(groupId);
       const lead = group?.leadAgent ?? this.getDefaultLead();
-      return this.dispatchPeerTask(
+      const task = this.dispatchPeerTask(
         {
           targetAgent: agent,
           prompt,
@@ -799,7 +826,10 @@ export class AgentHubServer {
         },
         { sections: contextRefs, results: upstreamStepIds },
       );
+      this.workflowTaskIds.add(task.taskId);
+      return task;
     },
+    onSettled: (workflow) => this.reportWorkflowToLead(workflow),
     // Short on memory: finish what is running before starting anything else.
     maxParallel: () =>
       this.memory.get().level === "ok" ? clampWorkflowParallel(this.settings.workflowParallel) : 1,
@@ -2457,6 +2487,23 @@ export class AgentHubServer {
           question: info,
           timestamp: now,
         });
+
+        // A sub-session that stops to ask is blocked work the lead should know about; it may
+        // well hold the answer. The user sees the question either way.
+        if (callerSession?.role === "sub") {
+          const who = `${this.agentLabel(agent)} · ${callerSession.label || callerSession.name}`;
+          this.notifyLead(groupId, {
+            questionId,
+            summary: t("noticeSubSessionAsks", who),
+            detail: [
+              `Sub-session "${who}" is blocked waiting for an answer (question id ${questionId}): ${info.title}`,
+              ...fields.map(
+                (f) => `- [${f.id}] ${f.question}${f.options?.length ? ` Options: ${f.options.map((o) => (typeof o === "string" ? o : (o as { label?: string }).label ?? "")).join(" | ")}` : ""}`,
+              ),
+              "If the task's goal, decisions so far or shared context already answer it, answer with `peer_answer_question`. If only the user can decide, leave it: it is on their screen. Do not guess.",
+            ].join("\n"),
+          });
+        }
       },
     );
   }
@@ -2618,6 +2665,129 @@ export class AgentHubServer {
     }
   }
 
+  /**
+   * Queues something for a task's lead and delivers it as soon as the lead is free. The lead
+   * gets one turn for everything that piled up, decides what to do, and tells the user.
+   */
+  private notifyLead(groupId: string, notice: LeadNotice): void {
+    const list = this.leadInbox.get(groupId) ?? [];
+    list.push(notice);
+    this.leadInbox.set(groupId, list);
+    setImmediate(() => this.flushLeadInbox(groupId));
+  }
+
+  private flushLeadInbox(groupId: string): void {
+    const queued = this.leadInbox.get(groupId);
+    if (!queued || queued.length === 0) return;
+    const group = this.groups.get(groupId);
+    if (!group || group.archived) {
+      this.leadInbox.delete(groupId);
+      return;
+    }
+    const leadKey = buildSessionKey(group.leadAgent, `${groupId}__lead`);
+    const live = this.pool.getSession(leadKey);
+    if (this.activeAssistantBySession.has(leadKey) || live?.status === "busy" || live?.status === "starting") {
+      return; // delivered when that turn ends
+    }
+    // Drop what the lead dealt with meanwhile: a result it fetched, a question already answered.
+    const fresh = queued.filter(
+      (n) => !(n.taskId && this.selfServedTaskIds.has(n.taskId)) && !(n.questionId && !this.pendingQuestions.has(n.questionId)),
+    );
+    if (fresh.length === 0) {
+      this.leadInbox.delete(groupId);
+      return;
+    }
+    const turns = (this.autoLeadTurns.get(groupId) ?? 0) + 1;
+    if (turns > MAX_AUTO_LEAD_TURNS) {
+      // Keep them for the user's next message instead of letting agents drive each other forever.
+      if (turns === MAX_AUTO_LEAD_TURNS + 1) {
+        this.autoLeadTurns.set(groupId, turns);
+        const now = Date.now();
+        this.upsertMessage({
+          messageId: `msg-${randomUUID().slice(0, 8)}`,
+          groupId,
+          streamKey: `lead:${groupId}`,
+          sessionKey: leadKey,
+          role: "system",
+          senderLabel: "系统",
+          text: t("leadAutoTurnsPaused", MAX_AUTO_LEAD_TURNS),
+          thoughtText: "",
+          toolCalls: [],
+          status: "done",
+          timestamp: now,
+          completedAt: now,
+        });
+      }
+      this.leadInbox.set(groupId, fresh);
+      return;
+    }
+    this.autoLeadTurns.set(groupId, turns);
+    this.leadInbox.delete(groupId);
+    const detail = [
+      "<workbench_update>",
+      "These things happened in this task while you were not running. Nobody typed this message.",
+      "",
+      ...fresh.map((n, i) => `${i + 1}. ${n.detail}`),
+      "</workbench_update>",
+      "",
+      "Act on them yourself: decide the next step (follow-up work, an answer for a waiting sub-session, a change to the workflow), keep the Progress panel current, then tell the user in a few lines what happened and what you did or decided. If nothing needs doing, say so in one line. A failure is not a completed task: do not report it as done.",
+    ].join("\n");
+    void this.runLeadChat({
+      groupId,
+      notice: { summary: fresh.map((n) => n.summary).join("\n"), detail },
+    }).catch(() => {});
+  }
+
+  /** A sub-session task the lead dispatched and walked away from has ended: tell the lead. */
+  private reportTaskToLead(task: TaskRecord): void {
+    if (task.status === "cancelled" || task.callerAgent === "user") return;
+    if (this.workflowTaskIds.has(task.taskId) || this.selfServedTaskIds.has(task.taskId)) return;
+    const group = this.groups.get(task.groupId);
+    if (!group || task.callerSession !== buildSessionKey(group.leadAgent, `${group.groupId}__lead`)) return;
+    const session = this.pool.getSession(task.targetSessionKey) ?? this.archivedSessions.get(task.targetSessionKey);
+    const name = `${this.agentLabel(task.targetAgent)} · ${session?.label || session?.name || task.targetSessionKey}`;
+    const body =
+      task.status === "failed"
+        ? `<error>\n${clipMiddle(task.error ?? "unknown error", 1500)}\n</error>`
+        : `<result>\n${clipMiddle(task.outputText || "(empty reply)", 3000)}\n</result>`;
+    this.notifyLead(task.groupId, {
+      taskId: task.taskId,
+      summary: t(task.status === "failed" ? "noticeSubSessionFailed" : "noticeSubSessionFinished", name),
+      detail: `Sub-session "${name}" ${task.status === "failed" ? "FAILED" : "finished"} the task you dispatched (task id ${task.taskId}).\n${body}`,
+    });
+  }
+
+  /** A workflow run ended: the lead sums up, or decides what to do about a failure. */
+  private reportWorkflowToLead(workflow: WorkflowRecord): void {
+    const failed = workflow.steps.filter((s) => s.status === "failed");
+    const held = workflow.steps.filter((s) => s.status === "skipped" || s.status === "cancelled" || s.status === "pending");
+    const done = workflow.steps.filter((s) => s.status === "completed");
+    if (workflow.status === "completed") {
+      this.notifyLead(workflow.groupId, {
+        summary: t("noticeWorkflowFinished", done.length),
+        detail: `The workflow finished: all ${done.length} steps completed. Their results are in the shared task context (sections "result:<step id>"; read them with context_get). Check that the results actually meet the goal, then sum up for the user and say what, if anything, is left.`,
+      });
+      return;
+    }
+    if (failed.length === 0) return; // stopped or interrupted, not failed: nothing to decide
+    this.notifyLead(workflow.groupId, {
+      summary: t("noticeWorkflowFailed", failed.map((s) => s.name).join("、")),
+      detail: [
+        `The workflow stopped: ${failed.length} step(s) failed, ${held.length} step(s) after them did not run, ${done.length} completed.`,
+        ...failed.map(
+          (s) => `- FAILED "${s.name}" (id ${s.id}, ${s.agent}): ${clipMiddle(s.error ?? "no reason given", 600)}${s.reviewNotes ? `\n  Reviewer said: ${clipMiddle(s.reviewNotes, 800)}` : ""}`,
+        ),
+        ...(held.length > 0 ? [`- Not run: ${held.map((s) => s.id).join(", ")}`] : []),
+        "The task is NOT done. You decide how to go on:",
+        "- `workflow_continue` with `guidance` for the failed step(s): they are tried again with your guidance and the steps held back then run;",
+        "- `workflow_continue` with `skip` for a step that is no longer needed: the steps after it go on without its result;",
+        "- `workflow_propose` to replace the plan when the approach itself is wrong;",
+        "- `hub_ask_user` when only the user can decide.",
+        "Then tell the user what failed, why, and what you decided.",
+      ].join("\n"),
+    });
+  }
+
   private updateTask(task: TaskRecord): void {
     task.updatedAt = Date.now();
     this.tasks.set(task.taskId, { ...task });
@@ -2629,6 +2799,7 @@ export class AgentHubServer {
     if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
       this.notifyTaskWaiters(task.taskId);
       this.workflows.onTaskUpdated(task);
+      this.reportTaskToLead(task);
     }
   }
 
@@ -2915,6 +3086,7 @@ export class AgentHubServer {
       files?: Array<{ name: string; mimeType?: string; data: string }>;
       steer?: boolean;
       handoff?: { from: AgentId; brief: string };
+      notice?: { summary: string; detail: string };
       reuseMessageId?: string;
       replaceAssistantMessageId?: string;
     },
@@ -2977,14 +3149,16 @@ export class AgentHubServer {
     }
 
     const displayUserText =
-      (input.handoff?.brief ?? input.prompt ?? "").trim() || (validReuse?.text ?? "").trim();
+      (input.notice?.summary ?? input.handoff?.brief ?? input.prompt ?? "").trim() || (validReuse?.text ?? "").trim();
     const effectiveUserPrompt =
       displayUserText ||
       (savedFiles.length > 0 ? "请查看附带的文件。" : savedImages.length > 0 ? "请查看并分析附带的图片。" : "");
     if (!effectiveUserPrompt) {
       throw new Error(t("messageRequired"));
     }
-    const promptForAgent = input.handoff
+    const promptForAgent = input.notice
+      ? input.notice.detail
+      : input.handoff
       ? buildHandoffPrompt(this.agentLabel(input.handoff.from), effectiveUserPrompt)
       : `${input.steer ? STEER_PREFIX : ""}${effectiveUserPrompt}${buildAttachedFilesBlock(savedFiles)}`;
 
@@ -3024,6 +3198,8 @@ export class AgentHubServer {
     steer?: boolean;
     /** The previous lead passed the role on; `brief` is what it wrote for its successor. */
     handoff?: { from: AgentId; brief: string };
+    /** A turn the hub starts to tell the lead what happened; `summary` is what the user sees. */
+    notice?: { summary: string; detail: string };
     reuseMessageId?: string;
     replaceAssistantMessageId?: string;
     leadAgent?: AgentId;
@@ -3053,6 +3229,10 @@ export class AgentHubServer {
     // Escape hatch for a lead that cannot hand over by itself (it will not start, or is stuck):
     // "/lead <agent>" typed in the lead conversation switches the lead directly. No agent turn
     // runs; the new lead gets the history summary with the user's next message.
+    if (!input.notice && !input.handoff) {
+      // The user is driving again: hub-started turns may resume.
+      this.autoLeadTurns.delete(group.groupId);
+    }
     const forced = /^\/lead\s+(\S+)\s*$/i.exec((input.prompt ?? "").trim());
     if (forced && !input.handoff) {
       const previous = group.leadAgent;
@@ -3141,8 +3321,8 @@ export class AgentHubServer {
         groupId: group.groupId,
         streamKey,
         sessionKey,
-        role: input.handoff ? "caller" : "user",
-        senderLabel: input.handoff ? `${this.agentLabel(input.handoff.from)} 交接` : "你",
+        role: input.notice ? "system" : input.handoff ? "caller" : "user",
+        senderLabel: input.notice ? "系统" : input.handoff ? `${this.agentLabel(input.handoff.from)} 交接` : "你",
         agent: input.handoff?.from,
         text: displayUserText,
         thoughtText: "",
@@ -3211,7 +3391,11 @@ export class AgentHubServer {
 
       const turn = ledger.recordTurn({
         leadAgent: lead,
-        userText: input.handoff ? `[Handoff brief from ${input.handoff.from}] ${effectiveUserPrompt}` : effectiveUserPrompt,
+        userText: input.notice
+          ? `[Workbench update] ${effectiveUserPrompt}`
+          : input.handoff
+            ? `[Handoff brief from ${input.handoff.from}] ${effectiveUserPrompt}`
+            : effectiveUserPrompt,
         assistantSummary: result.outputText,
         peerCallsSummary: result.peerToolsCalled,
       });
@@ -3253,6 +3437,7 @@ export class AgentHubServer {
       if (this.activeAssistantBySession.get(sessionKey)?.messageId === assistantMsg.messageId) {
         this.activeAssistantBySession.delete(sessionKey);
       }
+      setImmediate(() => this.flushLeadInbox(group.groupId));
     }
   }
 
@@ -3612,6 +3797,8 @@ export class AgentHubServer {
 
   async askPeer(rawBody: unknown): Promise<TaskRecord> {
     const task = this.dispatchPeerTask(rawBody);
+    // The caller is waiting right here; it needs no separate report.
+    this.selfServedTaskIds.add(task.taskId);
     const done = await this.waitForTask(task.taskId, 300);
     if (!done) {
       throw new Error(`Task ${task.taskId} disappeared`);
@@ -4002,6 +4189,10 @@ export class AgentHubServer {
           if (!task) {
             sendJson(res, 404, { ok: false, error: `Unknown taskId: ${taskId}` });
             return;
+          }
+          if (task.status === "completed" || task.status === "failed") {
+            // The caller has the result now; do not report it a second time.
+            this.selfServedTaskIds.add(task.taskId);
           }
           sendJson(res, 200, {
             ok: true,
@@ -4441,6 +4632,20 @@ export class AgentHubServer {
       if (method === "POST" && pathname === "/api/workflows/templates/delete") {
         const body = z.object({ name: z.string().min(1) }).parse(await readJsonBody(req));
         sendJson(res, 200, { ok: true, templates: this.workflowTemplates.delete(body.name) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/workflows/continue") {
+        const body = z
+          .object({
+            groupId: z.string().min(1),
+            depth: z.number().optional(),
+            guidance: z.array(z.object({ stepId: z.string().min(1), text: z.string() })).optional(),
+            skip: z.array(z.object({ stepId: z.string().min(1), reason: z.string().optional() })).optional(),
+          })
+          .parse(await readJsonBody(req));
+        if ((body.depth ?? 0) > 0) throw new Error("Only the lead of the task can decide how a workflow goes on.");
+        sendJson(res, 200, { ok: true, workflow: this.workflows.continueAfterFailure(body.groupId, body) });
         return;
       }
 

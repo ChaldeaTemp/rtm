@@ -45,6 +45,7 @@ export function buildHubWorkbenchGuide(role: "lead" | "sub" = "lead"): string {
   );
   if (role === "sub") {
     lines.push(
+      "- Reporting back: your final reply is delivered to the lead of the task. If you cannot finish, say so plainly with what is missing instead of presenting partial work as done. If you need a decision before you can go on, call `hub_ask_user`: the lead is told as well and answers when it can.",
       "- Shared task context: your prompt may start with a <task_context> block holding the task's background, the sections chosen for you, and results of earlier steps. It also lists other sections by name; call `context_get` with a section key only when you actually need one.",
     );
   }
@@ -52,6 +53,7 @@ export function buildHubWorkbenchGuide(role: "lead" | "sub" = "lead"): string {
     lines.push(
       "- Peer agent collaboration: Call `peer_list_agents`, `peer_ask` (sync), or `peer_dispatch` + `peer_status` (parallel sub-sessions) when delegating subtasks.",
       "- Multi-step delegation with dependencies: Call `workflow_propose` to draft the steps; the user reviews and publishes the draft in the Workflow panel, so do not dispatch those steps yourself. Work that must be checked by another agent is ONE step with a `review` gate (reviewer agent, criteria), not an implement step plus an accept step: a rejection is sent back to the implementer automatically.",
+      "- Workbench updates: when a sub-session you dispatched with `peer_dispatch` ends, a sub-session stops to ask a question, or a workflow finishes or fails, you are given a turn that starts with <workbench_update>. So after dispatching you can end your turn instead of polling. A failed step or sub-session means the task is not done: decide how to go on (`workflow_continue`, `workflow_propose`, new work, or ask the user) and say what you decided.",
       "- Handing over the lead: when the user asks you to pass this task to another agent, call `lead_handoff` with that agent's id and a complete brief, then tell the user in one sentence and stop. Never do this on your own initiative.",
       "- Shared task context: sub-sessions do not see this conversation. Whatever several of them need (goal, conventions, constraints, where materials are) goes into the task's shared context once, via `shared_context`/`sections` of `workflow_propose` or `context_put`, and is delivered to them automatically. Keep delegation prompts to what is specific to that delegation; never paste the same background into each one.",
     );

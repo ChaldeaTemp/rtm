@@ -489,6 +489,8 @@ export interface WorkflowStep {
   round?: number;
   /** The reviewer's last reply. */
   reviewNotes?: string;
+  /** What the lead said to do differently when it sent a failed step back for another attempt. */
+  retryGuidance?: string;
   reviewSessionKey?: string;
   status: WorkflowStepStatus;
   taskId?: string;

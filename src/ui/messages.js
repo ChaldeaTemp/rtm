@@ -936,4 +936,13 @@ export const messages = {
   mcpErrUrl: ["地址需要以 http:// 或 https:// 开头", "The address must start with http:// or https://"],
   mcpErrCommand: ["需要填写启动命令", "Enter the command that starts the server"],
   mcpErrNoProjectFile: ["这个目录下没有 .mcp.json", "There is no .mcp.json in this directory"],
+  noticeSubSessionFinished: ["子会话「{1}」已完成，已通知主导", "Sub-session \"{1}\" finished; the lead has been told"],
+  noticeSubSessionFailed: ["子会话「{1}」失败了，已通知主导", "Sub-session \"{1}\" failed; the lead has been told"],
+  noticeSubSessionAsks: ["子会话「{1}」在等待回答，已通知主导", "Sub-session \"{1}\" is waiting for an answer; the lead has been told"],
+  noticeWorkflowFinished: ["工作流已完成（{1} 步），已通知主导汇总", "Workflow finished ({1} steps); the lead has been asked to sum up"],
+  noticeWorkflowFailed: ["工作流中断：步骤「{1}」失败，已交主导决定后续", "Workflow stopped: step \"{1}\" failed; the lead has been asked to decide what to do"],
+  leadAutoTurnsPaused: ["主导已连续自动处理 {1} 轮，先停下等你确认。发一条消息后会继续，积压的通知会一并交给它。", "The lead has taken {1} turns in a row on its own and now waits for you. Send a message to carry on; the updates that queued up go to it then."],
+  questionFromSubSession: ["来自子会话 {1}", "From sub-session {1}"],
+  questionWaitingBadge: ["等待回答", "Waiting for an answer"],
+  stepDeclaredBlocked: ["子会话报告受阻", "The sub-session reported it is blocked"],
 };

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { McpServerManager, parseCodexMcpServers, parseJsonMcpServers } from "../src/hub/mcp-servers.js";
 import { levelFor, MemoryMonitor } from "../src/hub/memory.js";
 import { SharedResourceManager } from "../src/hub/resources.js";
+import { parseStepOutcome } from "../src/hub/workflow.js";
 import { AgentHubServer } from "../src/hub/server.js";
 
 // Regression for what keeps the hub alive and long tasks moving: memory back-off, idle
@@ -186,6 +187,104 @@ async function main(): Promise<void> {
       mgr.setResourceEnabled(item.id, true, cwd, other);
       check("switched back on", mgr.buildInjectionForAgent(other, cwd).promptPrefix.includes("`demo-skill`"));
     }
+    console.log("=== 5b. Reports to the lead, and steps that say they failed ===");
+    check(
+      "status line is read",
+      parseStepOutcome("done\nSTATUS: DONE").ok &&
+        parseStepOutcome("no status line at all").ok &&
+        parseStepOutcome("x\nSTATUS: FAILED - no access").reason === "FAILED: no access" &&
+        parseStepOutcome("x\n**STATUS: BLOCKED** - need the API key").reason === "BLOCKED: need the API key" &&
+        parseStepOutcome("STATUS: FAILED - first try\nretried\nSTATUS: DONE").ok,
+    );
+    const updatesLog = path.join(stateDir, "updates.log");
+    const updates = (): string[] =>
+      fs.existsSync(updatesLog) ? fs.readFileSync(updatesLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l).text as string) : [];
+    const leadMsgs = (groupId: string) => hub.getMessages({ streamKey: `lead:${groupId}` });
+    const g4 = (await post("/api/groups", { title: "reports", leadAgent: "mock-a", cwd })).group;
+    const leadKey4 = `mock-a:${g4.groupId}__lead`;
+    const seenBefore = updates().length;
+
+    // A dispatched task ends while the lead is idle: the lead is given a turn about it.
+    const bg = hub.dispatchPeerTask({
+      targetAgent: "mock-a", groupId: g4.groupId, session: "bg", callerAgent: "mock-a",
+      callerSession: leadKey4, depth: 0, isolateWorktree: false, prompt: "Count the widgets.",
+    });
+    check("lead is told when a dispatched sub-session finishes", await until(() => updates().slice(seenBefore).some((u) => u.includes(bg.taskId) && u.includes("finished"))), bg.taskId);
+    check(
+      "the transcript shows the update and the lead's reply",
+      await until(() => {
+        const m = leadMsgs(g4.groupId);
+        return m.some((x) => x.role === "system" && /bg/.test(x.text)) && m[m.length - 1]?.role === "assistant" && m[m.length - 1]?.status === "done";
+      }),
+    );
+    // peer_ask: the lead waits for the answer itself, so there is nothing to report.
+    const countBeforeAsk = updates().length;
+    const asked = await hub.askPeer({
+      targetAgent: "mock-a", groupId: g4.groupId, session: "sync", callerAgent: "mock-a",
+      callerSession: leadKey4, depth: 0, isolateWorktree: false, prompt: "Quick one.",
+    });
+    await sleep(800);
+    check("no separate report for a result the lead waited for", updates().length === countBeforeAsk && asked.status === "completed");
+
+    // A sub-session that stops to ask: the lead hears about it with the question id.
+    const subKey = bg.targetSessionKey;
+    const pendingAnswer = hub.askUserQuestion({ sessionKey: subKey, groupId: g4.groupId, title: "Which database?", questions: [{ id: "db", question: "PostgreSQL or SQLite?", type: "single", options: ["PostgreSQL", "SQLite"] }] });
+    check("lead is told when a sub-session asks", await until(() => updates().some((u) => u.includes("Which database?") && u.includes("peer_answer_question") && /question id q-/.test(u))));
+    const qid = /question id (q-[0-9a-f]+)/.exec(updates().find((u) => u.includes("Which database?")) ?? "")?.[1] ?? "";
+    res = await post("/api/questions/resolve", { questionId: qid, answers: { db: "PostgreSQL" } });
+    const answered = await pendingAnswer;
+    check("the lead's answer reaches the sub-session", res.ok === true && answered.cancelled === false && answered.answers.db === "PostgreSQL");
+
+    // A step whose agent says it failed is a failed step, and the lead decides what next.
+    await post("/api/settings", { workflowParallel: 3 });
+    await post("/api/workflows/save", {
+      groupId: g4.groupId,
+      steps: [
+        { id: "fetch", agent: "mock-a", prompt: "FAILME fetch the data." },
+        { id: "report", agent: "mock-a", prompt: "Write the report.", dependsOn: ["fetch"] },
+        { id: "extra", agent: "mock-a", prompt: "FAILME optional extra." },
+      ],
+    });
+    await post("/api/workflows/run", { groupId: g4.groupId });
+    const wf4 = async (): Promise<Json> => (await get(`/api/workflows?groupId=${g4.groupId}`)).workflow;
+    check("workflow stops", await until(async () => (await wf4()).status !== "running", 30000));
+    let w = await wf4();
+    const st = (id: string) => w.steps.find((s: Json) => s.id === id);
+    check(
+      "a reply that says FAILED fails the step and holds back what depends on it",
+      w.status === "failed" && st("fetch").status === "failed" && st("fetch").error === "FAILED: no access" && st("report").status !== "completed",
+      `${st("fetch").status}/${st("fetch").error} report=${st("report").status}`,
+    );
+    check(
+      "the lead is asked to decide, not told it is done",
+      await until(() => updates().some((u) => u.includes('FAILED "fetch"') && u.includes("workflow_continue") && u.includes("NOT done"))),
+    );
+    res = await post("/api/workflows/continue", { groupId: g4.groupId, depth: 1, guidance: [{ stepId: "fetch", text: "x" }] });
+    check("a sub-session cannot make that decision", res.ok === false);
+    res = await post("/api/workflows/continue", {
+      groupId: g4.groupId,
+      guidance: [{ stepId: "fetch", text: "Use the cached copy instead." }],
+      skip: [{ stepId: "extra", reason: "not needed" }],
+    });
+    check("the lead's decision restarts the workflow", res.ok === true && res.workflow.status === "running", res.error);
+    check("it then completes", await until(async () => (await wf4()).status === "completed", 30000), (await wf4()).status);
+    w = await wf4();
+    check(
+      "retried with the lead's guidance; the skipped step did not block the rest",
+      /other way/.test(st("fetch").output ?? "") && st("report").status === "completed" && /Skipped by the lead: not needed/.test(st("extra").output ?? ""),
+      st("fetch").output,
+    );
+    check("the lead is told when the workflow finishes", await until(() => updates().some((u) => u.includes("The workflow finished"))));
+
+    // Stopping a run yourself is not a failure for the lead to act on.
+    await post("/api/workflows/save", { groupId: g4.groupId, steps: [{ id: "long", agent: "mock-a", prompt: "SLOW task." }] });
+    const beforeStop = updates().length;
+    await post("/api/workflows/run", { groupId: g4.groupId });
+    await post("/api/workflows/cancel", { groupId: g4.groupId });
+    await until(async () => (await wf4()).status !== "running", 15000);
+    await sleep(1200);
+    check("a run the user stopped is not reported as a failure", updates().length === beforeStop, String(updates().length - beforeStop));
+
     console.log("=== 6. Shared MCP servers ===");
     const codexDefs = parseCodexMcpServers(
       [

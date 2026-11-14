@@ -8,6 +8,9 @@
 //                                  a file MOCK_STATE_DIR/review-fails overrides the number
 //   - contains "CODEWORD?"      -> the first OSPREY-<n> found in the prompt, else "unknown"
 //   - contains "SLOW"           -> answers after MOCK_SLOW_MS (default 1500 ms)
+//   - contains "FAILME"         -> "STATUS: FAILED - no access", unless the prompt carries
+//                                  <lead_guidance>, then "STATUS: DONE"
+//   - contains <workbench_update> -> logged to MOCK_STATE_DIR/updates.log, answered "ack"
 //   - anything else             -> "ok: <start of the prompt>"
 import fs from "node:fs";
 import path from "node:path";
@@ -49,6 +52,18 @@ function answer(text) {
   }
   if (text.includes("did not accept your work")) {
     return `reworked (${bump("rework")})`;
+  }
+  if (text.includes("<workbench_update>")) {
+    try {
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.appendFileSync(path.join(stateDir, "updates.log"), `${JSON.stringify({ text })}\n`, "utf8");
+    } catch {
+      // Best effort.
+    }
+    return "ack: handled the update";
+  }
+  if (text.includes("FAILME")) {
+    return text.includes("<lead_guidance>") ? "Did it the other way.\nSTATUS: DONE" : "Could not reach the service.\nSTATUS: FAILED - no access";
   }
   if (text.includes("CODEWORD?")) {
     return /OSPREY-\d+/.exec(text)?.[0] ?? "unknown";

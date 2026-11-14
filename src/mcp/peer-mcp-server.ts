@@ -244,6 +244,64 @@ async function main(): Promise<void> {
   );
 
   server.registerTool(
+    "peer_answer_question",
+    {
+      description:
+        "Answer a question a sub-session of this task is blocked on (you were told its question id in a workbench update). Lead only. Use it when the task's goal, earlier decisions or shared context already settle the question; leave questions only the user can decide for the user.",
+      inputSchema: {
+        question_id: z.string().min(1),
+        answers: z
+          .record(z.string(), z.union([z.string(), z.array(z.string())]))
+          .describe("Field id -> answer, using the field ids from the update (e.g. {\"q1\": \"Use PostgreSQL\"})."),
+      },
+    },
+    async ({ question_id, answers }) => {
+      if (cfg.depth > 0) {
+        return { content: [{ type: "text", text: "Only the lead of the task can answer for the user." }], isError: true };
+      }
+      await callHub(cfg.hubUrl, "/api/questions/resolve", { method: "POST", body: { questionId: question_id, answers } });
+      return { content: [{ type: "text", text: `Answered ${question_id}; the sub-session carries on.` }] };
+    },
+  );
+
+  server.registerTool(
+    "workflow_continue",
+    {
+      description:
+        "Decide how a workflow goes on after a step failed (you are told in a workbench update). Lead only. Failed steps are tried again, with your `guidance` if you give any, and the steps that were held back then run. A step listed in `skip` is dropped so the steps after it go on without its result. To change the plan itself use workflow_propose instead.",
+      inputSchema: {
+        guidance: z
+          .array(z.object({ step_id: z.string().min(1), text: z.string().min(1).describe("What to do differently this time.") }))
+          .optional(),
+        skip: z.array(z.object({ step_id: z.string().min(1), reason: z.string().optional() })).optional(),
+      },
+    },
+    async ({ guidance, skip }) => {
+      const res = await callHub<{ workflow: { status: string; steps: Array<{ id: string; status: string }> } }>(
+        cfg.hubUrl,
+        "/api/workflows/continue",
+        {
+          method: "POST",
+          body: {
+            groupId: cfg.groupId,
+            depth: cfg.depth,
+            guidance: guidance?.map((g) => ({ stepId: g.step_id, text: g.text })),
+            skip: skip?.map((s) => ({ stepId: s.step_id, reason: s.reason })),
+          },
+        },
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Workflow is ${res.workflow.status}: ${res.workflow.steps.map((s) => `${s.id}=${s.status}`).join(", ")}. You will get another workbench update when it ends.`,
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
     "lead_handoff",
     {
       description:

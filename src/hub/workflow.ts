@@ -3,6 +3,32 @@ import type { AgentId, TaskRecord, WorkflowRecord, WorkflowStep, WorkflowStepInp
 
 const MAX_STEPS = 20;
 const DEFAULT_REVIEW_ROUNDS = 2;
+
+/**
+ * Appended to what a step's agent is asked to do. Finishing a turn is not the same as
+ * finishing the task: without this an agent that gave up still counted as a completed step
+ * and the steps after it ran on nothing.
+ */
+const STATUS_INSTRUCTION = [
+  "",
+  "",
+  "End your reply with exactly one status line:",
+  "`STATUS: DONE` if the task is finished and you checked it;",
+  "`STATUS: BLOCKED - <what you need>` if you cannot go on without something;",
+  "`STATUS: FAILED - <why>` if you could not do it.",
+  "Never write DONE for work you did not complete.",
+].join("\n");
+
+/** The outcome an agent declared at the end of its reply; no line counts as done. */
+export function parseStepOutcome(output: string): { ok: boolean; reason?: string } {
+  const matches = [...(output ?? "").matchAll(/STATUS:\s*\**\s*(DONE|BLOCKED|FAILED)\b\**[ \t]*[-:：—]*[ \t]*([^\n]*)/gi)];
+  const last = matches[matches.length - 1];
+  if (!last) return { ok: true };
+  const word = last[1]!.toUpperCase();
+  if (word === "DONE") return { ok: true };
+  const detail = last[2]?.trim().replace(/[`*]+$/g, "").trim();
+  return { ok: false, reason: `${word === "BLOCKED" ? "BLOCKED" : "FAILED"}${detail ? `: ${detail}` : ""}` };
+}
 const MAX_REVIEW_ROUNDS = 5;
 const STEP_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
@@ -18,6 +44,8 @@ export interface WorkflowDeps {
     contextRefs: string[];
     upstreamStepIds: string[];
   }): TaskRecord;
+  /** A run ended (every step finished, or nothing more can run). Not called for a user stop. */
+  onSettled?(workflow: WorkflowRecord): void;
   /** How many steps may run at once; the rest wait even when their dependencies are done. */
   maxParallel?(): number;
   /** Sections a step refers to that do not exist; publishing is refused while there are any. */
@@ -43,6 +71,9 @@ export class WorkflowManager {
   private readonly workflows = new Map<string, WorkflowRecord>();
 
   constructor(private readonly deps: WorkflowDeps) {}
+
+  /** Runs the user stopped; their end is not reported to the lead as a failure to act on. */
+  private readonly userStopped = new Set<string>();
 
   get(groupId: string): WorkflowRecord {
     return (
@@ -240,12 +271,51 @@ export class WorkflowManager {
     return this.clone(workflow)!;
   }
 
+  /**
+   * The lead's decision after a failure: retry the failed steps (optionally with guidance for
+   * each) and run what was held back, and/or drop steps that are no longer needed so the
+   * steps after them can go on.
+   */
+  continueAfterFailure(
+    groupId: string,
+    decision: { guidance?: Array<{ stepId: string; text: string }>; skip?: Array<{ stepId: string; reason?: string }> },
+  ): WorkflowRecord {
+    const workflow = this.workflows.get(groupId);
+    if (!workflow || workflow.status !== "failed") {
+      throw new Error(t("workflowHasNoStepsToContinue"));
+    }
+    const byId = new Map(workflow.steps.map((s) => [s.id, s]));
+    for (const item of decision.skip ?? []) {
+      const step = byId.get(item.stepId.trim().toLowerCase());
+      if (!step) throw new Error(`Unknown step: ${item.stepId}`);
+      if (step.status === "completed") continue;
+      step.status = "completed";
+      step.error = undefined;
+      step.phase = undefined;
+      step.output = `(Skipped by the lead${item.reason?.trim() ? `: ${item.reason.trim()}` : ""}. Nothing was produced by this step.)`;
+      this.deps.saveResult(groupId, step, step.output);
+    }
+    for (const item of decision.guidance ?? []) {
+      const step = byId.get(item.stepId.trim().toLowerCase());
+      if (!step) throw new Error(`Unknown step: ${item.stepId}`);
+      if (item.text.trim()) step.retryGuidance = item.text.trim();
+    }
+    if (workflow.steps.every((s) => s.status === "completed")) {
+      workflow.status = "completed";
+      workflow.updatedAt = Date.now();
+      this.deps.onChange(this.clone(workflow)!);
+      return this.clone(workflow)!;
+    }
+    return this.resume(groupId);
+  }
+
   /** Stops running steps and drops the ones that have not started. */
   cancel(groupId: string): WorkflowRecord {
     const workflow = this.workflows.get(groupId);
     if (!workflow || workflow.status !== "running") {
       return this.get(groupId);
     }
+    this.userStopped.add(groupId);
     for (const step of workflow.steps) {
       if (step.status === "pending") {
         step.status = "cancelled";
@@ -359,7 +429,13 @@ export class WorkflowManager {
     if (!step || step.status !== "running") {
       return;
     }
-    if (task.status === "completed" && step.review) {
+    const declared = task.status === "completed" && step.phase !== "review" ? parseStepOutcome(task.outputText ?? "") : undefined;
+    if (declared && !declared.ok) {
+      // The agent's turn ended normally but it says the task did not get done.
+      step.status = "failed";
+      step.output = task.outputText;
+      step.error = declared.reason;
+    } else if (task.status === "completed" && step.review) {
       try {
         if (step.phase === "review") {
           this.finishReview(workflow, step, task.outputText ?? "");
@@ -435,7 +511,7 @@ export class WorkflowManager {
             groupId: workflow.groupId,
             agent: step.agent,
             // Background and upstream results travel as context, not inside the step prompt.
-            prompt: step.prompt,
+            prompt: `${step.prompt}${step.retryGuidance ? `\n\n<lead_guidance>\nAn earlier attempt at this step did not succeed. The lead's guidance for this attempt:\n${step.retryGuidance}\n</lead_guidance>` : ""}${STATUS_INSTRUCTION}`,
             session: `wf-${step.id}`,
             isolateWorktree: Boolean(step.isolateWorktree),
             contextRefs: step.contextRefs ?? [],
@@ -456,12 +532,17 @@ export class WorkflowManager {
       }
     }
 
+    const wasRunning = workflow.status === "running";
     const active = workflow.steps.some((s) => s.status === "pending" || s.status === "running");
     if (!active) {
       workflow.status = workflow.steps.every((s) => s.status === "completed") ? "completed" : "failed";
     }
     workflow.updatedAt = Date.now();
     this.deps.onChange(this.clone(workflow)!);
+    if (wasRunning && workflow.status !== "running") {
+      const stoppedByUser = this.userStopped.delete(workflow.groupId);
+      if (!stoppedByUser) this.deps.onSettled?.(this.clone(workflow)!);
+    }
   }
 
   private assertAcyclic(steps: WorkflowStep[]): void {

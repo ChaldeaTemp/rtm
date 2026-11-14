@@ -223,10 +223,20 @@ function renderQuestions() {
       <div class="question-card-title">
         ${tagHtml}
         <span>${esc(q.title || t("questionsForYou"))}</span>
+        ${(() => {
+          // 子会话提的问题要说清楚是谁在问：人多半停在主导对话里，不看这个就不知道哪条线卡住了
+          const from = app.STATE.sessions.get(q.sessionKey);
+          if (!from || from.role !== "sub") return "";
+          return `<button type="button" class="origin-tag question-from" data-question-session="${esc(q.sessionKey)}" data-question-group="${esc(q.groupId || "")}">${th("questionFromSubSession", from.label || from.name)}</button>`;
+        })()}
       </div>
       <span class="mono" style="font-size:11px;color:var(--faint)">${app.formatTime(q.createdAt)}</span>
     `;
     card.appendChild(head);
+    const fromBtn = head.querySelector("[data-question-session]");
+    if (fromBtn) {
+      fromBtn.onclick = () => app.selectGroup?.(fromBtn.dataset.questionGroup || app.STATE.activeGroupId, `sub:${fromBtn.dataset.questionSession}`);
+    }
 
     const fields = Array.isArray(q.fields) ? q.fields : [];
     for (const field of fields) {
