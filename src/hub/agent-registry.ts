@@ -18,6 +18,7 @@ import {
   type AuthProbeSpec,
   type ResolvedCommand,
 } from "./process-tree.js";
+import { dataDir } from "./data-dir.js";
 
 /** Child-process auth probes are re-run in the background once the cache is older than this. */
 const HEALTH_AUTH_TTL_MS = 45_000;
@@ -151,7 +152,7 @@ export class AgentRegistry {
 
   constructor(baseCwd: string, options?: { persistCache?: boolean }) {
     this.baseCwd = path.resolve(baseCwd);
-    this.hubDir = path.join(this.baseCwd, ".agent-hub");
+    this.hubDir = dataDir(this.baseCwd);
     this.configFile = path.join(this.hubDir, "agents.json");
     this.modelsCacheFile = path.join(this.hubDir, "models-cache.json");
     this.persistCache = options?.persistCache ?? true;

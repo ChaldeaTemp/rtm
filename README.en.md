@@ -92,7 +92,7 @@ Settings → General offers three skins, each with a light and a dark variant: S
 
 - **The default permission mode approves everything.** Agents call tools without asking. Switch to read-only approval or per-call confirmation at the top right of the chat view if you prefer.
 - **The server listens on this machine only** (`127.0.0.1`) and rejects requests from other websites. There is no access token, though, so other programs on the same machine can call it.
-- **All data lives in `.agent-hub/`**: tasks and messages in `state.json`, uploads in `uploads/`, agent configuration in `agents.json`. The directory is not tracked by git, and uploads are never cleaned up automatically.
+- **All data lives in `.rtm/`**: tasks and messages in `state.json`, uploads in `uploads/`, agent configuration in `agents.json`. The directory is not tracked by git; an `.agent-hub/` directory left by an earlier version is renamed to `.rtm/` on first start. Also, uploads are never cleaned up automatically.
 - **After a restart an agent gets a summary of the earlier conversation**, not the full history.
 - **It runs from the source directory only.** Packaged distribution is not supported yet.
 

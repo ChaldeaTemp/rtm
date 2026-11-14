@@ -5,6 +5,7 @@ import path from "node:path";
 import { checkPortAvailable, findAvailablePort, pickNativeDirectory } from "./hub/port-finder.js";
 import { PROJECT_ROOT } from "./hub/process-tree.js";
 import { readRuntimeFile } from "./hub/server.js";
+import { dataDir } from "./hub/data-dir.js";
 
 /**
  * Desktop launch, the same on Windows and macOS: remember the last workspace and port, reuse
@@ -13,7 +14,7 @@ import { readRuntimeFile } from "./hub/server.js";
  * `rtm desktop`.
  */
 
-const PREFS_FILE = path.join(PROJECT_ROOT, ".agent-hub", "desktop-prefs.json");
+const PREFS_FILE = path.join(dataDir(PROJECT_ROOT), "desktop-prefs.json");
 const DEFAULT_PORT = 4317;
 
 export interface DesktopPrefs {

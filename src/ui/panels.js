@@ -188,13 +188,13 @@ function renderResourcesPanel() {
         <div class="rule-editor-row">
           <input id="hubRuleName" class="text-input" type="text" placeholder="规则名称（如 project-conventions）" required />
           <select id="hubRuleScope" class="perm-select">
-            <option value="project">作用域：当前项目 (.agent-hub)</option>
-            <option value="global">作用域：全局 Hub (~/.agent-hub)</option>
+            <option value="project">作用域：当前项目 (.rtm)</option>
+            <option value="global">作用域：全局 (~/.rtm)</option>
           </select>
         </div>
         <textarea id="hubRuleContent" class="rule-editor-textarea" placeholder="# 规则标题&#10;&#10;在这里编写跨 ${esc(covAgents.join(" / "))} 共享的 Markdown 规则..."></textarea>
         <div class="panel-toolbar">
-          <span class="mono" style="font-size:11px;color:var(--faint)">仅写入 .agent-hub 目录，不修改原生全局配置</span>
+          <span class="mono" style="font-size:11px;color:var(--faint)">仅写入 .rtm 目录，不修改原生全局配置</span>
           <div style="display:flex;gap:8px">
             <button id="cancelRuleFormBtn" class="alma-btn alma-btn-outline alma-btn-sm" type="button">取消</button>
             <button class="alma-btn alma-btn-primary alma-btn-sm" type="submit">保存共享规则</button>

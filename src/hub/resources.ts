@@ -12,6 +12,7 @@ import {
   type SharedResourceItem,
 } from "../types.js";
 import type { AgentRegistry } from "./agent-registry.js";
+import { dataDir } from "./data-dir.js";
 
 const MANAGED_START = "<!-- agent-hub:shared:start -->";
 const MANAGED_END = "<!-- agent-hub:shared:end -->";
@@ -267,9 +268,9 @@ export class SharedResourceManager {
   constructor(baseCwd: string, homeDir = os.homedir()) {
     this.baseCwd = path.resolve(baseCwd);
     this.homeDir = path.resolve(homeDir);
-    this.projectHubDir = path.join(this.baseCwd, ".agent-hub");
+    this.projectHubDir = dataDir(this.baseCwd);
     this.projectRulesDir = path.join(this.projectHubDir, "resources", "rules");
-    this.globalRulesDir = path.join(this.homeDir, ".agent-hub", "resources", "rules");
+    this.globalRulesDir = path.join(dataDir(this.homeDir), "resources", "rules");
     this.configFile = path.join(this.projectHubDir, "resources", "config.json");
   }
 
@@ -436,7 +437,7 @@ export class SharedResourceManager {
         ...(claudeMdBlock.includes(body) ? claudeMdReaders : []),
       ];
     };
-    for (const f of listMarkdownFiles(path.join(cwd, ".agent-hub", "resources", "rules"))) {
+    for (const f of listMarkdownFiles(path.join(dataDir(cwd), "resources", "rules"))) {
       pushRule(f, "project", "hub-project", syncedReaders(f));
     }
     for (const f of listMarkdownFiles(this.globalRulesDir)) {
@@ -477,7 +478,7 @@ export class SharedResourceManager {
     }
 
     // --- Project & Hub Skills ---
-    for (const f of listSkillFiles(path.join(cwd, ".agent-hub", "resources", "skills"))) {
+    for (const f of listSkillFiles(path.join(dataDir(cwd), "resources", "skills"))) {
       pushSkill(f, "project", "hub-project", []);
     }
     for (const f of listSkillFiles(path.join(cwd, ".agents", "skills"))) {
@@ -494,7 +495,7 @@ export class SharedResourceManager {
     }
 
     // --- Global Native Skills (Read-Only Discovery) ---
-    for (const f of listSkillFiles(path.join(this.homeDir, ".agent-hub", "resources", "skills"))) {
+    for (const f of listSkillFiles(path.join(dataDir(this.homeDir), "resources", "skills"))) {
       pushSkill(f, "global", "hub-global", []);
     }
     for (const f of listSkillFiles(path.join(this.homeDir, ".agents", "skills"))) {

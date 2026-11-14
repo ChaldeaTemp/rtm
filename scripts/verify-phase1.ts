@@ -154,7 +154,7 @@ async function main(): Promise<void> {
       ),
     );
 
-    const expectedWtPath = path.join(PROJECT_ROOT, ".agent-hub-worktrees", "wt-test");
+    const expectedWtPath = path.join(PROJECT_ROOT, ".rtm-worktrees", "wt-test");
     assert.equal(
       wtTask.worktreePath?.toLowerCase(),
       expectedWtPath.toLowerCase(),
@@ -167,8 +167,8 @@ async function main(): Promise<void> {
       encoding: "utf8",
     });
     assert.ok(
-      !gitStatus.includes(".agent-hub-worktrees"),
-      "Main working tree git status should ignore .agent-hub-worktrees",
+      !gitStatus.includes(".rtm-worktrees"),
+      "Main working tree git status should ignore .rtm-worktrees",
     );
 
     await hub.pool.closeSession(`${primaryAgent}:${wtTask.groupId}__sub__wt-test`).catch(() => false);

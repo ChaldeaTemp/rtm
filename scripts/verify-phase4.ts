@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { AgentHubServer } from "../src/hub/server.js";
+import { dataDir } from "../src/hub/data-dir.js";
 
-const AGENTS_CONFIG_FILE = path.join(process.cwd(), ".agent-hub", "agents.json");
+const AGENTS_CONFIG_FILE = path.join(dataDir(process.cwd()), "agents.json");
 
 async function httpJson<T>(url: string, init?: RequestInit): Promise<{ status: number; data: T }> {
   const res = await fetch(url, init);

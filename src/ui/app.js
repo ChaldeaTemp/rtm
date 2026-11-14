@@ -1599,8 +1599,9 @@ function renderStageHeaderAndTabs() {
 }
 
 const BASE_DOC_TITLE = "RTM";
-const DEFAULT_FAVICON_HREF = "/ui/icon-64.png";
-const ALERT_FAVICON_HREF = "/ui/icon-alert.png";
+// 图标地址带着服务端给的版本号（?v=…），这里沿用页面里的地址，换图标后不会被旧缓存挡住
+const DEFAULT_FAVICON_HREF = document.getElementById("appFavicon")?.getAttribute("href") || "/ui/icon-64.png";
+const ALERT_FAVICON_HREF = DEFAULT_FAVICON_HREF.replace("icon-64.png", "icon-alert.png");
 
 let titleBlinkTimer = null;
 let titleBlinkPhase = false;

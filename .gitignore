@@ -1,6 +1,9 @@
 node_modules/
 .venv/
 dist/
+.rtm/
+.rtm-worktrees/
+# Names used before the data directory was renamed
 .agent-hub/
 .agent-hub-worktrees/
 *.log

@@ -32,9 +32,9 @@ function ensureWorktreeExclude(repoRoot: string): void {
   }
   const existing = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, "utf8") : "";
   const lines = existing.split(/\r?\n/).map((line) => line.trim());
-  if (!lines.includes(".agent-hub-worktrees/")) {
+  if (!lines.includes(".rtm-worktrees/")) {
     const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
-    fs.appendFileSync(excludePath, `${prefix}.agent-hub-worktrees/\n`, "utf8");
+    fs.appendFileSync(excludePath, `${prefix}.rtm-worktrees/\n`, "utf8");
   }
 }
 
@@ -75,7 +75,7 @@ export function ensureSessionWorkspace(
   ensureWorktreeExclude(repoRoot);
 
   const safeName = sanitizeName(sessionName);
-  const worktreesRoot = path.join(repoRoot, ".agent-hub-worktrees");
+  const worktreesRoot = path.join(repoRoot, ".rtm-worktrees");
   const targetDir = path.join(worktreesRoot, safeName);
   const branch = `agent-hub/${safeName}`;
 
@@ -106,12 +106,12 @@ export function ensureSessionWorkspace(
 }
 
 /**
- * Removes a previously created git worktree directory if it exists under .agent-hub-worktrees.
+ * Removes a previously created git worktree directory if it exists under .rtm-worktrees.
  */
 export function removeSessionWorktree(baseCwd: string, worktreePath: string): void {
   const repoRoot = runGit(path.resolve(baseCwd), ["rev-parse", "--show-toplevel"]);
   const resolvedTarget = path.resolve(worktreePath);
-  const expectedParent = path.resolve(repoRoot, ".agent-hub-worktrees");
+  const expectedParent = path.resolve(repoRoot, ".rtm-worktrees");
   const normTarget = process.platform === "win32" ? resolvedTarget.toLowerCase() : resolvedTarget;
   const normParent = process.platform === "win32" ? expectedParent.toLowerCase() : expectedParent;
   if (!normTarget.startsWith(normParent + path.sep)) {

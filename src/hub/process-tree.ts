@@ -4,10 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ALL_AGENTS, type AdapterHealth, type AgentDefinition, type AgentId } from "../types.js";
+import { dataDir } from "./data-dir.js";
 
 const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const PROJECT_ROOT = path.resolve(THIS_DIR, "../..");
-const LOCAL_SECRETS_FILE = path.join(PROJECT_ROOT, ".agent-hub", "secrets.json");
+const LOCAL_SECRETS_FILE = path.join(dataDir(PROJECT_ROOT), "secrets.json");
 
 export interface ResolvedCommand {
   command: string;
@@ -165,7 +166,7 @@ function resolveGenericCommand(
 }
 
 /**
- * Reads optional local API keys/tokens from .agent-hub/secrets.json without touching global user configs.
+ * Reads optional local API keys/tokens from .rtm/secrets.json without touching global user configs.
  */
 export function loadLocalSecrets(): Record<string, string> {
   if (!fs.existsSync(LOCAL_SECRETS_FILE)) {
@@ -490,7 +491,7 @@ export function planAgentAuth(
         args: viaCmd ? ["/d", "/c", "claude", "auth", "status"] : ["auth", "status"],
         timeoutMs: 4000,
         interpret: (stdout) => (JSON.parse(stdout) as { loggedIn?: boolean }).loggedIn === true,
-        failHint: "Claude CLI 未登录：请运行 claude login，或在 .agent-hub/secrets.json 配置 ANTHROPIC_API_KEY",
+        failHint: "Claude CLI 未登录：请运行 claude login，或在 .rtm/secrets.json 配置 ANTHROPIC_API_KEY",
       },
     };
   }
@@ -507,7 +508,7 @@ export function planAgentAuth(
         ? { authReady: true }
         : {
             authReady: false,
-            authHint: "Codex 未认证：请运行 codex login 或在环境变量/.agent-hub/secrets.json 配置 OPENAI_API_KEY",
+            authHint: "Codex 未认证：请运行 codex login 或在环境变量/.rtm/secrets.json 配置 OPENAI_API_KEY",
           },
     };
   }
@@ -597,7 +598,7 @@ export function planAgentAuth(
     return {
       result: {
         authReady: false,
-        authHint: "未检测到 GEMINI_API_KEY：请在环境变量或 .agent-hub/secrets.json 中设置以启用 google-antigravity SDK",
+        authHint: "未检测到 GEMINI_API_KEY：请在环境变量或 .rtm/secrets.json 中设置以启用 google-antigravity SDK",
       },
     };
   }

@@ -4,9 +4,10 @@ import path from "node:path";
 import { AgentHubServer } from "../src/hub/server.js";
 import { PROJECT_ROOT } from "../src/hub/process-tree.js";
 import type { AgentResourceBudget, SharedResourceItem, TelemetrySnapshot, SessionRecord } from "../src/types.js";
+import { dataDir } from "../src/hub/data-dir.js";
 
 async function main(): Promise<void> {
-  const agentHubDir = path.join(PROJECT_ROOT, ".agent-hub");
+  const agentHubDir = dataDir(PROJECT_ROOT);
   const hadAgentHubDir = fs.existsSync(agentHubDir);
   const hadResourcesDir = fs.existsSync(path.join(agentHubDir, "resources"));
 

@@ -38,12 +38,13 @@ import { WorkflowManager } from "./workflow.js";
 import { HubStateStore } from "./state-store.js";
 import { SharedResourceManager } from "./resources.js";
 import { summarizeWorkspaceChanges } from "./worktree.js";
+import { dataDir } from "./data-dir.js";
 
 const MAX_PEER_DEPTH = 3;
-const RUNTIME_FILE = path.join(PROJECT_ROOT, ".agent-hub", "runtime.json");
-const UPLOADS_DIR = path.join(PROJECT_ROOT, ".agent-hub", "uploads");
-const SETTINGS_FILE = path.join(PROJECT_ROOT, ".agent-hub", "settings.json");
-const STATE_FILE = path.join(PROJECT_ROOT, ".agent-hub", "state.json");
+const RUNTIME_FILE = path.join(dataDir(PROJECT_ROOT), "runtime.json");
+const UPLOADS_DIR = path.join(dataDir(PROJECT_ROOT), "uploads");
+const SETTINGS_FILE = path.join(dataDir(PROJECT_ROOT), "settings.json");
+const STATE_FILE = path.join(dataDir(PROJECT_ROOT), "state.json");
 /** Events that never change what is persisted; everything else schedules a save. */
 const TRANSIENT_EVENT_TYPES = new Set(["agent_chunk", "tool_event", "snapshot", "models_updated"]);
 /** Session-name suffix of the throwaway session that names a task; never shown in the UI. */
@@ -480,7 +481,7 @@ export interface HubServerOptions {
    * writeRuntimeFile, so throwaway hubs (tests, benchmarks) never touch the saved state.
    */
   persistState?: boolean;
-  /** Where the state is kept; setting it turns persistence on. Defaults to .agent-hub/state.json. */
+  /** Where the state is kept; setting it turns persistence on. Defaults to .rtm/state.json. */
   stateFile?: string;
   strictPort?: boolean;
   desktopMode?: boolean;
@@ -2810,6 +2811,19 @@ export class AgentHubServer {
    *   Origin to cross-site POSTs, so a page the user happens to visit cannot drive the hub.
    *   Local tools (the MCP bridge, curl, scripts) send no Origin and are allowed.
    */
+  /** Changes whenever any icon file is replaced; used as a cache-busting query value. */
+  private getIconVersion(): string {
+    let newest = 0;
+    for (const name of Object.keys(UI_ICON_FILES)) {
+      try {
+        newest = Math.max(newest, Math.floor(fs.statSync(this.getUiAssetPath(name)).mtimeMs));
+      } catch {
+        // a missing icon simply does not contribute
+      }
+    }
+    return newest.toString(36);
+  }
+
   private isRequestAllowed(req: IncomingMessage, method: string): boolean {
     const allowedHosts = new Set([`127.0.0.1:${this.port}`, `localhost:${this.port}`, `[::1]:${this.port}`]);
     const host = String(req.headers.host ?? "").toLowerCase();
@@ -2839,7 +2853,11 @@ export class AgentHubServer {
 
     try {
       if (method === "GET" && pathname === "/") {
-        const html = fs.readFileSync(this.getUiAssetPath("index.html"), "utf8");
+        // Icon URLs carry a version taken from the files, so a replaced icon is fetched again
+        // instead of being served from the browser's (and the app window profile's) cache.
+        const html = fs
+          .readFileSync(this.getUiAssetPath("index.html"), "utf8")
+          .replace(/(\/ui\/icon[\w.-]*\.(?:png|ico))(?=")/g, `$1?v=${this.getIconVersion()}`);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
         res.end(html);
         return;
@@ -2963,7 +2981,11 @@ export class AgentHubServer {
           res.end("Not found");
           return;
         }
-        res.writeHead(200, { "Content-Type": mime, "Cache-Control": "public, max-age=3600" });
+        // Versioned URLs make long caching safe; an unversioned request must revalidate.
+        res.writeHead(200, {
+          "Content-Type": mime,
+          "Cache-Control": reqUrl.searchParams.has("v") ? "public, max-age=604800" : "no-cache",
+        });
         res.end(fs.readFileSync(this.getUiAssetPath(fileName)));
         return;
       }
@@ -2978,8 +3000,8 @@ export class AgentHubServer {
           background_color: "#f7f8f9",
           theme_color: "#f7f8f9",
           icons: [
-            { src: "/ui/icon-192.png", sizes: "192x192", type: "image/png" },
-            { src: "/ui/icon-512.png", sizes: "512x512", type: "image/png" },
+            { src: `/ui/icon-192.png?v=${this.getIconVersion()}`, sizes: "192x192", type: "image/png" },
+            { src: `/ui/icon-512.png?v=${this.getIconVersion()}`, sizes: "512x512", type: "image/png" },
           ],
         };
         res.writeHead(200, { "Content-Type": "application/manifest+json; charset=utf-8", "Cache-Control": "no-store" });
