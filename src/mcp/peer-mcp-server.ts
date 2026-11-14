@@ -429,6 +429,11 @@ async function main(): Promise<void> {
               id: z.string().describe("Short unique id: lowercase letters, digits, '-' or '_'."),
               name: z.string().optional().describe("Human-readable step name."),
               agent: z.string().min(1).describe("Agent ID that runs this step (see peer_list_agents)."),
+              model: z.string().optional().describe("Optional model ID override for this step's agent."),
+              effort: z
+                .string()
+                .optional()
+                .describe("Optional reasoning effort override (e.g. low, medium, high, xhigh, max)."),
               prompt: z
                 .string()
                 .min(1)
@@ -436,9 +441,51 @@ async function main(): Promise<void> {
               depends_on: z.array(z.string()).optional().describe("Ids of steps that must finish first."),
               context: z.array(z.string()).optional().describe("Keys of the sections this step needs."),
               isolate_worktree: z.boolean().optional().describe("Run the step in its own git worktree."),
+              gate: z
+                .object({
+                  command: z
+                    .string()
+                    .optional()
+                    .describe("Shell command run in the step's workspace (e.g. 'npm run typecheck'); exit 0 required."),
+                  timeout_seconds: z
+                    .number()
+                    .int()
+                    .min(5)
+                    .max(600)
+                    .optional()
+                    .describe("Timeout for `command` in seconds (default 120, 5-600)."),
+                  files: z
+                    .array(
+                      z.union([
+                        z.string().min(1),
+                        z.object({
+                          path: z.string().min(1),
+                          non_empty: z.boolean().optional(),
+                          must_contain: z.string().optional(),
+                        }),
+                      ]),
+                    )
+                    .optional()
+                    .describe("Relative file paths that must exist in the step's workspace before the step passes."),
+                  output_pattern: z
+                    .string()
+                    .optional()
+                    .describe("Regular expression the agent's reply must match."),
+                  max_retries: z
+                    .number()
+                    .int()
+                    .min(1)
+                    .max(5)
+                    .optional()
+                    .describe("Retries when the gate fails before failing the step (default 2)."),
+                })
+                .optional()
+                .describe("Deterministic node gate checked automatically before reviewer / step completion."),
               review: z
                 .object({
                   agent: z.string().min(1).describe("Agent ID that reviews the step's work; pick a different agent than the one doing it."),
+                  model: z.string().optional().describe("Optional model ID override for the reviewer agent."),
+                  effort: z.string().optional().describe("Optional reasoning effort override for the reviewer agent."),
                   criteria: z.string().optional().describe("What the work must satisfy to be accepted."),
                   max_rounds: z.number().int().min(1).max(5).optional().describe("Reviews before the step fails (default 2)."),
                 })
@@ -467,12 +514,37 @@ async function main(): Promise<void> {
               id: s.id,
               name: s.name,
               agent: s.agent,
+              model: s.model,
+              effort: s.effort,
               prompt: s.prompt,
               dependsOn: s.depends_on,
               contextRefs: s.context,
               isolateWorktree: s.isolate_worktree,
+              gate: s.gate
+                ? {
+                    command: s.gate.command,
+                    timeoutSeconds: s.gate.timeout_seconds,
+                    files: s.gate.files?.map((f) =>
+                      typeof f === "string"
+                        ? f
+                        : {
+                            path: f.path,
+                            nonEmpty: f.non_empty,
+                            mustContain: f.must_contain,
+                          },
+                    ),
+                    outputPattern: s.gate.output_pattern,
+                    maxRetries: s.gate.max_retries,
+                  }
+                : undefined,
               review: s.review
-                ? { agent: s.review.agent, criteria: s.review.criteria, maxRounds: s.review.max_rounds }
+                ? {
+                    agent: s.review.agent,
+                    model: s.review.model,
+                    effort: s.review.effort,
+                    criteria: s.review.criteria,
+                    maxRounds: s.review.max_rounds,
+                  }
                 : undefined,
             })),
           },

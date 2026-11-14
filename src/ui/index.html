@@ -10,22 +10,26 @@
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="stylesheet" href="/ui/styles.css" />
   <link rel="stylesheet" href="/ui/panels.css" />
+  <link rel="stylesheet" href="/ui/board.css" />
 </head>
-<body>
+<body data-screen="board">
   <!-- 在首帧绘制前套用主题，避免深色模式启动时先闪一下浅色 -->
   <script>
     try {
       if (localStorage.getItem("agent-hub-theme") === "dark") document.body.classList.add("dark");
       var savedSkin = localStorage.getItem("agent-hub-skin");
       if (savedSkin === "classic" || savedSkin === "roundtable") document.body.dataset.skin = savedSkin;
+      var sp = new URLSearchParams(location.search);
+      document.body.dataset.screen = (sp.get("view") === "workbench" || sp.get("group")) ? "workbench" : "board";
     } catch (e) {}
   </script>
+  <section id="boardScreen" class="board-screen" hidden></section>
   <div id="workbench" class="workbench">
     <!-- Left Sidebar: Task Groups & Session Tree -->
     <aside class="sidebar">
       <div class="brand-bar">
         <div class="brand-top">
-          <div class="brand-title">
+          <div id="brandHomeBtn" class="brand-title" role="button" tabindex="0" title="返回任务看板" data-i18n-title="backToBoard">
             <img class="brand-mark" src="/ui/icon-64.png" alt="" width="22" height="22" />
             <span>RoundTable Meeting</span>
           </div>
@@ -41,9 +45,15 @@
       </div>
 
       <div class="new-task-area">
-        <button id="toggleNewTaskBtn" class="alma-btn alma-btn-primary new-task-main" type="button" data-i18n="newTask">
-          新建任务
-        </button>
+        <div class="new-task-top-row">
+          <button id="openBoardBtn" class="alma-btn alma-btn-outline open-board-btn" type="button" title="返回任务看板" data-i18n-title="backToBoard">
+            <span data-i18n="taskBoard">任务看板</span>
+            <span id="openBoardBadge" class="mode-badge" hidden>0</span>
+          </button>
+          <button id="toggleNewTaskBtn" class="alma-btn alma-btn-primary new-task-main" type="button" data-i18n="newTask">
+            新建任务
+          </button>
+        </div>
 
         <form id="newTaskPopover" class="new-task-popover" hidden>
           <input
@@ -290,6 +300,20 @@
           </label>
           <label class="settings-row">
             <div>
+              <div class="settings-label" data-i18n="concurrentBoardTasks">看板同时运行的任务数</div>
+              <div class="settings-note" data-i18n="concurrentBoardTasksNote">超过上限的看板任务会自动排队；进入“等你”的任务立即让出名额。</div>
+            </div>
+            <select id="boardParallelSelect" class="perm-select">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+              <option value="6">6</option>
+              <option value="8">8</option>
+            </select>
+          </label>
+          <label class="settings-row">
+            <div>
               <div class="settings-label" data-i18n="concurrentWorkflowSteps">工作流同时运行的步骤数</div>
               <div class="settings-note" data-i18n="eachRunningStepStartsItsOwnAgent">每个运行中的步骤都是一组 Agent 进程，开得太多会把内存占满。其余步骤排队等空位。</div>
             </div>
@@ -300,6 +324,18 @@
               <option value="4">4</option>
               <option value="6">6</option>
               <option value="8">8</option>
+            </select>
+          </label>
+          <label class="settings-row">
+            <div>
+              <div class="settings-label" data-i18n="putIdleLeadsToSleep">空闲主导会话自动休眠</div>
+              <div class="settings-note" data-i18n="putIdleLeadsToSleepNote">默认从不休眠以保留主导上下文；内存吃紧时超过 10 分钟空闲会自动休眠。</div>
+            </div>
+            <select id="idleLeadSelect" class="perm-select">
+              <option value="0" data-i18n="never">从不</option>
+              <option value="10" data-i18n="label10Minutes">10 分钟</option>
+              <option value="30" data-i18n="label30Minutes">30 分钟</option>
+              <option value="60" data-i18n="label1Hour">1 小时</option>
             </select>
           </label>
           <label class="settings-row">
@@ -381,5 +417,6 @@
   <script type="module" src="/ui/panels.js"></script>
   <script type="module" src="/ui/interactive.js"></script>
   <script type="module" src="/ui/mcp.js"></script>
+  <script type="module" src="/ui/board.js"></script>
 </body>
 </html>

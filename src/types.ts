@@ -250,6 +250,7 @@ export interface TaskBoardInfo {
 export interface BoardCard {
   groupId: string;
   title: string;
+  defaultTitleNumber?: number | null;
   leadAgent: AgentId;
   cwd: string;
   board: TaskBoardInfo;
@@ -329,6 +330,8 @@ export interface TaskRecord {
   targetAgent: AgentId;
   targetSessionKey: string;
   prompt: string;
+  model?: string;
+  effort?: string;
   status: TaskStatus;
   isolateWorktree: boolean;
   worktreePath?: string;
@@ -491,37 +494,77 @@ export type WorkflowStepStatus =
   | "cancelled"
   | "skipped";
 
+export interface WorkflowFileGateItem {
+  path: string;
+  nonEmpty?: boolean;
+  mustContain?: string;
+}
+
+export interface WorkflowGateInput {
+  command?: string;
+  timeoutSeconds?: number;
+  files?: Array<string | WorkflowFileGateItem>;
+  outputPattern?: string;
+  maxRetries?: number;
+}
+
+export interface WorkflowGateConfig {
+  command?: string;
+  timeoutSeconds: number;
+  files?: WorkflowFileGateItem[];
+  outputPattern?: string;
+  maxRetries: number;
+}
+
 /** What a client or the lead agent sends when drafting a workflow. */
 export interface WorkflowStepInput {
   id?: string;
   name?: string;
   agent: string;
+  model?: string;
+  effort?: string;
   prompt: string;
   dependsOn?: string[];
   isolateWorktree?: boolean;
   /** Context sections this step needs besides the common one. */
   contextRefs?: string[];
+  /** Deterministic gate checked automatically before acceptance review / completion. */
+  gate?: WorkflowGateInput | null;
   /** Acceptance gate; an empty agent means none. */
-  review?: { agent?: string; criteria?: string; maxRounds?: number } | null;
+  review?: { agent?: string; model?: string; effort?: string; criteria?: string; maxRounds?: number } | null;
 }
 
 export interface WorkflowStep {
   id: string;
   name: string;
   agent: AgentId;
+  model?: string;
+  effort?: string;
   prompt: string;
   /** Ids of the steps that must finish first; their output is appended to this step's prompt. */
   dependsOn: string[];
   isolateWorktree?: boolean;
   /** Context sections this step needs besides the common one. */
   contextRefs?: string[];
+  /** Deterministic gate checked automatically before acceptance review / completion. */
+  gate?: WorkflowGateConfig;
   /**
    * Acceptance gate: when the step's agent is done, `agent` reviews the work. A rejection goes
    * back to the step's agent with the reviewer's findings, up to `maxRounds` reviews in all.
    */
-  review?: { agent: AgentId; criteria?: string; maxRounds: number };
-  /** While a gated step runs: whether its agent is working or the reviewer is reviewing. */
-  phase?: "work" | "review";
+  review?: { agent: AgentId; model?: string; effort?: string; criteria?: string; maxRounds: number };
+  /** While a step runs: whether its agent is working, a gate check is running, or the reviewer is reviewing. */
+  phase?: "work" | "gate" | "review";
+  /** Which gate retry attempt the step is on. */
+  gateAttempt?: number;
+  /** Output / failure reason from the last deterministic gate check. */
+  gateNotes?: string;
+  /** Isolated git worktree path used by the step's worker session, when enabled. */
+  worktreePath?: string;
+  /** Git branch name of the step's isolated worktree, when enabled. */
+  branch?: string;
+  /** Concise git status/diff summary from the step's last work turn. */
+  workspaceSummary?: string;
   /** Which review round the step is in (1 = first attempt). */
   round?: number;
   /** The reviewer's last reply. */
@@ -601,6 +644,7 @@ export type HubEvent =
       baseCwd: string;
       agents: AdapterHealth[];
       taskGroups: TaskGroup[];
+      boardCards?: BoardCard[];
       sessions: SessionRecord[];
       tasks: TaskRecord[];
       pendingPermissions: PendingPermission[];

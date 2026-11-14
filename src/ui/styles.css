@@ -4012,3 +4012,91 @@ button.question-from {
   font: inherit;
   font-size: 11.5px;
 }
+
+/* Screen switching between full-screen Task Board and Workbench */
+body[data-screen="board"] #workbench {
+  display: none;
+}
+
+body:not([data-screen="board"]) #boardScreen {
+  display: none;
+}
+
+.brand-title[role="button"] {
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  transition: opacity 0.14s var(--ease), color 0.14s var(--ease);
+}
+
+.brand-title[role="button"]:hover {
+  color: var(--accent);
+}
+
+.new-task-top-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.new-task-top-row .open-board-btn {
+  flex: 1 1 0;
+  min-height: 34px;
+  padding: 6px 10px;
+}
+
+.new-task-top-row .new-task-main {
+  flex: 1 1 0;
+  width: auto;
+}
+
+.open-board-btn .mode-badge.is-attention {
+  background: var(--warn-soft);
+  border-color: var(--warn);
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.board-status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--soft);
+  font-family: var(--ui);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.board-status-pill.is-running {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.board-status-pill.is-waiting {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--line));
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.board-status-pill.is-delivered {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.board-status-pill.is-failed {
+  border-color: color-mix(in srgb, var(--err) 50%, var(--line));
+  background: var(--err-soft);
+  color: var(--err);
+}
+
+.board-status-pill.is-done {
+  color: var(--faint);
+}
+

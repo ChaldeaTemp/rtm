@@ -2032,6 +2032,12 @@ body.dark .wf-node {
   box-shadow: inset 4px 0 0 var(--wf-review), var(--shadow-md);
 }
 
+.wf-node.status-running.phase-gate {
+  border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 9%, var(--bg-elevated));
+  box-shadow: inset 4px 0 0 var(--warn), var(--shadow-md);
+}
+
 .wf-node.status-completed {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 6%, var(--bg-elevated));
@@ -2161,6 +2167,50 @@ body.dark .wf-node {
   color: var(--wf-review);
 }
 
+.wf-mini-tag.is-model {
+  max-width: 68px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  color: var(--accent);
+}
+
+.wf-mini-tag.is-effort {
+  color: var(--muted);
+}
+
+.wf-mini-tag.is-gate {
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--line));
+  color: var(--warn);
+}
+
+.wf-mini-tag.is-in-gate {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-weight: 600;
+  animation: wfPulse 1.8s infinite ease-in-out;
+}
+
+@keyframes wfPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.wf-mini-tag.is-gate-cmd,
+.wf-mini-tag.is-gate-files,
+.wf-mini-tag.is-gate-pattern,
+.wf-mini-tag.is-gate-retries {
+  border-color: var(--line);
+  color: var(--muted);
+}
+
+.wf-mini-tag.is-gate-attempt {
+  border-color: var(--err);
+  color: var(--err);
+}
+
 .wf-node-status-pill {
   margin-left: auto;
   padding: 1px 7px;
@@ -2182,6 +2232,18 @@ body.dark .wf-node {
 .wf-node.status-running.phase-review .wf-node-status-pill {
   color: var(--wf-review);
   background: var(--wf-review-soft);
+}
+
+.wf-node.status-running.phase-gate .wf-node-status-pill {
+  color: var(--warn);
+  background: var(--warn-soft);
+  font-weight: 600;
+}
+
+.wf-node-status-pill.is-gate {
+  color: var(--warn);
+  background: var(--warn-soft);
+  font-weight: 600;
 }
 
 .wf-node.status-completed .wf-node-status-pill {

@@ -25,11 +25,19 @@ export function stepToTemplate(step: WorkflowStep): WorkflowStepInput {
     id: step.id,
     name: step.name,
     agent: step.agent,
+    model: step.model,
+    effort: step.effort,
     prompt: step.prompt,
     dependsOn: [...step.dependsOn],
     isolateWorktree: Boolean(step.isolateWorktree),
     // Context sections belong to the task the template came from, not to the template.
     contextRefs: [],
+    gate: step.gate
+      ? {
+          ...step.gate,
+          files: step.gate.files ? step.gate.files.map((f) => ({ ...f })) : undefined,
+        }
+      : undefined,
     review: step.review ? { ...step.review } : undefined,
   };
 }

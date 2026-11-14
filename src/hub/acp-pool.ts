@@ -35,20 +35,15 @@ import {
   type SharedResourceManager,
 } from "./resources.js";
 import { ensureSessionWorkspace } from "./worktree.js";
+import {
+  clipHeadTail,
+  compactToolRawInput,
+  MAX_TOOL_DIFF_CHARS,
+  MAX_TOOL_DIFF_COUNT,
+  MAX_TOOL_OUTPUT_CHARS,
+} from "./tool-clip.js";
 
 const READ_ONLY_KINDS = new Set(["read", "search", "think"]);
-const MAX_TOOL_DIFF_CHARS = 24_000;
-const MAX_TOOL_OUTPUT_CHARS = 16_000;
-
-function clipToolString(text: string, limit: number): { value: string; truncated: boolean } {
-  if (text.length <= limit) {
-    return { value: text, truncated: false };
-  }
-  return {
-    value: `${text.slice(0, limit)}\n... [已截断，原长 ${text.length} 字符]`,
-    truncated: true,
-  };
-}
 
 function extractRawOutputText(rawOutput: unknown): string | undefined {
   if (rawOutput === undefined || rawOutput === null) return undefined;
@@ -93,10 +88,10 @@ function extractToolOutputs(
         content?: { type?: unknown; text?: unknown };
       };
       if (entry.type === "diff" && typeof entry.path === "string" && typeof entry.newText === "string") {
-        if (diffs.length < 8) {
+        if (diffs.length < MAX_TOOL_DIFF_COUNT) {
           const oldClipped =
-            typeof entry.oldText === "string" ? clipToolString(entry.oldText, MAX_TOOL_DIFF_CHARS) : undefined;
-          const newClipped = clipToolString(entry.newText, MAX_TOOL_DIFF_CHARS);
+            typeof entry.oldText === "string" ? clipHeadTail(entry.oldText, MAX_TOOL_DIFF_CHARS) : undefined;
+          const newClipped = clipHeadTail(entry.newText, MAX_TOOL_DIFF_CHARS);
           diffs.push({
             path: entry.path,
             oldText: oldClipped?.value,
@@ -116,7 +111,7 @@ function extractToolOutputs(
   let outputText: string | undefined;
   let outputTruncated = false;
   if (rawText) {
-    const clipped = clipToolString(rawText, MAX_TOOL_OUTPUT_CHARS);
+    const clipped = clipHeadTail(rawText, MAX_TOOL_OUTPUT_CHARS);
     outputText = clipped.value;
     outputTruncated = clipped.truncated;
   }
@@ -1156,7 +1151,7 @@ export class AcpPool extends EventEmitter {
       agent,
       toolTitle: params.toolCall.title ?? params.toolCall.toolCallId,
       toolKind,
-      rawInput: params.toolCall.rawInput,
+      rawInput: compactToolRawInput(params.toolCall.rawInput),
       options: params.options.map((o) => ({
         optionId: o.optionId,
         name: o.name,
@@ -1347,7 +1342,7 @@ export class AcpPool extends EventEmitter {
               title,
               kind: update.kind,
               status: update.status,
-              rawInput: update.rawInput,
+              rawInput: compactToolRawInput(update.rawInput),
               locations: update.locations ?? undefined,
               outputText: extracted.outputText,
               outputTruncated: extracted.outputTruncated,
@@ -1368,7 +1363,7 @@ export class AcpPool extends EventEmitter {
               title: update.title || managed.record.lastTool || update.toolCallId,
               kind: update.kind ?? undefined,
               status: update.status ?? undefined,
-              rawInput: update.rawInput,
+              rawInput: compactToolRawInput(update.rawInput),
               locations: update.locations ?? undefined,
               outputText: extracted.outputText,
               outputTruncated: extracted.outputTruncated,

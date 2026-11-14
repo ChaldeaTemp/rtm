@@ -9,6 +9,17 @@ import WebSocket from "ws";
 
 import { AgentHubServer } from "../src/hub/server.js";
 import { negotiateLocale } from "../src/hub/i18n.js";
+import {
+  MAX_TOOL_DIFF_CHARS,
+  MAX_TOOL_DIFF_COUNT,
+  MAX_TOOL_INPUT_JSON_CHARS,
+  MAX_TOOL_INPUT_STRING_CHARS,
+  MAX_TOOL_LOCATIONS,
+  MAX_TOOL_OUTPUT_CHARS,
+  clipHeadTail,
+  compactToolCall,
+  compactToolRawInput,
+} from "../src/hub/tool-clip.js";
 import { setLanguagePreference, th } from "../src/ui/i18n.js";
 import { messages } from "../src/ui/messages.js";
 import {
@@ -155,7 +166,7 @@ rl.on("line", (line) => {
             sessionId,
             update: {
               sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text: "SECOND_PHASE_OK" },
+              content: { type: "text", text: "SECOND_PHASE_OK\\nSTATUS: DONE" },
             },
           },
         });
@@ -171,7 +182,7 @@ rl.on("line", (line) => {
             sessionId,
             update: {
               sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text: "FIRST_PHASE_DONE" },
+              content: { type: "text", text: "FIRST_PHASE_DONE\\nSTATUS: DONE" },
             },
           },
         });
@@ -350,6 +361,88 @@ function runMarkdownUnitTests(): void {
   assert.equal(partInPlace.every((p) => p.kind === "message"), true);
 }
 
+function runToolClipUnitTests(): void {
+  const short = "short output";
+  assert.deepEqual(clipHeadTail(short, 120), { value: short, truncated: false });
+
+  const long = `HEAD_MARKER-${"x".repeat(600)}-TAIL_MARKER`;
+  const clipped = clipHeadTail(long, 140);
+  assert.equal(clipped.truncated, true);
+  assert.ok(clipped.value.length < long.length && clipped.value.length <= 140 + 80, `clipHeadTail length: ${clipped.value.length}`);
+  assert.ok(clipped.value.startsWith("HEAD_MARKER-"), "clipHeadTail must preserve head");
+  assert.ok(clipped.value.endsWith("-TAIL_MARKER"), "clipHeadTail must preserve tail");
+  assert.ok(clipped.value.includes("已省略中间"), `clipHeadTail missing omission marker: ${clipped.value}`);
+
+  const hugeStr = `INPUT_HEAD-${"A".repeat(25_000)}-INPUT_TAIL`;
+  const clippedInputStr = compactToolRawInput(hugeStr) as string;
+  assert.equal(typeof clippedInputStr, "string");
+  assert.ok(clippedInputStr.length <= MAX_TOOL_INPUT_STRING_CHARS + 80, "raw string should be bounded");
+  assert.ok(clippedInputStr.startsWith("INPUT_HEAD-") && clippedInputStr.endsWith("-INPUT_TAIL"));
+
+  const moderateObj = {
+    command: "echo ok",
+    blob: `B_HEAD-${"B".repeat(22_000)}-B_TAIL`,
+  };
+  const compactedObj = compactToolRawInput(moderateObj) as Record<string, unknown>;
+  assert.equal(typeof compactedObj, "object");
+  assert.equal(compactedObj.command, "echo ok");
+  assert.ok(
+    typeof compactedObj.blob === "string" && compactedObj.blob.length <= MAX_TOOL_INPUT_STRING_CHARS + 80,
+    "nested >20KB string should be bounded",
+  );
+
+  const hugeObj = {
+    command: "echo ok",
+    extra: Array.from({ length: 80 }, (_, idx) => ({ idx, payload: "C".repeat(600) })),
+  };
+  const compactedHuge = compactToolRawInput(hugeObj);
+  const serializedHuge = typeof compactedHuge === "string" ? compactedHuge : JSON.stringify(compactedHuge);
+  assert.ok(
+    serializedHuge.length <= MAX_TOOL_INPUT_JSON_CHARS + 80,
+    `compactToolRawInput exceeded JSON budget: ${serializedHuge.length}`,
+  );
+  assert.ok(serializedHuge.includes("echo ok"));
+
+  const bigDiffOld = `OLD_START\n${"1234567890".repeat(1200)}\nOLD_END`;
+  const bigDiffNew = `NEW_START\n${"abcdefghij".repeat(1200)}\nNEW_END`;
+  const compactedTc = compactToolCall({
+    toolCallId: "tc-clip-1",
+    title: "Huge tool call",
+    kind: "edit",
+    status: "completed",
+    rawInput: hugeObj,
+    outputText: `OUT_START\n${"Z".repeat(20_000)}\nOUT_END`,
+    diffs: Array.from({ length: MAX_TOOL_DIFF_COUNT + 4 }, (_, i) => ({
+      path: `src/file-${i}.ts`,
+      oldText: bigDiffOld,
+      newText: bigDiffNew,
+    })),
+    locations: Array.from({ length: MAX_TOOL_LOCATIONS + 10 }, (_, i) => ({
+      path: `src/loc-${i}.ts`,
+      line: i + 1,
+    })),
+  });
+  assert.equal(compactedTc.outputTruncated, true);
+  assert.ok((compactedTc.outputText ?? "").length <= MAX_TOOL_OUTPUT_CHARS + 80, "compactToolCall must bound outputText");
+  assert.ok((compactedTc.outputText ?? "").startsWith("OUT_START") && (compactedTc.outputText ?? "").endsWith("OUT_END"));
+  assert.ok((compactedTc.diffs ?? []).length <= MAX_TOOL_DIFF_COUNT, "compactToolCall must bound diff count");
+  for (const d of compactedTc.diffs ?? []) {
+    assert.equal(d.truncated, true);
+    assert.ok((d.oldText ?? "").length <= MAX_TOOL_DIFF_CHARS + 80, "compactToolCall must bound diff oldText");
+    assert.ok((d.newText ?? "").length <= MAX_TOOL_DIFF_CHARS + 80, "compactToolCall must bound diff newText");
+  }
+  assert.ok(
+    (compactedTc.locations ?? []).length <= MAX_TOOL_LOCATIONS,
+    "compactToolCall must bound locations",
+  );
+  const compactedRawSerialized =
+    typeof compactedTc.rawInput === "string" ? compactedTc.rawInput : JSON.stringify(compactedTc.rawInput);
+  assert.ok(
+    compactedRawSerialized.length <= MAX_TOOL_INPUT_JSON_CHARS + 80,
+    "compactToolCall must bound rawInput",
+  );
+}
+
 async function registerMockAgent(
   url: string,
   id: string,
@@ -386,6 +479,7 @@ async function main(): Promise<void> {
   assert.equal(th("directoriesFor", "<test & test>"), "Directories for “&lt;test &amp; test&gt;”");
   setLanguagePreference("zh-CN");
   runMarkdownUnitTests();
+  runToolClipUnitTests();
 
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "rtm-verify-walkthrough-"));
   const projA = path.join(tmpRoot, "proj-a");
@@ -442,7 +536,22 @@ async function main(): Promise<void> {
     });
     await waitFor(() => wsEvents.length, (n) => n >= 1);
 
-    console.log("=== 2. Verify /ui/markdown.js & Artifact CSP + Theme/Skin Sync ===");
+    console.log("=== 2. Verify D3 Board Assets & /ui/markdown.js & Artifact CSP + Theme/Skin Sync ===");
+    const indexResp = await fetch(`${url}/`);
+    assert.equal(indexResp.status, 200);
+    const indexHtml = await indexResp.text();
+    assert.ok(indexHtml.includes('id="boardScreen"'), "index.html should render #boardScreen");
+    assert.ok(
+      indexHtml.includes('<script type="module" src="/ui/board.js"></script>'),
+      "index.html should load /ui/board.js module",
+    );
+    const boardJsResp = await fetch(`${url}/ui/board.js`);
+    assert.equal(boardJsResp.status, 200);
+    assert.ok((await boardJsResp.text()).length > 100);
+    const boardCssResp = await fetch(`${url}/ui/board.css`);
+    assert.equal(boardCssResp.status, 200);
+    assert.ok((await boardCssResp.text()).length > 100);
+
     const mdAssetResp = await fetch(`${url}/ui/markdown.js`);
     assert.equal(mdAssetResp.status, 200);
     const mdAssetText = await mdAssetResp.text();

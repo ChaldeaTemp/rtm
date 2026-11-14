@@ -191,7 +191,8 @@ async function main(): Promise<void> {
     check(
       "status line is read",
       parseStepOutcome("done\nSTATUS: DONE").ok &&
-        parseStepOutcome("no status line at all").ok &&
+        !parseStepOutcome("no status line at all").ok &&
+        parseStepOutcome("no status line at all").missingStatus === true &&
         parseStepOutcome("x\nSTATUS: FAILED - no access").reason === "FAILED: no access" &&
         parseStepOutcome("x\n**STATUS: BLOCKED** - need the API key").reason === "BLOCKED: need the API key" &&
         parseStepOutcome("STATUS: FAILED - first try\nretried\nSTATUS: DONE").ok,
@@ -426,6 +427,273 @@ async function main(): Promise<void> {
     check("sub-session does after it is ticked", lastMcp().includes("demo-tools"), lastMcp().join());
     res = await post("/api/mcp/delete", { groupId: g3.groupId, name: "demo-tools" });
     check("server deleted", res.ok === true && !res.servers.some((s: Json) => s.id === "rtm:demo-tools"));
+
+    console.log("=== 8. Workflow worktree isolation (A2), deterministic gates (A4), model/effort (A3) ===");
+    fs.rmSync(path.join(stateDir, "review.count"), { force: true });
+    fs.writeFileSync(path.join(stateDir, "review-fails"), "0", "utf8");
+    const turnsLog = path.join(stateDir, "session-turns.log");
+    const readTurns = (): Json[] =>
+      fs.existsSync(turnsLog)
+        ? fs.readFileSync(turnsLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Json)
+        : [];
+    const normPath = (p: string): string => path.resolve(p).toLowerCase();
+
+    // A2: isolateWorktree step writes in its worktree; reviewer runs in that worktree cwd and sees <workspace_changes>
+    const wtRepo = path.join(tmp, "wt-repo");
+    fs.mkdirSync(wtRepo, { recursive: true });
+    fs.writeFileSync(path.join(wtRepo, "README.md"), "# Worktree Verification Repo\n", "utf8");
+    for (const gitArgs of [
+      ["init"],
+      ["config", "user.email", "verify@example.com"],
+      ["config", "user.name", "Verify"],
+      ["add", "."],
+      ["commit", "-m", "init"],
+    ]) {
+      const gitRes = spawnSync("git", ["-C", wtRepo, ...gitArgs], { stdio: "ignore", windowsHide: true });
+      if (gitRes.status !== 0) throw new Error(`git ${gitArgs.join(" ")} failed in wtRepo`);
+    }
+    const gWt = (await post("/api/groups", { title: "a2-worktree", leadAgent: "mock-a", cwd: wtRepo })).group;
+    const turnsBeforeA2 = readTurns().length;
+    res = await post("/api/workflows/save", {
+      groupId: gWt.groupId,
+      steps: [
+        {
+          id: "wt-impl",
+          name: "Worktree Impl",
+          agent: "mock-a",
+          prompt: "WRITE_FILE:worktree-note.txt:from-isolated-worktree Implement feature.",
+          isolateWorktree: true,
+          review: {
+            agent: "mock-b",
+            maxRounds: 2,
+            criteria: "CHECK_FILE:worktree-note.txt",
+          },
+        },
+      ],
+    });
+    check("A2 workflow saved", res.ok === true, res.error);
+    await post("/api/workflows/run", { groupId: gWt.groupId });
+    const getWtWf = async (): Promise<Json> => (await get(`/api/workflows?groupId=${encodeURIComponent(gWt.groupId)}`)).workflow;
+    check("A2 workflow completes", await until(async () => (await getWtWf()).status !== "running", 30000));
+    const doneWt = await getWtWf();
+    const wtStep = doneWt.steps.find((s: Json) => s.id === "wt-impl");
+    const wtPath = String(wtStep?.worktreePath ?? "");
+    const a2Turns = readTurns().slice(turnsBeforeA2).filter((t) => t.event === "prompt");
+    const stepTurn = a2Turns.find((t) => String(t.preview ?? "").includes("WRITE_FILE:worktree-note.txt") && !String(t.preview ?? "").includes("acceptance reviewer"));
+    const reviewTurn = a2Turns.find((t) => String(t.preview ?? "").includes("CHECK_FILE:worktree-note.txt") && String(t.preview ?? "").includes("acceptance reviewer"));
+    check(
+      "A2 isolated step & reviewer pass in worktree with <workspace_changes>",
+      doneWt.status === "completed" &&
+        wtStep?.status === "completed" &&
+        Boolean(wtPath) &&
+        normPath(wtPath) !== normPath(wtRepo) &&
+        fs.existsSync(path.join(wtPath, "worktree-note.txt")) &&
+        !fs.existsSync(path.join(wtRepo, "worktree-note.txt")) &&
+        Boolean(stepTurn) &&
+        normPath(String(stepTurn?.cwd ?? "")) === normPath(wtPath) &&
+        Boolean(reviewTurn) &&
+        normPath(String(reviewTurn?.cwd ?? "")) === normPath(wtPath) &&
+        /VERDICT: PASS/.test(wtStep?.reviewNotes ?? ""),
+      `status=${doneWt.status}, wtPath=${wtPath}, stepCwd=${stepTurn?.cwd}, reviewCwd=${reviewTurn?.cwd}`,
+    );
+
+    // A4: deterministic command, files, and missing-STATUS gates bounce back without calling reviewer prematurely
+    const gateDir = path.join(tmp, "gate-proj");
+    fs.mkdirSync(gateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(gateDir, "gate-check.mjs"),
+      'import fs from "node:fs"; process.exit(fs.existsSync("cmd-ok.txt") ? 0 : 1);\n',
+      "utf8",
+    );
+    const gGate = (await post("/api/groups", { title: "a4-gates", leadAgent: "mock-a", cwd: gateDir })).group;
+    const turnsBeforeA4 = readTurns().length;
+    res = await post("/api/workflows/save", {
+      groupId: gGate.groupId,
+      steps: [
+        {
+          id: "cmd-gate",
+          name: "Command Gate Step",
+          agent: "mock-a",
+          prompt: "DELAY_WRITE_UNTIL_GATE_RETRY WRITE_FILE:cmd-ok.txt:ok GATE_CMD_MARKER",
+          gate: {
+            command: `"${process.execPath}" gate-check.mjs`,
+            maxRetries: 2,
+          },
+          review: { agent: "mock-b", maxRounds: 2, criteria: "REVIEW_CMD_GATE Check cmd-ok.txt" },
+        },
+        {
+          id: "files-gate",
+          name: "Files Gate Step",
+          agent: "mock-a",
+          prompt: "DELAY_WRITE_UNTIL_GATE_RETRY WRITE_FILE:deliverables/proof.txt:PROOF_TOKEN GATE_FILES_MARKER",
+          dependsOn: ["cmd-gate"],
+          gate: {
+            files: [{ path: "deliverables/proof.txt", nonEmpty: true, mustContain: "PROOF_TOKEN" }],
+            maxRetries: 2,
+          },
+          review: { agent: "mock-b", maxRounds: 2, criteria: "REVIEW_FILES_GATE Check proof.txt" },
+        },
+        {
+          id: "status-gate",
+          name: "Missing Status Bounce Step",
+          agent: "mock-a",
+          prompt: "OMIT_STATUS_ONCE GATE_STATUS_MARKER",
+          dependsOn: ["files-gate"],
+          review: { agent: "mock-b", maxRounds: 2, criteria: "REVIEW_STATUS_GATE Accept after status fixed" },
+        },
+      ],
+    });
+    check("A4 passing-after-bounce workflow saved", res.ok === true, res.error);
+    await post("/api/workflows/run", { groupId: gGate.groupId });
+    const getGateWf = async (): Promise<Json> => (await get(`/api/workflows?groupId=${encodeURIComponent(gGate.groupId)}`)).workflow;
+    check("A4 bounce workflow completes", await until(async () => (await getGateWf()).status !== "running", 30000));
+    const doneGateWf = await getGateWf();
+    const a4Turns = readTurns().slice(turnsBeforeA4).filter((t) => t.event === "prompt");
+    const wfA4Turns = a4Turns.filter((t) => {
+      const p = String(t.preview ?? "");
+      return (
+        p.includes("GATE_CMD_MARKER") ||
+        p.includes("GATE_FILES_MARKER") ||
+        p.includes("GATE_STATUS_MARKER") ||
+        p.includes("REVIEW_CMD_GATE") ||
+        p.includes("REVIEW_FILES_GATE") ||
+        p.includes("REVIEW_STATUS_GATE") ||
+        p.includes("<gate_failure")
+      );
+    });
+    const cmdStep = doneGateWf.steps.find((s: Json) => s.id === "cmd-gate");
+    const filesStep = doneGateWf.steps.find((s: Json) => s.id === "files-gate");
+    const statusStep = doneGateWf.steps.find((s: Json) => s.id === "status-gate");
+    const stepTurnIdx = (needle: string): number =>
+      wfA4Turns.findIndex((t) => !String(t.preview ?? "").includes("acceptance reviewer") && String(t.preview ?? "").includes(needle));
+    const reviewTurnIdx = (needle: string): number =>
+      wfA4Turns.findIndex((t) => String(t.preview ?? "").includes("acceptance reviewer") && String(t.preview ?? "").includes(needle));
+    const gateRetryIndices = wfA4Turns
+      .map((t, idx) => (String(t.preview ?? "").includes('<gate_failure attempt="1"') ? idx : -1))
+      .filter((idx) => idx >= 0);
+    const a4ReviewCount = wfA4Turns.filter((t) => String(t.preview ?? "").includes("acceptance reviewer")).length;
+    const bounceBeforeReview =
+      gateRetryIndices.length === 3 &&
+      a4ReviewCount === 3 &&
+      stepTurnIdx("GATE_CMD_MARKER") >= 0 &&
+      stepTurnIdx("GATE_CMD_MARKER") < gateRetryIndices[0]! &&
+      gateRetryIndices[0]! < reviewTurnIdx("REVIEW_CMD_GATE") &&
+      reviewTurnIdx("REVIEW_CMD_GATE") < stepTurnIdx("GATE_FILES_MARKER") &&
+      stepTurnIdx("GATE_FILES_MARKER") < gateRetryIndices[1]! &&
+      gateRetryIndices[1]! < reviewTurnIdx("REVIEW_FILES_GATE") &&
+      reviewTurnIdx("REVIEW_FILES_GATE") < stepTurnIdx("GATE_STATUS_MARKER") &&
+      stepTurnIdx("GATE_STATUS_MARKER") < gateRetryIndices[2]! &&
+      gateRetryIndices[2]! < reviewTurnIdx("REVIEW_STATUS_GATE");
+    check(
+      "A4 command, files, and missing-STATUS gates bounce once (gateAttempt===1, round===1) and skip premature review",
+      doneGateWf.status === "completed" &&
+        cmdStep?.gateAttempt === 1 &&
+        cmdStep?.round === 1 &&
+        filesStep?.gateAttempt === 1 &&
+        filesStep?.round === 1 &&
+        statusStep?.gateAttempt === 1 &&
+        statusStep?.round === 1 &&
+        bounceBeforeReview,
+      `status=${doneGateWf.status}, cmd=(g:${cmdStep?.gateAttempt},r:${cmdStep?.round}), files=(g:${filesStep?.gateAttempt},r:${filesStep?.round}), status=(g:${statusStep?.gateAttempt},r:${statusStep?.round}), retries=${gateRetryIndices.join(",")}`,
+    );
+
+    // A4 exhaustion: OMIT_STATUS exceeds maxRetries and fails without ever invoking reviewer
+    const gOmitFail = (await post("/api/groups", { title: "a4-omit-fail", leadAgent: "mock-a", cwd: gateDir })).group;
+    const turnsBeforeOmit = readTurns().length;
+    res = await post("/api/workflows/save", {
+      groupId: gOmitFail.groupId,
+      steps: [
+        {
+          id: "omit-fail",
+          name: "Always Omit Status",
+          agent: "mock-a",
+          prompt: "OMIT_STATUS Never emit status.",
+          gate: { outputPattern: ".", maxRetries: 1 },
+          review: { agent: "mock-b", maxRounds: 2, criteria: "OMIT_SHOULD_NOT_REVIEW" },
+        },
+      ],
+    });
+    check("A4 maxRetries fail workflow saved", res.ok === true, res.error);
+    await post("/api/workflows/run", { groupId: gOmitFail.groupId });
+    const getOmitWf = async (): Promise<Json> => (await get(`/api/workflows?groupId=${encodeURIComponent(gOmitFail.groupId)}`)).workflow;
+    check("A4 OMIT_STATUS workflow settles", await until(async () => (await getOmitWf()).status !== "running", 30000));
+    const failedOmitWf = await getOmitWf();
+    const omitStep = failedOmitWf.steps.find((s: Json) => s.id === "omit-fail");
+    const omitTurns = readTurns().slice(turnsBeforeOmit).filter((t) => t.event === "prompt");
+    check(
+      "A4 OMIT_STATUS fails after exceeding maxRetries without calling reviewer",
+      failedOmitWf.status === "failed" &&
+        omitStep?.status === "failed" &&
+        omitStep?.gateAttempt === 2 &&
+        /Missing STATUS line/i.test(omitStep?.error ?? "") &&
+        !omitTurns.some((t) => String(t.preview ?? "").includes("OMIT_SHOULD_NOT_REVIEW")),
+      `status=${failedOmitWf.status}, gateAttempt=${omitStep?.gateAttempt}, err=${omitStep?.error}`,
+    );
+
+    // A3: step and review model/effort survive templates/save -> templates/apply and reach TaskRecord & agent
+    const gModelSrc = (await post("/api/groups", { title: "a3-src", leadAgent: "mock-a", cwd })).group;
+    res = await post("/api/workflows/save", {
+      groupId: gModelSrc.groupId,
+      steps: [
+        {
+          id: "styled-step",
+          name: "Styled Step",
+          agent: "mock-a",
+          model: "mock-smart",
+          effort: "high",
+          prompt: "A3_STEP_RUN Execute with configured model and effort.",
+          review: {
+            agent: "mock-b",
+            model: "mock-fast",
+            effort: "low",
+            maxRounds: 1,
+            criteria: "A3_REVIEW_RUN Verify model and effort.",
+          },
+        },
+      ],
+    });
+    check("A3 workflow saved", res.ok === true, res.error);
+    res = await post("/api/workflows/templates/save", { groupId: gModelSrc.groupId, name: "a3-model-effort" });
+    check("A3 template saved", res.ok === true, res.error);
+    const gModelDst = (await post("/api/groups", { title: "a3-dst", leadAgent: "mock-a", cwd })).group;
+    res = await post("/api/workflows/templates/apply", { groupId: gModelDst.groupId, name: "a3-model-effort" });
+    const appliedStep = res.workflow?.steps?.[0];
+    check(
+      "A3 template save/apply preserves step and review model/effort",
+      res.ok === true &&
+        appliedStep?.model === "mock-smart" &&
+        appliedStep?.effort === "high" &&
+        appliedStep?.review?.model === "mock-fast" &&
+        appliedStep?.review?.effort === "low",
+      JSON.stringify(appliedStep),
+    );
+    const turnsBeforeA3 = readTurns().length;
+    await post("/api/workflows/run", { groupId: gModelDst.groupId });
+    const getModelWf = async (): Promise<Json> => (await get(`/api/workflows?groupId=${encodeURIComponent(gModelDst.groupId)}`)).workflow;
+    check("A3 workflow completes", await until(async () => (await getModelWf()).status !== "running", 30000));
+    const doneModelWf = await getModelWf();
+    const styledStep = doneModelWf.steps.find((s: Json) => s.id === "styled-step");
+    const peerSnapshot = await get("/api/peer/status");
+    const groupTasks = (peerSnapshot.tasks as Json[] | undefined)?.filter((t) => t.groupId === gModelDst.groupId) ?? [];
+    const stepTask = groupTasks.find((t) => t.targetSessionKey === styledStep?.sessionKey);
+    const reviewTask = groupTasks.find((t) => t.targetSessionKey === styledStep?.reviewSessionKey);
+    const a3Turns = readTurns().slice(turnsBeforeA3).filter((t) => t.event === "prompt");
+    const a3StepTurn = a3Turns.find((t) => String(t.preview ?? "").includes("A3_STEP_RUN") && !String(t.preview ?? "").includes("acceptance reviewer"));
+    const a3ReviewTurn = a3Turns.find((t) => String(t.preview ?? "").includes("A3_REVIEW_RUN") && String(t.preview ?? "").includes("acceptance reviewer"));
+    check(
+      "A3 TaskRecord and mock agent turns record step & review model/effort",
+      doneModelWf.status === "completed" &&
+        stepTask?.model === "mock-smart" &&
+        stepTask?.effort === "high" &&
+        reviewTask?.model === "mock-fast" &&
+        reviewTask?.effort === "low" &&
+        a3StepTurn?.model === "mock-smart" &&
+        a3StepTurn?.effort === "high" &&
+        a3ReviewTurn?.model === "mock-fast" &&
+        a3ReviewTurn?.effort === "low",
+      `stepTask=(${stepTask?.model},${stepTask?.effort}), reviewTask=(${reviewTask?.model},${reviewTask?.effort}), turns=(${a3StepTurn?.model}/${a3StepTurn?.effort}, ${a3ReviewTurn?.model}/${a3ReviewTurn?.effort})`,
+    );
+    await post("/api/workflows/templates/delete", { name: "a3-model-effort" });
   } finally {
     await hub.stop();
   }

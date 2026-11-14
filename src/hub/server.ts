@@ -1,5 +1,6 @@
 import { getLocale, negotiateLocale, t, withLocale } from "./i18n.js";
 import { DEFAULT_LOCALE, matchLocale, messageSender, messageText, taskTitle, translate } from "../ui/locale.js";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
@@ -27,6 +28,7 @@ import {
   type TaskGroup,
   type TaskRecord,
   type WorkflowRecord,
+  type WorkflowStep,
   type TelemetrySnapshot,
   type TurnTelemetryRecord,
   type TurnUsage,
@@ -44,7 +46,8 @@ import { MemoryMonitor, type MemoryStatus } from "./memory.js";
 import { WorkflowTemplateStore } from "./workflow-templates.js";
 import { McpServerManager } from "./mcp-servers.js";
 import { checkPortAvailable, findAvailablePort, pickNativeDirectory } from "./port-finder.js";
-import { openTerminalWindow, PROJECT_ROOT, resolveAgentLoginCommand } from "./process-tree.js";
+import { killProcessTree, openTerminalWindow, PROJECT_ROOT, resolveAgentLoginCommand } from "./process-tree.js";
+import { clipHeadTail, compactToolCall, compactToolRawInput } from "./tool-clip.js";
 import { WorkflowManager } from "./workflow.js";
 import { TaskContextStore } from "./task-context.js";
 import { HubStateStore } from "./state-store.js";
@@ -338,6 +341,34 @@ const ContextReplaceSchema = z.object({
   updatedBy: z.string().optional(),
 });
 
+const OptionalCleanStringSchema = z
+  .string()
+  .nullish()
+  .transform((v) => v ?? undefined);
+
+const WorkflowGateFileSchema = z.union([
+  z.string(),
+  z.object({
+    path: z.string(),
+    nonEmpty: z.boolean().optional(),
+    mustContain: OptionalCleanStringSchema,
+  }),
+]);
+
+const WorkflowGateSchema = z.object({
+  command: OptionalCleanStringSchema,
+  timeoutSeconds: z
+    .number()
+    .nullish()
+    .transform((v) => v ?? undefined),
+  files: z.array(WorkflowGateFileSchema).max(50).optional(),
+  outputPattern: OptionalCleanStringSchema,
+  maxRetries: z
+    .number()
+    .nullish()
+    .transform((v) => v ?? undefined),
+});
+
 const WorkflowSaveSchema = z.object({
   groupId: z.string().optional(),
   proposedBy: z.string().optional(),
@@ -351,12 +382,21 @@ const WorkflowSaveSchema = z.object({
         id: z.string().optional(),
         name: z.string().optional(),
         agent: z.string().min(1),
+        model: OptionalCleanStringSchema,
+        effort: OptionalCleanStringSchema,
         prompt: z.string().optional().default(""),
         dependsOn: z.array(z.string()).optional(),
         isolateWorktree: z.boolean().optional(),
         contextRefs: z.array(z.string()).optional(),
+        gate: WorkflowGateSchema.nullish(),
         review: z
-          .object({ agent: z.string().optional(), criteria: z.string().optional(), maxRounds: z.number().optional() })
+          .object({
+            agent: z.string().optional(),
+            model: OptionalCleanStringSchema,
+            effort: OptionalCleanStringSchema,
+            criteria: z.string().optional(),
+            maxRounds: z.number().optional(),
+          })
           .nullish(),
       }),
     )
@@ -891,7 +931,18 @@ export class AgentHubServer {
   /** Lead turns started by the hub in a row, per task, since the user last wrote. */
   private readonly autoLeadTurns = new Map<string, number>();
   private readonly workflows = new WorkflowManager({
-    dispatch: ({ groupId, agent, prompt, session, isolateWorktree, contextRefs, upstreamStepIds }) => {
+    dispatch: ({
+      groupId,
+      agent,
+      prompt,
+      session,
+      cwd,
+      model,
+      effort,
+      isolateWorktree,
+      contextRefs,
+      upstreamStepIds,
+    }) => {
       const group = this.groups.get(groupId);
       const lead = group?.leadAgent ?? this.getDefaultLead();
       const task = this.dispatchPeerTask(
@@ -900,6 +951,9 @@ export class AgentHubServer {
           prompt,
           groupId,
           session,
+          cwd,
+          model,
+          effort,
           isolateWorktree,
           callerAgent: lead,
           callerSession: buildSessionKey(lead, `${groupId}__lead`),
@@ -910,6 +964,8 @@ export class AgentHubServer {
       this.workflowTaskIds.add(task.taskId);
       return task;
     },
+    inspectWorkspace: (groupId, worktreePath) => this.inspectWorkflowStepWorkspace(groupId, worktreePath),
+    runGate: (groupId, step, task, signal) => this.runWorkflowStepGate(groupId, step, task, signal),
     onSettled: (workflow) => this.reportWorkflowToLead(workflow),
     // Short on memory: finish what is running before starting anything else.
     maxParallel: () =>
@@ -1039,11 +1095,30 @@ export class AgentHubServer {
           event.groupId = active.groupId;
         }
       } else if (event.type === "tool_event") {
+        const compactedEvent = compactToolCall({
+          toolCallId: event.toolCallId,
+          title: event.title,
+          kind: event.kind,
+          status: event.status,
+          rawInput: event.rawInput,
+          locations: event.locations,
+          outputText: event.outputText,
+          outputTruncated: event.outputTruncated,
+          diffs: event.diffs,
+          timestamp: event.timestamp,
+        });
+        event.rawInput = compactedEvent.rawInput;
+        event.locations = compactedEvent.locations;
+        event.outputText = compactedEvent.outputText;
+        event.outputTruncated = compactedEvent.outputTruncated;
+        event.diffs = compactedEvent.diffs;
+
         const active = this.activeAssistantBySession.get(event.sessionKey);
         if (active) {
           if (!active.parts) active.parts = [];
-          const existingTool = active.toolCalls.find((t) => t.toolCallId === event.toolCallId);
-          if (existingTool) {
+          const existingIdx = active.toolCalls.findIndex((t) => t.toolCallId === event.toolCallId);
+          if (existingIdx >= 0) {
+            const existingTool = active.toolCalls[existingIdx]!;
             existingTool.title = event.title || existingTool.title;
             if (event.kind) existingTool.kind = event.kind;
             if (event.status) existingTool.status = event.status;
@@ -1056,21 +1131,24 @@ export class AgentHubServer {
               existingTool.completedAt = event.timestamp;
             }
             existingTool.timestamp = event.timestamp;
+            active.toolCalls[existingIdx] = compactToolCall(existingTool);
           } else {
-            active.toolCalls.push({
-              toolCallId: event.toolCallId,
-              title: event.title,
-              kind: event.kind,
-              status: event.status,
-              rawInput: event.rawInput,
-              locations: event.locations,
-              outputText: event.outputText,
-              outputTruncated: event.outputTruncated,
-              diffs: event.diffs,
-              timestamp: event.timestamp,
-              completedAt:
-                event.status === "completed" || event.status === "failed" ? event.timestamp : undefined,
-            });
+            active.toolCalls.push(
+              compactToolCall({
+                toolCallId: event.toolCallId,
+                title: event.title,
+                kind: event.kind,
+                status: event.status,
+                rawInput: event.rawInput,
+                locations: event.locations,
+                outputText: event.outputText,
+                outputTruncated: event.outputTruncated,
+                diffs: event.diffs,
+                timestamp: event.timestamp,
+                completedAt:
+                  event.status === "completed" || event.status === "failed" ? event.timestamp : undefined,
+              }),
+            );
             active.parts.push({ type: "tool", toolCallId: event.toolCallId });
           }
           event.messageId = active.messageId;
@@ -1080,6 +1158,9 @@ export class AgentHubServer {
       }
       let permissionBoardGroupId: string | undefined;
       if (event.type === "permission_requested") {
+        if (event.permission.rawInput !== undefined) {
+          event.permission.rawInput = compactToolRawInput(event.permission.rawInput);
+        }
         const gId = this.findGroupIdForSessionKey(event.permission.sessionKey);
         if (gId) {
           this.permissionGroupByRequestId.set(event.permission.requestId, gId);
@@ -1804,6 +1885,7 @@ export class AgentHubServer {
         cards.push({
           groupId: group.groupId,
           title: group.title,
+          defaultTitleNumber: group.defaultTitleNumber,
           leadAgent: group.leadAgent,
           cwd: group.cwd,
           board: { ...group.board },
@@ -2861,11 +2943,16 @@ export class AgentHubServer {
       : [...this.groups.keys()][0]!;
     this.groupCounter = Math.max(state.groupCounter || 1, this.groups.size);
 
+    let compactedPersistedTools = false;
     for (const msg of state.messages ?? []) {
       if (!this.groups.has(msg.groupId)) continue;
       if (msg.status === "streaming") {
         msg.status = "cancelled";
         msg.completedAt = msg.completedAt ?? Date.now();
+      }
+      if (Array.isArray(msg.toolCalls) && msg.toolCalls.length > 0) {
+        msg.toolCalls = msg.toolCalls.map((tc) => compactToolCall(tc));
+        compactedPersistedTools = true;
       }
       this.messages.set(msg.messageId, msg);
     }
@@ -2902,6 +2989,9 @@ export class AgentHubServer {
         this.telemetryByAgent[agent] = { ...createEmptyTotals(), ...totals };
       }
       this.recentTurns = (state.telemetry.recentTurns ?? []).slice(-200);
+    }
+    if (compactedPersistedTools) {
+      this.stateStore?.schedule();
     }
   }
 
@@ -3239,6 +3329,7 @@ export class AgentHubServer {
       permissionMode: this.pool.getPermissionMode(),
       baseCwd: this.baseCwd,
       taskGroups: this.listGroups(),
+      boardCards: this.listBoardCards(),
       sessions: this.listVisibleSessions(),
       tasks: [...this.tasks.values()],
       pendingPermissions: this.pool.getPendingPermissions(),
@@ -3481,6 +3572,280 @@ export class AgentHubServer {
       summary: t(task.status === "failed" ? "noticeSubSessionFailed" : "noticeSubSessionFinished", name),
       detail: `Sub-session "${name}" ${task.status === "failed" ? "FAILED" : "finished"} the task you dispatched (task id ${task.taskId}).\n${body}`,
     });
+  }
+
+  private inspectWorkflowStepWorkspace(groupId: string, worktreePath?: string): string | undefined {
+    if (!worktreePath) {
+      return undefined;
+    }
+    const baseCwd = this.groups.get(groupId)?.cwd ?? this.baseCwd;
+    try {
+      const info = inspectWorktreeChanges(baseCwd, worktreePath);
+      const parts: string[] = [`Branch: ${info.branch} (worktree: ${worktreePath})`];
+      parts.push(
+        info.statusLines.length > 0 ? `Status:\n${info.statusLines.join("\n")}` : "Status: clean",
+      );
+      if (info.diffStat) {
+        parts.push(`Diff stat:\n${info.diffStat}`);
+      }
+      if (info.diff) {
+        parts.push(`Diff:\n${clipHeadTail(info.diff, 3000).value}`);
+      }
+      return parts.join("\n\n");
+    } catch {
+      return summarizeWorkspaceChanges(worktreePath);
+    }
+  }
+
+  private async runWorkflowStepGate(
+    groupId: string,
+    step: WorkflowStep,
+    task: TaskRecord,
+    signal: AbortSignal,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const gate = step.gate;
+    if (!gate) {
+      return { ok: true };
+    }
+    if (signal.aborted) {
+      return { ok: false, reason: "Gate check cancelled" };
+    }
+
+    if (gate.outputPattern) {
+      let re: RegExp;
+      try {
+        re = new RegExp(gate.outputPattern);
+      } catch (err) {
+        return {
+          ok: false,
+          reason: `Invalid gate outputPattern "${gate.outputPattern}": ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+      if (!re.test(task.outputText ?? "")) {
+        return {
+          ok: false,
+          reason: `Reply did not match required outputPattern: /${gate.outputPattern}/`,
+        };
+      }
+    }
+
+    const group = this.groups.get(groupId);
+    const baseCwd = group?.cwd ?? this.baseCwd;
+    const worktreeCwd = task.worktreePath ?? step.worktreePath;
+    const targetCwd = path.resolve(worktreeCwd || baseCwd);
+    const allowedRoots = worktreeCwd
+      ? [targetCwd]
+      : [targetCwd, ...(group?.extraDirs ?? []).map((d) => path.resolve(d))];
+
+    const isInsideDir = (dir: string, candidate: string): boolean => {
+      const rel = path.relative(path.resolve(dir), path.resolve(candidate));
+      return (
+        rel !== "" &&
+        rel !== "." &&
+        rel !== ".." &&
+        !rel.startsWith(`..${path.sep}`) &&
+        !rel.startsWith("../") &&
+        !path.isAbsolute(rel)
+      );
+    };
+
+    for (const f of gate.files ?? []) {
+      const rawRel = f.path.trim();
+      if (!rawRel || path.isAbsolute(rawRel) || /^[a-zA-Z]:/.test(rawRel)) {
+        return { ok: false, reason: `Gate file path must be relative to the workspace: ${f.path}` };
+      }
+
+      let matchedFile: string | undefined;
+      let escapedWorkspace = false;
+      const primaryResolved = path.resolve(targetCwd, rawRel);
+      if (allowedRoots.some((root) => isInsideDir(root, primaryResolved))) {
+        try {
+          if (fs.statSync(primaryResolved).isFile()) {
+            matchedFile = primaryResolved;
+          }
+        } catch {
+          // Not present at primaryResolved
+        }
+      } else {
+        escapedWorkspace = true;
+      }
+
+      if (!matchedFile && !worktreeCwd) {
+        for (const extra of group?.extraDirs ?? []) {
+          const candidate = path.resolve(extra, rawRel);
+          if (isInsideDir(extra, candidate)) {
+            escapedWorkspace = false;
+            try {
+              if (fs.statSync(candidate).isFile()) {
+                matchedFile = candidate;
+                break;
+              }
+            } catch {
+              // Not present in this extraDir
+            }
+          }
+        }
+      }
+
+      if (escapedWorkspace && !matchedFile) {
+        return { ok: false, reason: `Gate file path escapes workspace: ${rawRel}` };
+      }
+      if (!matchedFile) {
+        return { ok: false, reason: `Required file missing: ${rawRel}` };
+      }
+
+      if (f.nonEmpty) {
+        try {
+          const stat = fs.statSync(matchedFile);
+          if (stat.size === 0) {
+            return { ok: false, reason: `Required file is empty: ${rawRel}` };
+          }
+          if (stat.size <= 256) {
+            const buf = fs.readFileSync(matchedFile);
+            if (!buf.includes(0) && buf.toString("utf8").trim().length === 0) {
+              return { ok: false, reason: `Required file is empty: ${rawRel}` };
+            }
+          }
+        } catch (err) {
+          return {
+            ok: false,
+            reason: `Could not read required file "${rawRel}": ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
+      }
+
+      if (f.mustContain !== undefined && f.mustContain !== "") {
+        try {
+          const content = fs.readFileSync(matchedFile, "utf8");
+          if (!content.includes(f.mustContain)) {
+            return {
+              ok: false,
+              reason: `Required file "${rawRel}" does not contain expected text: ${clipHeadTail(f.mustContain, 200).value}`,
+            };
+          }
+        } catch (err) {
+          return {
+            ok: false,
+            reason: `Could not read required file "${rawRel}": ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
+      }
+    }
+
+    if (gate.command) {
+      if (signal.aborted) {
+        return { ok: false, reason: "Gate check cancelled" };
+      }
+      const cmd = gate.command;
+      const timeoutSeconds = Math.max(5, Math.min(600, gate.timeoutSeconds || 120));
+      const timeoutMs = timeoutSeconds * 1000;
+      const cmdRes = await new Promise<{ ok: boolean; reason?: string }>((resolve) => {
+        let settled = false;
+        let timedOut = false;
+        let aborted = false;
+        let headBuf = "";
+        let tailBuf = "";
+        let totalChars = 0;
+        const HEAD_CAP = 32_000;
+        const TAIL_CAP = 32_000;
+
+        const appendChunk = (chunk: Buffer | string) => {
+          const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+          totalChars += text.length;
+          if (headBuf.length < HEAD_CAP) {
+            const take = HEAD_CAP - headBuf.length;
+            headBuf += text.slice(0, take);
+            const rest = text.slice(take);
+            if (rest) tailBuf = (tailBuf + rest).slice(-TAIL_CAP);
+          } else {
+            tailBuf = (tailBuf + text).slice(-TAIL_CAP);
+          }
+        };
+
+        const getCaptured = () =>
+          totalChars <= headBuf.length + tailBuf.length
+            ? (headBuf + tailBuf).trim()
+            : `${headBuf}\n... [${totalChars - headBuf.length - tailBuf.length} chars omitted] ...\n${tailBuf}`.trim();
+
+        let child: ReturnType<typeof spawn>;
+        try {
+          child = spawn(cmd, {
+            cwd: targetCwd,
+            shell: true,
+            windowsHide: true,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+        } catch (err) {
+          resolve({
+            ok: false,
+            reason: `Gate command failed to start (${cmd}): ${err instanceof Error ? err.message : String(err)}`,
+          });
+          return;
+        }
+
+        const finish = (result: { ok: boolean; reason?: string }) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          signal.removeEventListener("abort", onAbort);
+          resolve(result);
+        };
+
+        const onAbort = () => {
+          aborted = true;
+          killProcessTree(child.pid);
+          finish({ ok: false, reason: "Gate check cancelled" });
+        };
+
+        const timer = setTimeout(() => {
+          timedOut = true;
+          killProcessTree(child.pid);
+          const out = getCaptured();
+          const clipped = out ? `\n${clipHeadTail(out, 2400).value}` : "";
+          finish({
+            ok: false,
+            reason: `Gate command timed out after ${timeoutSeconds}s: ${cmd}${clipped}`,
+          });
+        }, timeoutMs);
+        timer.unref?.();
+
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener("abort", onAbort, { once: true });
+
+        child.stdout?.on("data", appendChunk);
+        child.stderr?.on("data", appendChunk);
+
+        child.on("error", (err) => {
+          finish({
+            ok: false,
+            reason: `Gate command error (${cmd}): ${err.message}`,
+          });
+        });
+
+        child.on("close", (code, sig) => {
+          if (aborted || timedOut) return;
+          if (code === 0) {
+            finish({ ok: true });
+            return;
+          }
+          const out = getCaptured();
+          const clipped = out ? `\n${clipHeadTail(out, 2400).value}` : "";
+          finish({
+            ok: false,
+            reason: `Gate command failed (exit ${code ?? sig ?? "unknown"}): ${cmd}${clipped}`,
+          });
+        });
+      });
+
+      if (!cmdRes.ok) {
+        return cmdRes;
+      }
+    }
+
+    return { ok: true };
   }
 
   /** A workflow run ended: the lead sums up, or decides what to do about a failure. */
@@ -4392,6 +4757,8 @@ export class AgentHubServer {
     const contextPrefix =
       this.buildSubSessionRecap(target.targetSessionKey) + this.taskContext.buildPrefix(target.groupId, want);
     const group = this.groups.get(target.groupId)!;
+    const cleanModel = body.model?.trim() || undefined;
+    const cleanEffort = body.effort?.trim() || undefined;
     const taskId = `task-${randomUUID().slice(0, 8)}`;
     const now = Date.now();
     const task: TaskRecord = {
@@ -4402,6 +4769,8 @@ export class AgentHubServer {
       targetAgent: body.targetAgent,
       targetSessionKey: target.targetSessionKey,
       prompt: body.prompt,
+      ...(cleanModel ? { model: cleanModel } : {}),
+      ...(cleanEffort ? { effort: cleanEffort } : {}),
       status: "running",
       isolateWorktree: body.isolateWorktree,
       outputText: "",
@@ -4444,25 +4813,38 @@ export class AgentHubServer {
     this.activeAssistantBySession.set(target.targetSessionKey, assistantMsg);
     this.upsertMessage(assistantMsg);
 
-    void this.pool
-      .runTurn({
-        agent: body.targetAgent,
-        sessionName: target.targetSessionName,
-        baseCwd: body.cwd ?? group.cwd,
-        prompt: `${contextPrefix}${body.prompt}`,
-        rawUserPrompt: body.prompt,
-        handoffTokens: contextPrefix ? estimateTokens(contextPrefix) : 0,
-        injectSharedResources: true,
-        isolateWorktree: body.isolateWorktree,
-        callDepth: body.depth + 1,
-        injectPeerMcp: body.depth + 1 < MAX_PEER_DEPTH,
-        groupId: target.groupId,
-        role: "sub",
-        label: target.rawLabel,
-        parentSessionKey: target.parentSessionKey,
-        model: body.model,
-        effort: body.effort,
-      })
+    const desiredBaseCwd = path.resolve(body.cwd ?? group.cwd);
+    const liveTarget = this.pool.getSession(target.targetSessionKey);
+    const cwdMismatch = Boolean(
+      liveTarget &&
+        liveTarget.status !== "closed" &&
+        liveTarget.status !== "error" &&
+        (Boolean(liveTarget.isWorktree) !== Boolean(body.isolateWorktree) ||
+          path.resolve(liveTarget.baseCwd).toLowerCase() !== desiredBaseCwd.toLowerCase()),
+    );
+    const turnOptions = {
+      agent: body.targetAgent,
+      sessionName: target.targetSessionName,
+      baseCwd: desiredBaseCwd,
+      prompt: `${contextPrefix}${body.prompt}`,
+      rawUserPrompt: body.prompt,
+      handoffTokens: contextPrefix ? estimateTokens(contextPrefix) : 0,
+      injectSharedResources: true,
+      isolateWorktree: body.isolateWorktree,
+      callDepth: body.depth + 1,
+      injectPeerMcp: body.depth + 1 < MAX_PEER_DEPTH,
+      groupId: target.groupId,
+      role: "sub" as const,
+      label: target.rawLabel,
+      parentSessionKey: target.parentSessionKey,
+      model: cleanModel,
+      effort: cleanEffort,
+    };
+    const turnPromise = cwdMismatch
+      ? this.pool.closeSession(target.targetSessionKey).then(() => this.pool.runTurn(turnOptions))
+      : this.pool.runTurn(turnOptions);
+
+    void turnPromise
       .then((res) => {
         task.outputText = res.outputText;
         task.worktreePath = res.isWorktree ? res.effectiveCwd : undefined;
@@ -5735,6 +6117,7 @@ export class AgentHubServer {
     this.permissionGroupByRequestId.clear();
     // Save before the sessions are torn down, so they are recorded as they were.
     this.stateStore?.flush();
+    this.workflows.abortActiveGates();
     await this.pool.disposeAll();
     for (const ws of this.wsClients) {
       ws.close();

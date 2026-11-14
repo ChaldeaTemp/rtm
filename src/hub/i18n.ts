@@ -7,6 +7,10 @@ const processLocale = matchLocale(process.env.RTM_LANG) ?? DEFAULT_LOCALE;
 export const HUB_MESSAGES: Record<string, readonly [string, string]> = {
   boardNudgeSummary: ["任务还没报告交付，已提醒主导", "Task not reported yet; the lead was reminded"],
   boardResumeSummary: ["已让主导继续这个任务", "The lead was asked to continue this task"],
+  invalidGateOutputPattern: [
+    "步骤「{1}」的门禁正则无效：{2}",
+    "Invalid gate regex pattern for step \"{1}\": {2}",
+  ],
 };
 
 export function negotiateLocale(header?: string): string {

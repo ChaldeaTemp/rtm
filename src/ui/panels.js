@@ -720,6 +720,10 @@ function buildWorkflowTemplateSteps(templateKey, agents, leadAgent) {
         dependsOn: [],
         isolateWorktree: false,
         contextRefs: [],
+        model: "",
+        effort: "",
+        review: null,
+        gate: null,
       },
       {
         id: "step2",
@@ -729,6 +733,10 @@ function buildWorkflowTemplateSteps(templateKey, agents, leadAgent) {
         dependsOn: ["step1"],
         isolateWorktree: false,
         contextRefs: [],
+        model: "",
+        effort: "",
+        review: null,
+        gate: null,
       },
     ];
   }
@@ -742,6 +750,10 @@ function buildWorkflowTemplateSteps(templateKey, agents, leadAgent) {
         dependsOn: [],
         isolateWorktree: false,
         contextRefs: [],
+        model: "",
+        effort: "",
+        review: null,
+        gate: null,
       },
       {
         id: "step2",
@@ -751,6 +763,10 @@ function buildWorkflowTemplateSteps(templateKey, agents, leadAgent) {
         dependsOn: [],
         isolateWorktree: false,
         contextRefs: [],
+        model: "",
+        effort: "",
+        review: null,
+        gate: null,
       },
       {
         id: "step3",
@@ -760,6 +776,10 @@ function buildWorkflowTemplateSteps(templateKey, agents, leadAgent) {
         dependsOn: ["step1", "step2"],
         isolateWorktree: false,
         contextRefs: [],
+        model: "",
+        effort: "",
+        review: null,
+        gate: null,
       },
     ];
   }
@@ -772,6 +792,10 @@ function buildWorkflowTemplateSteps(templateKey, agents, leadAgent) {
       dependsOn: [],
       isolateWorktree: true,
       contextRefs: [],
+      model: "",
+      effort: "",
+      review: null,
+      gate: null,
     },
     {
       id: "step2",
@@ -781,6 +805,10 @@ function buildWorkflowTemplateSteps(templateKey, agents, leadAgent) {
       dependsOn: ["step1"],
       isolateWorktree: false,
       contextRefs: [],
+      model: "",
+      effort: "",
+      review: null,
+      gate: null,
     },
   ];
 }
@@ -797,9 +825,12 @@ function workflowErrorText(step) {
 }
 
 function wfStepStatusText(live, status) {
-  if (status === "running" && live?.review) {
-    if (live.phase === "review") return t("inReviewRound", live.round || 1);
-    if ((live.round || 1) > 1) return t("reworkingRound", live.round);
+  if (status === "running") {
+    if (live?.phase === "gate") return t("wfInGate");
+    if (live?.review) {
+      if (live.phase === "review") return t("inReviewRound", live.round || 1);
+      if ((live.round || 1) > 1) return t("reworkingRound", live.round);
+    }
   }
   return t(WF_STEP_STATUS_TEXT[status] || status);
 }
@@ -829,10 +860,31 @@ function wfDraft(groupId) {
         name: s.name,
         agent: s.agent,
         prompt: s.prompt,
-        dependsOn: [...s.dependsOn],
+        dependsOn: [...(s.dependsOn || [])],
         isolateWorktree: Boolean(s.isolateWorktree),
         contextRefs: [...(s.contextRefs || [])],
-        review: s.review ? { ...s.review } : null,
+        model: s.model || "",
+        effort: s.effort || "",
+        review: s.review
+          ? {
+              agent: s.review.agent,
+              maxRounds: s.review.maxRounds || 2,
+              criteria: s.review.criteria || "",
+              model: s.review.model || "",
+              effort: s.review.effort || "",
+            }
+          : null,
+        gate: s.gate
+          ? {
+              command: s.gate.command || "",
+              timeoutSeconds: s.gate.timeoutSeconds,
+              files: Array.isArray(s.gate.files)
+                ? s.gate.files.map((f) => (typeof f === "string" ? { path: f } : { ...f }))
+                : [],
+              outputPattern: s.gate.outputPattern || "",
+              maxRetries: s.gate.maxRetries !== undefined ? s.gate.maxRetries : 2,
+            }
+          : null,
       })),
       baseUpdatedAt: server.updatedAt,
       dirty: false,
@@ -931,7 +983,56 @@ async function wfSave(groupId) {
   // 步骤引用的分区要先存在，所以先存上下文再存步骤
   await wfSaveContext(groupId);
   const draft = wfDraft(groupId);
-  const workflow = await wfPost("/api/workflows/save", { groupId, steps: draft.steps });
+  const payloadSteps = draft.steps.map((s) => {
+    const item = {
+      id: s.id,
+      name: s.name,
+      agent: s.agent,
+      prompt: s.prompt,
+      dependsOn: [...(s.dependsOn || [])],
+      isolateWorktree: Boolean(s.isolateWorktree),
+      contextRefs: [...(s.contextRefs || [])],
+    };
+    if (s.model && s.model.trim()) item.model = s.model.trim();
+    if (s.effort && s.effort.trim()) item.effort = s.effort.trim();
+    if (s.review && s.review.agent) {
+      item.review = {
+        agent: s.review.agent,
+        maxRounds: Number(s.review.maxRounds) || 2,
+        criteria: s.review.criteria?.trim() || "",
+      };
+      if (s.review.model && s.review.model.trim()) item.review.model = s.review.model.trim();
+      if (s.review.effort && s.review.effort.trim()) item.review.effort = s.review.effort.trim();
+    } else {
+      item.review = null;
+    }
+    if (s.gate) {
+      const command = s.gate.command?.trim() || undefined;
+      const outputPattern = s.gate.outputPattern?.trim() || undefined;
+      const files = Array.isArray(s.gate.files)
+        ? s.gate.files
+            .map((f) => (typeof f === "string" ? { path: f.trim() } : { ...f, path: f.path?.trim() }))
+            .filter((f) => Boolean(f.path))
+        : [];
+      const maxRetries = s.gate.maxRetries !== undefined ? Number(s.gate.maxRetries) : 2;
+      const timeoutSeconds = s.gate.timeoutSeconds !== undefined ? Number(s.gate.timeoutSeconds) : 120;
+      if (command || files.length > 0 || outputPattern) {
+        item.gate = {
+          command,
+          outputPattern,
+          files: files.length > 0 ? files : undefined,
+          maxRetries,
+          timeoutSeconds,
+        };
+      } else {
+        item.gate = null;
+      }
+    } else {
+      item.gate = null;
+    }
+    return item;
+  });
+  const workflow = await wfPost("/api/workflows/save", { groupId, steps: payloadSteps });
   draft.dirty = false;
   draft.baseUpdatedAt = -1; // 下次渲染时按服务端返回的结果重建
   return workflow;
@@ -1278,6 +1379,62 @@ function wfBuildEdges(steps, layout, statusMap) {
   });
 }
 
+function wfGetAgentModelCatalog(agentId) {
+  if (!agentId) return null;
+  if (typeof app?.getAgentModelCatalog === "function") {
+    const cat = app.getAgentModelCatalog(agentId);
+    if (cat) return cat;
+  }
+  const stateCatalogs = app?.getState?.()?.modelCatalogs || app?.STATE?.modelCatalogs;
+  if (stateCatalogs?.get) {
+    const cat = stateCatalogs.get(agentId);
+    if (cat) return cat;
+  }
+  const meta = (app?.STATE?.agents || []).find((a) => a.agent === agentId);
+  if (meta?.modelCatalog) return meta.modelCatalog;
+  return null;
+}
+
+const WF_EFFORT_OPTIONS = ["low", "medium", "high", "xhigh", "max"];
+
+function wfRenderEffortOptionsHtml(selectedVal) {
+  const esc = app.escapeHtml;
+  let html = `<option value="">${th("wfEffortDefault")}</option>`;
+  const seen = new Set();
+  for (const opt of WF_EFFORT_OPTIONS) {
+    seen.add(opt);
+    html += `<option value="${opt}" ${selectedVal === opt ? "selected" : ""}>${opt}</option>`;
+  }
+  if (selectedVal && !seen.has(selectedVal)) {
+    html += `<option value="${esc(selectedVal)}" selected>${esc(selectedVal)}</option>`;
+  }
+  return html;
+}
+
+function wfRenderModelOptionsHtml(agentId, selectedVal) {
+  const esc = app.escapeHtml;
+  let html = `<option value="">${th("wfModelDefault")}</option>`;
+  const catalog = wfGetAgentModelCatalog(agentId);
+  const models = Array.isArray(catalog?.models) ? catalog.models : [];
+  const seen = new Set();
+  for (const m of models) {
+    if (!m?.id || seen.has(m.id)) continue;
+    seen.add(m.id);
+    const label = m.name && m.name !== m.id ? `${m.name} (${m.id})` : m.id;
+    html += `<option value="${esc(m.id)}" ${selectedVal === m.id ? "selected" : ""}>${esc(label)}</option>`;
+  }
+  if (selectedVal && !seen.has(selectedVal)) {
+    html += `<option value="${esc(selectedVal)}" selected>${esc(selectedVal)}</option>`;
+  }
+  return html;
+}
+
+function wfPopulateModelSelect(selectEl, agentId, currentVal) {
+  if (!selectEl) return;
+  selectEl.innerHTML = wfRenderModelOptionsHtml(agentId, currentVal);
+  selectEl.value = currentVal || "";
+}
+
 function wfClosePopover() {
   WF_STATE.selectedId = null;
   document.getElementById("wfPopover")?.remove();
@@ -1309,6 +1466,29 @@ function wfOpenPopover(ctx, stepId) {
   const readonly = running;
   const others = steps.filter((s) => s.id !== stepId);
 
+  void app?.ensureAgentModelsLoaded?.(step.agent, false)?.then?.(() => {
+    const p = document.getElementById("wfPopover");
+    if (p && WF_STATE.selectedId === stepId) {
+      const sel = p.querySelector('select[data-wf-field="model"]');
+      if (sel) {
+        const cur = draft.steps[index]?.model || step.model || "";
+        wfPopulateModelSelect(sel, step.agent, cur);
+      }
+    }
+  });
+  if (step.review?.agent) {
+    void app?.ensureAgentModelsLoaded?.(step.review.agent, false)?.then?.(() => {
+      const p = document.getElementById("wfPopover");
+      if (p && WF_STATE.selectedId === stepId) {
+        const sel = p.querySelector('select[data-wf-review="model"]');
+        if (sel) {
+          const cur = draft.steps[index]?.review?.model || step.review.model || "";
+          wfPopulateModelSelect(sel, step.review.agent, cur);
+        }
+      }
+    });
+  }
+
   const pop = document.createElement("div");
   pop.id = "wfPopover";
   pop.className = "wf-popover";
@@ -1332,8 +1512,32 @@ function wfOpenPopover(ctx, stepId) {
               .map((a) => `<option value="${esc(a.agent)}" ${a.agent === step.agent ? "selected" : ""}>${esc(a.label || a.agent)}</option>`)
               .join("")}</select>`
       }
+      ${
+        readonly && (step.model || step.effort)
+          ? `<span class="wf-deps" style="margin-left:4px">${
+              step.model ? `<span class="wf-mini-tag is-model" title="${esc(step.model)}">${esc(step.model)}</span>` : ""
+            }${
+              step.effort ? `<span class="wf-mini-tag is-effort" title="${esc(step.effort)}">${esc(step.effort)}</span>` : ""
+            }</span>`
+          : ""
+      }
       ${running || showResults ? `<span class="wf-step-status">${esc(t(WF_STEP_STATUS_TEXT[status] || status))}</span>` : ""}
     </div>
+    ${
+      readonly
+        ? ""
+        : `<div class="wf-pop-block">
+            <label>${th("wfStepModel")}</label>
+            <div class="wf-pop-head">
+              <select class="perm-select" data-wf-field="model">
+                ${wfRenderModelOptionsHtml(step.agent, step.model)}
+              </select>
+              <select class="perm-select" data-wf-field="effort">
+                ${wfRenderEffortOptionsHtml(step.effort)}
+              </select>
+            </div>
+          </div>`
+    }
     ${
       others.length > 0
         ? `<div class="wf-pop-block">
@@ -1385,13 +1589,63 @@ function wfOpenPopover(ctx, stepId) {
         ? ""
         : `<label class="wf-check"><input type="checkbox" data-wf-field="isolateWorktree" ${step.isolateWorktree ? "checked" : ""} />${th("makeChangesInAnIsolatedGitWorktree")}</label>`
     }
+    ${
+      readonly
+        ? ""
+        : `<div class="wf-pop-block">
+            <label>${th("wfNodeGate")}</label>
+            <input class="text-input" data-wf-gate="command" value="${esc(step.gate?.command || "")}" placeholder="${th("wfGateCommandPlaceholder")}" />
+            <textarea class="rule-editor-textarea" data-wf-gate="files" rows="2" placeholder="${th("wfGateFilesPlaceholder")}">${esc((step.gate?.files || []).map((f) => (typeof f === "string" ? f : f.path)).filter(Boolean).join("\n"))}</textarea>
+            <div class="wf-pop-head">
+              <input class="text-input" data-wf-gate="outputPattern" value="${esc(step.gate?.outputPattern || "")}" placeholder="${th("wfGatePatternPlaceholder")}" style="flex:1" />
+              <select class="perm-select" data-wf-gate="maxRetries" title="${th("wfGateRetries", step.gate?.maxRetries ?? 2)}">
+                ${[1, 2, 3, 4, 5]
+                  .map((n) => `<option value="${n}" ${(step.gate?.maxRetries ?? 2) === n ? "selected" : ""}>${th("wfGateRetries", n)}</option>`)
+                  .join("")}
+              </select>
+            </div>
+          </div>`
+    }
+    ${(() => {
+      if (!readonly && !running && !showResults) return "";
+      const gate = live?.gate || step.gate;
+      const hasGateConfig = Boolean(
+        gate &&
+          (gate.command ||
+            (Array.isArray(gate.files) && gate.files.length > 0) ||
+            gate.outputPattern),
+      );
+      if (!hasGateConfig && !live?.gateNotes && live?.phase !== "gate") return "";
+
+      const pills = [];
+      if (gate?.command) pills.push(`<span class="wf-mini-tag is-gate-cmd" title="command">${esc(gate.command)}</span>`);
+      if (gate?.files && gate.files.length > 0) {
+        const filePaths = gate.files.map((f) => (typeof f === "string" ? f : f.path)).filter(Boolean).join(", ");
+        if (filePaths) pills.push(`<span class="wf-mini-tag is-gate-files" title="files">${esc(filePaths)}</span>`);
+      }
+      if (gate?.outputPattern) pills.push(`<span class="wf-mini-tag is-gate-pattern" title="pattern">/${esc(gate.outputPattern)}/</span>`);
+      if (gate?.maxRetries !== undefined) pills.push(`<span class="wf-mini-tag is-gate-retries">${th("wfGateRetries", gate.maxRetries)}</span>`);
+      if (live?.phase === "gate") pills.push(`<span class="wf-node-status-pill is-gate">${th("wfInGate")}</span>`);
+      if (live?.gateAttempt) {
+        const attemptText = t("round", live.gateAttempt, "").replace(/^[\s·]+/, "").trim();
+        pills.push(`<span class="wf-mini-tag is-gate-attempt">${esc(attemptText)}</span>`);
+      }
+
+      return `<div class="wf-pop-block">
+        <label>${th("wfNodeGate")}</label>
+        ${pills.length > 0 ? `<div class="wf-deps">${pills.join("")}</div>` : ""}
+        ${live?.gateNotes ? `<details class="wf-review-notes wf-gate-notes"><summary>${th("wfGateFeedback")}</summary><pre>${esc(live.gateNotes)}</pre></details>` : ""}
+      </div>`;
+    })()}
     ${(() => {
       // 验收关卡：做完后交给另一个 Agent 验收，不通过自动打回重做
       const review = readonly ? live?.review || step.review : step.review;
       if (readonly) {
         if (!review) return "";
         const round = live?.round ? t("round", live.round, live.phase === "review" ? t("inReview") : live.phase === "work" && live.round > 1 ? t("reworking") : "") : "";
-        return `<div class="wf-pop-block"><label>${th("review")}</label><div class="wf-deps"><span class="origin-tag">${th("reviewerUpToRounds", review.agent, review.maxRounds, round)}</span></div>${
+        const modelTag = review.model ? `<span class="wf-mini-tag is-model" title="${esc(review.model)}">${esc(review.model)}</span>` : "";
+        const effortTag = review.effort ? `<span class="wf-mini-tag is-effort" title="${esc(review.effort)}">${esc(review.effort)}</span>` : "";
+        return `<div class="wf-pop-block"><label>${th("review")}</label><div class="wf-deps"><span class="origin-tag">${th("reviewerUpToRounds", review.agent, review.maxRounds, round)}</span>${modelTag}${effortTag}</div>${
           live?.reviewNotes ? `<details class="wf-review-notes"><summary>${th("reviewFeedback")}</summary><pre>${esc(live.reviewNotes)}</pre></details>` : ""
         }</div>`;
       }
@@ -1410,6 +1664,18 @@ function wfOpenPopover(ctx, stepId) {
               : ""
           }
         </div>
+        ${
+          review?.agent
+            ? `<div class="wf-pop-head" style="margin-top:4px">
+                 <select class="perm-select" data-wf-review="model">
+                   ${wfRenderModelOptionsHtml(review.agent, review.model)}
+                 </select>
+                 <select class="perm-select" data-wf-review="effort">
+                   ${wfRenderEffortOptionsHtml(review.effort)}
+                 </select>
+               </div>`
+            : ""
+        }
         ${review ? `<textarea class="rule-editor-textarea" data-wf-review="criteria" rows="2" placeholder="${th("acceptanceCriteriaOptionalDefaultsToTheStep")}">${esc(review.criteria || "")}</textarea>` : ""}
       </div>`;
     })()}
@@ -1452,26 +1718,107 @@ function wfOpenPopover(ctx, stepId) {
     };
     el.oninput = apply;
     el.onchange = () => {
+      const field = el.dataset.wfField;
+      if (field === "agent") {
+        const target = draft.steps[index];
+        if (target) {
+          target.agent = el.value;
+          target.model = "";
+          target.effort = "";
+        }
+        void app?.ensureAgentModelsLoaded?.(el.value, false);
+        wfTouch(draft, true);
+        rerenderKeepingOpen();
+        return;
+      }
       apply();
-      // 名称和 Agent 显示在图上，改完要重画；浮窗保持打开
-      if (el.dataset.wfField === "name" || el.dataset.wfField === "agent") {
+      // 名称和模型显示在图上，改完要重画；浮窗保持打开
+      if (field === "name" || field === "model") {
         wfTouch(draft, true);
         rerenderKeepingOpen();
       }
     };
   });
   pop.querySelectorAll("[data-wf-review]").forEach((el) => {
+    const applyReview = () => {
+      const target = draft.steps[index];
+      if (!target || !target.review) return;
+      const field = el.dataset.wfReview;
+      if (field === "criteria") {
+        target.review.criteria = el.value;
+        wfTouch(draft, false);
+      }
+    };
+    el.oninput = applyReview;
     el.onchange = () => {
       const target = draft.steps[index];
       if (!target) return;
       const field = el.dataset.wfReview;
       if (field === "agent") {
-        target.review = el.value ? { agent: el.value, maxRounds: target.review?.maxRounds || 2, criteria: target.review?.criteria || "" } : null;
+        target.review = el.value
+          ? {
+              agent: el.value,
+              maxRounds: target.review?.maxRounds || 2,
+              criteria: target.review?.criteria || "",
+              model: "",
+              effort: "",
+            }
+          : null;
+        if (el.value) void app?.ensureAgentModelsLoaded?.(el.value, false);
       } else if (target.review) {
         target.review[field] = field === "maxRounds" ? Number(el.value) : el.value;
       }
       wfTouch(draft, true);
-      if (field === "agent") rerenderKeepingOpen();
+      rerenderKeepingOpen();
+    };
+  });
+  const applyGate = (structural = false) => {
+    const target = draft.steps[index];
+    if (!target) return;
+    const cmdEl = pop.querySelector('[data-wf-gate="command"]');
+    const filesEl = pop.querySelector('[data-wf-gate="files"]');
+    const patEl = pop.querySelector('[data-wf-gate="outputPattern"]');
+    const retriesEl = pop.querySelector('[data-wf-gate="maxRetries"]');
+
+    const command = cmdEl?.value?.trim() || "";
+    const existingFileMap = new Map();
+    if (Array.isArray(target.gate?.files)) {
+      for (const f of target.gate.files) {
+        if (typeof f === "object" && f && f.path) {
+          existingFileMap.set(f.path, f);
+        }
+      }
+    }
+    const rawFiles = filesEl?.value || "";
+    const files = rawFiles
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .map((p) => {
+        const existing = existingFileMap.get(p);
+        return existing ? { ...existing, path: p } : { path: p };
+      });
+    const outputPattern = patEl?.value?.trim() || "";
+    const maxRetries = retriesEl ? Number(retriesEl.value) || 2 : 2;
+
+    if (!command && files.length === 0 && !outputPattern) {
+      target.gate = null;
+    } else {
+      target.gate = {
+        command,
+        files,
+        outputPattern,
+        maxRetries,
+        timeoutSeconds: target.gate?.timeoutSeconds || 120,
+      };
+    }
+    wfTouch(draft, structural);
+  };
+  pop.querySelectorAll("[data-wf-gate]").forEach((el) => {
+    el.oninput = () => applyGate(false);
+    el.onchange = () => {
+      applyGate(true);
+      rerenderKeepingOpen();
     };
   });
   pop.querySelectorAll("[data-wf-ctx-key]").forEach((btn) => {
@@ -1558,7 +1905,7 @@ function renderWorkflowPanel() {
     group.leadAgent,
     server.updatedAt,
     server.status,
-    server.steps.map((s) => `${s.id}:${s.status}:${s.phase || ""}:${s.round || 1}`).join(","),
+    server.steps.map((s) => `${s.id}:${s.status}:${s.phase || ""}:${s.round || 1}:${s.gateAttempt || 0}`).join(","),
     draft.version,
     agents.map((a) => a.agent).join(","),
     wfServerContext(groupId).sections.map((s) => `${s.key}:${s.updatedAt}`).join(","),
@@ -1760,6 +2107,7 @@ function renderWorkflowPanel() {
         step.dependsOn.every((depId) => statusMap.get(depId) === "completed");
       const isReview = status === "running" && Boolean(live?.review && live?.phase === "review");
       const isRework = status === "running" && Boolean(live?.review && (live?.round || 1) > 1 && live?.phase !== "review");
+      const isGate = status === "running" && Boolean(live?.phase === "gate");
       const isEmptyDraft = status === "draft" && !step.prompt.trim();
 
       let markHtml = `<span class="wf-status-mark is-draft">${index + 1}</span>`;
@@ -1789,13 +2137,26 @@ function renderWorkflowPanel() {
         isReady ? "is-ready" : "",
         isReview ? "phase-review" : "",
         isRework ? "phase-rework" : "",
+        isGate ? "phase-gate" : "",
         isEmptyDraft ? "is-empty-draft" : "",
         WF_STATE.selectedId === step.id ? "selected" : "",
       ]
         .filter(Boolean)
         .join(" ");
+      const hasGate = Boolean(
+        step.gate &&
+          (step.gate.command ||
+            (Array.isArray(step.gate.files) && step.gate.files.length > 0) ||
+            step.gate.outputPattern),
+      );
       const flagsHtml = [
         step.isolateWorktree ? `<span class="wf-mini-tag" title="${th("isolatedWorktreeTag")}">wt</span>` : "",
+        step.model ? `<span class="wf-mini-tag is-model" title="${esc(step.model)}">${esc(step.model)}</span>` : "",
+        isGate
+          ? `<span class="wf-mini-tag is-in-gate" title="${th("wfInGate")}">${th("wfInGate")}</span>`
+          : hasGate
+            ? `<span class="wf-mini-tag is-gate" title="${th("wfNodeGate")}">gate</span>`
+            : "",
         step.review ? `<span class="wf-mini-tag is-review" title="${th("acceptanceReviewTag")}">${th("reviewTag")}</span>` : "",
       ]
         .filter(Boolean)
@@ -2064,6 +2425,10 @@ function renderWorkflowPanel() {
       dependsOn: after,
       isolateWorktree: false,
       contextRefs: [],
+      model: "",
+      effort: "",
+      review: null,
+      gate: null,
     });
     wfTouch(draft, true);
     WF_STATE.selectedId = `step${n}`;
@@ -2196,4 +2561,21 @@ if (app) {
 window.HUB_PANELS = {
   fetchResources,
   renderResourcesPanel,
+  onModelsUpdated: (agentId) => {
+    const pop = document.getElementById("wfPopover");
+    if (!pop || !WF_STATE.selectedId) return;
+    const group = app?.STATE?.taskGroups?.get(app?.STATE?.activeGroupId);
+    if (!group) return;
+    const draft = wfDraft(group.groupId);
+    const step = draft.steps.find((s) => s.id === WF_STATE.selectedId);
+    if (!step) return;
+    if (!agentId || agentId === step.agent) {
+      const sel = pop.querySelector('select[data-wf-field="model"]');
+      if (sel) wfPopulateModelSelect(sel, step.agent, step.model || "");
+    }
+    if (step.review?.agent && (!agentId || agentId === step.review.agent)) {
+      const sel = pop.querySelector('select[data-wf-review="model"]');
+      if (sel) wfPopulateModelSelect(sel, step.review.agent, step.review.model || "");
+    }
+  },
 };

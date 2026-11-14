@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import WebSocket from "ws";
 
 import { McpServerManager, parseCodexMcpServers, parseJsonMcpServers } from "../src/hub/mcp-servers.js";
 import { levelFor, MemoryMonitor } from "../src/hub/memory.js";
@@ -131,6 +132,58 @@ async function main(): Promise<void> {
     check("disabled leadAgent is refused all or nothing", (await post("/api/board/publish", { items: [{ brief: "ok", cwd }, { brief: "bad", cwd, leadAgent: "mock-off" }] })).ok === false && (await cards()).length === 3);
     check("an empty brief is refused", (await post("/api/board/publish", { items: [{ brief: "  " }] })).ok === false);
     check("tasks made the old way are not on the board", (await post("/api/groups", { title: "plain", leadAgent: "mock-a", cwd })).ok === true && (await cards()).length === 3);
+
+    // WS snapshot includes boardCards and defaultTitleNumber
+    const snapshot = await new Promise<Json>((resolve, reject) => {
+      const ws = new WebSocket(`${url.replace(/^http/, "ws")}/ws`);
+      const timer = setTimeout(() => {
+        ws.close();
+        reject(new Error("Timed out waiting for WS snapshot"));
+      }, 10000);
+      ws.on("message", (raw) => {
+        try {
+          const msg = JSON.parse(raw.toString()) as Json;
+          if (msg.type === "snapshot") {
+            clearTimeout(timer);
+            ws.close();
+            resolve(msg);
+          }
+        } catch {
+          // ignore
+        }
+      });
+      ws.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    const snapCards = Array.isArray(snapshot.boardCards) ? (snapshot.boardCards as Json[]) : [];
+    const snapCard0 = snapCards.find((c) => c.groupId === ids[0]);
+    const snapCard1 = snapCards.find((c) => c.groupId === ids[1]);
+    const snapCard2 = snapCards.find((c) => c.groupId === ids[2]);
+    const snapGroups = Array.isArray(snapshot.taskGroups) ? (snapshot.taskGroups as Json[]) : [];
+    const snapDefaultGroup = snapGroups.find((g) => g.groupId === "grp-default");
+    const snapGroup1 = snapGroups.find((g) => g.groupId === ids[1]);
+    check(
+      "WS snapshot includes boardCards and defaultTitleNumber",
+      snapshot.type === "snapshot" &&
+        snapCards.length === 3 &&
+        Boolean(snapCard0) &&
+        "defaultTitleNumber" in snapCard0! &&
+        typeof snapCard1?.defaultTitleNumber === "number" &&
+        snapCard1.defaultTitleNumber >= 2 &&
+        snapCard2?.defaultTitleNumber === null &&
+        snapGroup1?.defaultTitleNumber === snapCard1.defaultTitleNumber &&
+        snapDefaultGroup?.defaultTitleNumber === 1,
+      JSON.stringify({
+        len: snapCards.length,
+        n0: snapCard0?.defaultTitleNumber,
+        n1: snapCard1?.defaultTitleNumber,
+        n2: snapCard2?.defaultTitleNumber,
+        g1: snapGroup1?.defaultTitleNumber,
+        def: snapDefaultGroup?.defaultTitleNumber,
+      }),
+    );
 
     // 内存压力守卫自动验证（单独起临时 hub 测试，不影响主 hub 的 ids[0..2]）
     {

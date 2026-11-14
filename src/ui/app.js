@@ -35,7 +35,8 @@ const STATE = {
   activeStreamKey: "lead:grp-default",
   sendingStreams: new Set(),
   newTaskLead: "claude",
-  settings: { autoTitle: false },
+  settings: { autoTitle: false, boardParallel: 2, idleLeadMinutes: 0 },
+  boardCards: [],
   workflows: new Map(),
   progress: new Map(),
   contexts: new Map(),
@@ -70,7 +71,11 @@ const BUILTIN_FALLBACK_AGENTS = [
 
 const els = {
   appFavicon: document.getElementById("appFavicon"),
+  boardScreen: document.getElementById("boardScreen"),
   workbench: document.getElementById("workbench"),
+  brandHomeBtn: document.getElementById("brandHomeBtn"),
+  openBoardBtn: document.getElementById("openBoardBtn"),
+  openBoardBadge: document.getElementById("openBoardBadge"),
   inspectorBackdrop: document.getElementById("inspectorBackdrop"),
   wsDot: document.getElementById("wsDot"),
   portBadge: document.getElementById("portBadge"),
@@ -329,6 +334,18 @@ function renderAgentControls() {
   }
 
   renderLeadBadge(getActiveGroup());
+}
+
+function setScreenMode(mode) {
+  const next = mode === "workbench" ? "workbench" : "board";
+  document.body.dataset.screen = next;
+  if (els.boardScreen) els.boardScreen.hidden = next !== "board";
+  if (els.workbench) els.workbench.hidden = next === "board";
+  if (next === "board") {
+    window.HUB_BOARD?.render?.();
+  } else {
+    renderAll();
+  }
 }
 
 function setStageView(view) {
@@ -633,19 +650,20 @@ function applyMemoryStatus(memory) {
   let chip = document.getElementById("memChip");
   if (memory.level === "ok") {
     if (chip) chip.remove();
+    window.HUB_BOARD?.render?.();
     return;
   }
   if (!chip) {
     chip = document.createElement("span");
     chip.id = "memChip";
     const host = document.querySelector(".ws-status");
-    if (!host) return;
-    host.before(chip);
+    if (host) host.before(chip);
   }
   const gb = memory.availableMB !== undefined ? (memory.availableMB / 1024).toFixed(1) : "?";
   chip.className = `mem-chip ${memory.level}`;
   chip.textContent = memory.level === "critical" ? t("memoryCritical") : t("memoryLow");
   chip.title = t("memoryWarning", gb);
+  window.HUB_BOARD?.render?.();
 }
 
 function getMemoryStatus() {
@@ -667,8 +685,16 @@ function applyHubSettings(settings) {
   });
   const toggle = document.getElementById("autoTitleToggle");
   if (toggle) toggle.checked = Boolean(STATE.settings.autoTitle);
+  const boardParallel = document.getElementById("boardParallelSelect");
+  if (boardParallel && STATE.settings.boardParallel !== undefined) {
+    boardParallel.value = String(STATE.settings.boardParallel);
+  }
   const parallel = document.getElementById("workflowParallelSelect");
   if (parallel && STATE.settings.workflowParallel) parallel.value = String(STATE.settings.workflowParallel);
+  const idleLead = document.getElementById("idleLeadSelect");
+  if (idleLead && STATE.settings.idleLeadMinutes !== undefined) {
+    idleLead.value = String(STATE.settings.idleLeadMinutes);
+  }
   const idle = document.getElementById("idleSubSessionSelect");
   if (idle && STATE.settings.idleSubSessionMinutes !== undefined) idle.value = String(STATE.settings.idleSubSessionMinutes);
 }
@@ -734,6 +760,7 @@ function applyLanguage() {
   clearInterval(titleBlinkTimer);
   titleBlinkTimer = null;
   renderAll();
+  window.HUB_BOARD?.render?.();
   document.querySelectorAll("[data-art-reload]").forEach((button) => { button.textContent = t("refresh"); });
   document.querySelectorAll("[data-art-open]").forEach((button) => { button.textContent = t("openInANewWindow"); });
   document.querySelectorAll("iframe.artifact-frame[data-artifact-frame]").forEach((frame) => {
@@ -774,8 +801,12 @@ function initSettingsDialog() {
   });
   const toggle = document.getElementById("autoTitleToggle");
   if (toggle) toggle.onchange = () => void saveHubSettings({ autoTitle: toggle.checked });
+  const boardParallel = document.getElementById("boardParallelSelect");
+  if (boardParallel) boardParallel.onchange = () => void saveHubSettings({ boardParallel: Number(boardParallel.value) });
   const parallel = document.getElementById("workflowParallelSelect");
   if (parallel) parallel.onchange = () => void saveHubSettings({ workflowParallel: Number(parallel.value) });
+  const idleLead = document.getElementById("idleLeadSelect");
+  if (idleLead) idleLead.onchange = () => void saveHubSettings({ idleLeadMinutes: Number(idleLead.value) });
   const idle = document.getElementById("idleSubSessionSelect");
   if (idle) idle.onchange = () => void saveHubSettings({ idleSubSessionMinutes: Number(idle.value) });
 }
@@ -785,6 +816,7 @@ function applyTheme(dark) {
   document.documentElement.dataset.theme = dark ? "dark" : "light";
   els.themeToggleBtn.textContent = dark ? t("light") : t("dark");
   refreshThemeSensitiveFrames();
+  window.HUB_BOARD?.render?.();
   try {
     localStorage.setItem("agent-hub-theme", dark ? "dark" : "light");
   } catch {
@@ -1123,7 +1155,41 @@ function openDirsDialog(group) {
   render();
 }
 
+function renderSidebarBoardBadge() {
+  if (!els.openBoardBadge) return;
+  const cards = Array.isArray(STATE.boardCards) ? STATE.boardCards : [];
+  const activeCount = cards.filter(
+    (c) => c.board && (c.board.status === "queued" || c.board.status === "running" || c.board.status === "delivered"),
+  ).length;
+  const needsAttention = cards.some((c) => Boolean(c.waiting) || c.board?.status === "delivered");
+  els.openBoardBadge.hidden = activeCount === 0;
+  els.openBoardBadge.textContent = String(activeCount);
+  els.openBoardBadge.classList.toggle("is-attention", needsAttention);
+}
+
+function buildSidebarBoardPillHtml(group) {
+  if (!group?.board) return "";
+  const card = (STATE.boardCards || []).find((c) => c.groupId === group.groupId);
+  const isWaiting = Boolean(card?.waiting || group.board.interrupted || group.board.stalled);
+  const rawStatus = group.board.status;
+  const state = rawStatus === "running" && isWaiting ? "waiting" : rawStatus;
+  const labelKey =
+    state === "queued"
+      ? "boardColQueued"
+      : state === "running"
+        ? "boardColRunning"
+        : state === "waiting"
+          ? "boardColWaiting"
+          : state === "delivered"
+            ? "boardColDelivered"
+            : state === "failed"
+              ? "boardColFailed"
+              : "completed";
+  return `<span class="board-status-pill is-${escapeHtml(state)}" data-board-status="${escapeHtml(state)}">${th(labelKey)}</span>`;
+}
+
 function renderSidebarGroups() {
+  renderSidebarBoardBadge();
   const allGroups = [...STATE.taskGroups.values()].sort((a, b) => a.createdAt - b.createdAt);
   const archivedCount = allGroups.filter((g) => Boolean(g.archived)).length;
   const activeCount = allGroups.length - archivedCount;
@@ -1282,6 +1348,7 @@ function renderSidebarGroups() {
     meta.className = "group-meta";
     meta.innerHTML = `
       ${agentTagHtml(group.leadAgent, `★ ${agentName(group.leadAgent)}`)}
+      ${buildSidebarBoardPillHtml(group)}
       ${group.archived ? `<span class="archived-pill">${th("archivedOn", new Date(group.archivedAt || group.updatedAt).toLocaleDateString(getLocale()))}</span>` : ""}
       ${(group.extraDirs || []).length > 0 ? `<span class="archived-pill" title="${escapeHtml(group.extraDirs.join("\n"))}">${th("moreDirs", group.extraDirs.length)}</span>` : ""}
       ${activeModel ? `<span class="model-badge-pill" title="${th("currentOrPresetModel")}">${escapeHtml(activeModel)}</span>` : ""}
@@ -1446,6 +1513,7 @@ async function ensureAgentModelsLoaded(agentId, force = false) {
     STATE.probingModelAgents.delete(agentId);
     renderModelSelectorBar();
     window.HUB_INTERACTIVE?.onAgentsUpdated?.();
+    window.HUB_PANELS?.onModelsUpdated?.(agentId);
   }
 }
 
@@ -3648,19 +3716,43 @@ function connectWs() {
       STATE.telemetry = msg.telemetry || null;
       STATE.resourceBudgets = msg.resourceBudgets || [];
 
+      if (Array.isArray(msg.boardCards)) {
+        STATE.boardCards = msg.boardCards;
+      } else {
+        STATE.boardCards = [];
+        void apiFetch("/api/board")
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data) => {
+            if (data && Array.isArray(data.cards)) {
+              STATE.boardCards = data.cards;
+              renderSidebarGroups();
+              window.HUB_BOARD?.render?.();
+            }
+          })
+          .catch(() => {});
+      }
+
       renderAll();
+      window.HUB_BOARD?.render?.();
+    } else if (msg.type === "board_updated") {
+      STATE.boardCards = Array.isArray(msg.cards) ? msg.cards : [];
+      renderSidebarGroups();
+      window.HUB_BOARD?.render?.();
     } else if (msg.type === "models_updated") {
       if (msg.agent && msg.catalog) {
         STATE.modelCatalogs.set(msg.agent, msg.catalog);
         renderSidebarGroups();
         renderStageHeaderAndTabs();
         window.HUB_INTERACTIVE?.onAgentsUpdated?.();
+        window.HUB_PANELS?.onModelsUpdated?.(msg.agent);
+        window.HUB_APP?.onStateChange?.();
       }
     } else if (msg.type === "context_updated") {
       STATE.contexts.set(msg.context.groupId, msg.context);
       window.HUB_APP?.onStateChange?.();
     } else if (msg.type === "projects_updated") {
       applyProjects(msg.projects);
+      window.HUB_BOARD?.render?.();
     } else if (msg.type === "progress_updated") {
       STATE.progress.set(msg.progress.groupId, msg.progress);
       scheduleUiRender(UI_REGION.inspector);
@@ -3684,6 +3776,7 @@ function connectWs() {
       window.HUB_APP?.onStateChange?.();
     } else if (msg.type === "settings_updated") {
       applyHubSettings(msg.settings);
+      window.HUB_BOARD?.render?.();
     } else if (msg.type === "agents_updated") {
       applyDefaultLead(msg);
       STATE.agents = msg.agents || [];
@@ -3692,6 +3785,7 @@ function connectWs() {
       renderStageHeaderAndTabs();
       window.HUB_INTERACTIVE?.onAgentsUpdated?.();
       window.HUB_APP?.onStateChange?.();
+      window.HUB_BOARD?.render?.();
     } else if (msg.type === "artifact_created") {
       if (msg.artifact) {
         STATE.artifacts.set(msg.artifact.artifactId, msg.artifact);
@@ -3886,6 +3980,20 @@ function connectWs() {
 }
 
 // Event bindings
+if (els.brandHomeBtn) {
+  els.brandHomeBtn.onclick = () => setScreenMode("board");
+  els.brandHomeBtn.onkeydown = (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      setScreenMode("board");
+    }
+  };
+}
+
+if (els.openBoardBtn) {
+  els.openBoardBtn.onclick = () => setScreenMode("board");
+}
+
 if (els.pickCwdBtn) {
   els.pickCwdBtn.onclick = () => openDirsDialog(getActiveGroup());
 }
@@ -4944,6 +5052,8 @@ if (els.liveContextPill) {
 window.HUB_APP = {
   STATE,
   els,
+  getState: () => STATE,
+  getAgentModelCatalog: (agentId) => getAgentCatalog(agentId),
   escapeHtml,
   formatTime,
   formatTokens,
@@ -4951,15 +5061,20 @@ window.HUB_APP = {
   appendLog,
   selectGroup,
   setStageView,
+  setScreenMode,
   refreshHeaderMetrics,
   getEnabledAgents,
+  agentName,
   agentTagHtml,
+  applyAgentColorVar,
   getMemoryStatus,
   getAgentColorStyle,
   renderAgentControls,
   ensureAgentModelsLoaded,
   showPromptModal,
   showConfirmModal,
+  pickDirectoryDialog,
+  saveHubSettings,
   createTaskGroup,
   sendStreamPrompt,
   openSettings,
@@ -4967,6 +5082,7 @@ window.HUB_APP = {
   isAgentsViewOpen,
   isResourcesViewOpen,
   renderModelSelectorBar,
+  renderAll,
   onStateChange: null,
   onResourcesUpdated: null,
 };
@@ -4989,6 +5105,15 @@ try {
 } catch {
   applySkin("modern");
 }
+const initialSearchParams = new URLSearchParams(location.search);
+const initialGroupParam = initialSearchParams.get("group");
+if (initialGroupParam) {
+  STATE.activeGroupId = initialGroupParam;
+  STATE.activeStreamKey = `lead:${initialGroupParam}`;
+}
+setScreenMode(
+  initialSearchParams.get("view") === "workbench" || initialGroupParam ? "workbench" : "board",
+);
 initSettingsDialog();
 renderAgentControls();
 setStageView("chat");

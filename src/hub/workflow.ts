@@ -1,8 +1,22 @@
 import { t } from "./i18n.js";
-import type { AgentId, TaskRecord, WorkflowRecord, WorkflowStep, WorkflowStepInput } from "../types.js";
+import type {
+  AgentId,
+  TaskRecord,
+  WorkflowFileGateItem,
+  WorkflowGateConfig,
+  WorkflowRecord,
+  WorkflowStep,
+  WorkflowStepInput,
+} from "../types.js";
 
 const MAX_STEPS = 20;
 const DEFAULT_REVIEW_ROUNDS = 2;
+const DEFAULT_GATE_TIMEOUT_SECONDS = 120;
+const MIN_GATE_TIMEOUT_SECONDS = 5;
+const MAX_GATE_TIMEOUT_SECONDS = 600;
+const DEFAULT_GATE_MAX_RETRIES = 2;
+const MIN_GATE_MAX_RETRIES = 1;
+const MAX_GATE_MAX_RETRIES = 5;
 
 /**
  * Appended to what a step's agent is asked to do. Finishing a turn is not the same as
@@ -19,15 +33,29 @@ const STATUS_INSTRUCTION = [
   "Never write DONE for work you did not complete.",
 ].join("\n");
 
-/** The outcome an agent declared at the end of its reply; no line counts as done. */
-export function parseStepOutcome(output: string): { ok: boolean; reason?: string } {
-  const matches = [...(output ?? "").matchAll(/STATUS:\s*\**\s*(DONE|BLOCKED|FAILED)\b\**[ \t]*[-:：—]*[ \t]*([^\n]*)/gi)];
+/** The outcome an agent declared at the end of its reply; missing status bounces back via gate. */
+export function parseStepOutcome(output: string): {
+  ok: boolean;
+  status?: "DONE" | "BLOCKED" | "FAILED";
+  missingStatus?: boolean;
+  reason?: string;
+} {
+  const matches = [
+    ...(output ?? "").matchAll(/STATUS:\s*\**\s*(DONE|BLOCKED|FAILED)\b\**[ \t]*[-:：—]*[ \t]*([^\n]*)/gi),
+  ];
   const last = matches[matches.length - 1];
-  if (!last) return { ok: true };
+  if (!last) {
+    return {
+      ok: false,
+      missingStatus: true,
+      reason: "Missing STATUS line (end your reply with STATUS: DONE, BLOCKED, or FAILED)",
+    };
+  }
   const word = last[1]!.toUpperCase();
-  if (word === "DONE") return { ok: true };
+  if (word === "DONE") return { ok: true, status: "DONE" };
+  const status = word === "BLOCKED" ? "BLOCKED" : "FAILED";
   const detail = last[2]?.trim().replace(/[`*]+$/g, "").trim();
-  return { ok: false, reason: `${word === "BLOCKED" ? "BLOCKED" : "FAILED"}${detail ? `: ${detail}` : ""}` };
+  return { ok: false, status, reason: `${status}${detail ? `: ${detail}` : ""}` };
 }
 const MAX_REVIEW_ROUNDS = 5;
 const STEP_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
@@ -39,11 +67,23 @@ export interface WorkflowDeps {
     agent: AgentId;
     prompt: string;
     session: string;
+    cwd?: string;
+    model?: string;
+    effort?: string;
     isolateWorktree: boolean;
     /** Context sections the step asked for, and the steps whose results it builds on. */
     contextRefs: string[];
     upstreamStepIds: string[];
   }): TaskRecord;
+  /** Inspects workspace / worktree changes for a step so the reviewer sees real diffs. */
+  inspectWorkspace?(groupId: string, worktreePath?: string): string | undefined;
+  /** Runs deterministic gate checks before review / completion. */
+  runGate?(
+    groupId: string,
+    step: WorkflowStep,
+    task: TaskRecord,
+    signal: AbortSignal,
+  ): Promise<{ ok: boolean; reason?: string }>;
   /** A run ended (every step finished, or nothing more can run). Not called for a user stop. */
   onSettled?(workflow: WorkflowRecord): void;
   /** How many steps may run at once; the rest wait even when their dependencies are done. */
@@ -74,6 +114,43 @@ export class WorkflowManager {
 
   /** Runs the user stopped; their end is not reported to the lead as a failure to act on. */
   private readonly userStopped = new Set<string>();
+  /** In-flight deterministic gate checks keyed by `${groupId}:${stepId}`. */
+  private readonly activeGates = new Map<string, { token: symbol; ac: AbortController }>();
+
+  private resetStepForRun(step: WorkflowStep): void {
+    step.status = "pending";
+    step.taskId = undefined;
+    step.sessionKey = undefined;
+    step.error = undefined;
+    step.errorKind = undefined;
+    step.output = undefined;
+    step.phase = undefined;
+    step.round = undefined;
+    step.reviewNotes = undefined;
+    step.reviewSessionKey = undefined;
+    step.gateAttempt = undefined;
+    step.gateNotes = undefined;
+    step.worktreePath = undefined;
+    step.branch = undefined;
+    step.workspaceSummary = undefined;
+  }
+
+  private abortGroupGates(groupId: string): void {
+    const prefix = `${groupId}:`;
+    for (const [gateKey, entry] of this.activeGates.entries()) {
+      if (gateKey.startsWith(prefix)) {
+        this.activeGates.delete(gateKey);
+        entry.ac.abort();
+      }
+    }
+  }
+
+  abortActiveGates(): void {
+    for (const [gateKey, entry] of this.activeGates.entries()) {
+      this.activeGates.delete(gateKey);
+      entry.ac.abort();
+    }
+  }
 
   get(groupId: string): WorkflowRecord {
     return (
@@ -117,14 +194,19 @@ export class WorkflowManager {
       }
       // A draft may still have empty steps; run() is where a missing task is refused.
       const prompt = (raw.prompt ?? "").trim();
+      const model = (raw.model ?? "").trim() || undefined;
+      const effort = (raw.effort ?? "").trim() || undefined;
       steps.push({
         id,
         name: (raw.name ?? "").trim() || id,
         agent,
+        ...(model ? { model } : {}),
+        ...(effort ? { effort } : {}),
         prompt,
         dependsOn: [...new Set((raw.dependsOn ?? []).map((d) => d.trim().toLowerCase()).filter(Boolean))],
         contextRefs: [...new Set((raw.contextRefs ?? []).map((k) => k.trim().toLowerCase()).filter(Boolean))],
         isolateWorktree: Boolean(raw.isolateWorktree),
+        gate: this.normalizeGate(id, raw.gate),
         review: this.normalizeReview(id, raw.review),
         status: "draft",
       });
@@ -167,16 +249,7 @@ export class WorkflowManager {
     }
     this.deps.clearResults(groupId);
     for (const step of workflow.steps) {
-      step.status = "pending";
-      step.taskId = undefined;
-      step.sessionKey = undefined;
-      step.error = undefined;
-      step.errorKind = undefined;
-      step.output = undefined;
-      step.phase = undefined;
-      step.round = undefined;
-      step.reviewNotes = undefined;
-      step.reviewSessionKey = undefined;
+      this.resetStepForRun(step);
     }
     workflow.status = "running";
     this.advance(workflow);
@@ -216,16 +289,7 @@ export class WorkflowManager {
         }
         continue;
       }
-      step.status = "pending";
-      step.taskId = undefined;
-      step.sessionKey = undefined;
-      step.error = undefined;
-      step.errorKind = undefined;
-      step.output = undefined;
-      step.phase = undefined;
-      step.round = undefined;
-      step.reviewNotes = undefined;
-      step.reviewSessionKey = undefined;
+      this.resetStepForRun(step);
     }
     workflow.status = "running";
     this.advance(workflow);
@@ -255,16 +319,7 @@ export class WorkflowManager {
         }
         continue;
       }
-      step.status = "pending";
-      step.taskId = undefined;
-      step.sessionKey = undefined;
-      step.error = undefined;
-      step.errorKind = undefined;
-      step.output = undefined;
-      step.phase = undefined;
-      step.round = undefined;
-      step.reviewNotes = undefined;
-      step.reviewSessionKey = undefined;
+      this.resetStepForRun(step);
     }
     workflow.status = "running";
     this.advance(workflow);
@@ -316,11 +371,19 @@ export class WorkflowManager {
       return this.get(groupId);
     }
     this.userStopped.add(groupId);
+    this.abortGroupGates(groupId);
     for (const step of workflow.steps) {
       if (step.status === "pending") {
         step.status = "cancelled";
-      } else if (step.status === "running" && step.sessionKey) {
-        this.deps.cancel(step.phase === "review" && step.reviewSessionKey ? step.reviewSessionKey : step.sessionKey);
+        step.phase = undefined;
+      } else if (step.status === "running") {
+        const activeSession =
+          step.phase === "review" && step.reviewSessionKey ? step.reviewSessionKey : step.sessionKey;
+        if (step.phase !== "gate" && activeSession) {
+          this.deps.cancel(activeSession);
+        }
+        step.status = "cancelled";
+        step.phase = undefined;
       }
     }
     this.advance(workflow);
@@ -333,17 +396,163 @@ export class WorkflowManager {
     if (!this.deps.isKnownAgent(agent)) {
       throw new Error(t("reviewerForStepDoesNotExist", stepId, raw?.agent));
     }
+    const model = (raw?.model ?? "").trim() || undefined;
+    const effort = (raw?.effort ?? "").trim() || undefined;
     const rounds = Math.floor(Number(raw?.maxRounds));
     return {
       agent,
+      ...(model ? { model } : {}),
+      ...(effort ? { effort } : {}),
       criteria: (raw?.criteria ?? "").trim() || undefined,
       maxRounds: Number.isFinite(rounds) && rounds >= 1 ? Math.min(rounds, MAX_REVIEW_ROUNDS) : DEFAULT_REVIEW_ROUNDS,
     };
   }
 
+  private normalizeGate(stepId: string, raw: WorkflowStepInput["gate"]): WorkflowGateConfig | undefined {
+    if (!raw) return undefined;
+    const command = (raw.command ?? "").trim() || undefined;
+    const outputPattern = (raw.outputPattern ?? "").trim() || undefined;
+    if (outputPattern) {
+      try {
+        new RegExp(outputPattern);
+      } catch (err) {
+        throw new Error(t("invalidGateOutputPattern", stepId, err instanceof Error ? err.message : String(err)));
+      }
+    }
+    const files: WorkflowFileGateItem[] = [];
+    for (const entry of raw.files ?? []) {
+      if (typeof entry === "string") {
+        const p = entry.trim();
+        if (p) files.push({ path: p });
+      } else if (entry && typeof entry === "object") {
+        const p = (entry.path ?? "").trim();
+        if (!p) continue;
+        const item: WorkflowFileGateItem = { path: p };
+        if (entry.nonEmpty !== undefined) item.nonEmpty = Boolean(entry.nonEmpty);
+        if (entry.mustContain !== undefined && entry.mustContain !== "") {
+          item.mustContain = String(entry.mustContain);
+        }
+        files.push(item);
+      }
+    }
+    if (!command && files.length === 0 && !outputPattern) {
+      return undefined;
+    }
+    const rawTimeout = raw.timeoutSeconds != null ? Number(raw.timeoutSeconds) : Number.NaN;
+    const timeoutSeconds = Number.isFinite(rawTimeout)
+      ? Math.min(MAX_GATE_TIMEOUT_SECONDS, Math.max(MIN_GATE_TIMEOUT_SECONDS, Math.floor(rawTimeout)))
+      : DEFAULT_GATE_TIMEOUT_SECONDS;
+    const rawRetries = raw.maxRetries != null ? Number(raw.maxRetries) : Number.NaN;
+    const maxRetries = Number.isFinite(rawRetries)
+      ? Math.min(MAX_GATE_MAX_RETRIES, Math.max(MIN_GATE_MAX_RETRIES, Math.floor(rawRetries)))
+      : DEFAULT_GATE_MAX_RETRIES;
+    return {
+      ...(command ? { command } : {}),
+      timeoutSeconds,
+      ...(files.length > 0 ? { files } : {}),
+      ...(outputPattern ? { outputPattern } : {}),
+      maxRetries,
+    };
+  }
+
+  private bounceOrFailGate(workflow: WorkflowRecord, step: WorkflowStep, reason: string): void {
+    const attempt = (step.gateAttempt ?? 0) + 1;
+    const maxRetries = step.gate?.maxRetries ?? DEFAULT_GATE_MAX_RETRIES;
+    step.gateAttempt = attempt;
+    step.gateNotes = reason;
+    if (attempt > maxRetries) {
+      step.phase = undefined;
+      step.status = "failed";
+      step.error = reason;
+      return;
+    }
+    try {
+      const task = this.deps.dispatch({
+        groupId: workflow.groupId,
+        agent: step.agent,
+        model: step.model,
+        effort: step.effort,
+        prompt:
+          [
+            `<gate_failure attempt="${attempt}" max="${maxRetries}">`,
+            reason,
+            "</gate_failure>",
+            "",
+            "Fix the issue reported by the step gate above, verify your changes in the workspace, and reply again.",
+          ].join("\n") + STATUS_INSTRUCTION,
+        session: `wf-${step.id}`,
+        isolateWorktree: Boolean(step.isolateWorktree),
+        contextRefs: [],
+        upstreamStepIds: [],
+      });
+      step.phase = "work";
+      step.taskId = task.taskId;
+      step.sessionKey = task.targetSessionKey;
+    } catch (err) {
+      step.phase = undefined;
+      step.status = "failed";
+      step.error = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  private async evaluateStepGate(
+    workflow: WorkflowRecord,
+    step: WorkflowStep,
+    task: TaskRecord,
+    gateKey: string,
+    token: symbol,
+    ac: AbortController,
+  ): Promise<void> {
+    let gateRes: { ok: boolean; reason?: string };
+    try {
+      gateRes = await this.deps.runGate!(workflow.groupId, this.cloneStep(step), task, ac.signal);
+    } catch (err) {
+      gateRes = { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    } finally {
+      if (this.activeGates.get(gateKey)?.token === token) {
+        this.activeGates.delete(gateKey);
+      }
+    }
+    if (ac.signal.aborted) {
+      return;
+    }
+    if (this.workflows.get(workflow.groupId) !== workflow || workflow.status !== "running") {
+      return;
+    }
+    if (step.status !== "running" || step.phase !== "gate") {
+      return;
+    }
+    if (!gateRes.ok) {
+      this.bounceOrFailGate(workflow, step, gateRes.reason || "Gate check failed");
+    } else {
+      step.gateNotes = undefined;
+      if (step.review) {
+        try {
+          this.startReview(workflow, step);
+        } catch (err) {
+          step.phase = undefined;
+          step.status = "failed";
+          step.error = err instanceof Error ? err.message : String(err);
+        }
+      } else {
+        step.phase = undefined;
+        step.status = "completed";
+        this.deps.saveResult(workflow.groupId, step, step.output ?? "");
+      }
+    }
+    this.advance(workflow);
+  }
+
   /** The step's agent reported done: hand the work to the reviewer. */
   private startReview(workflow: WorkflowRecord, step: WorkflowStep): void {
     const review = step.review!;
+    let inspected: string | undefined;
+    try {
+      inspected = this.deps.inspectWorkspace?.(workflow.groupId, step.worktreePath);
+    } catch {
+      inspected = undefined;
+    }
+    const workspaceChanges = (inspected || step.workspaceSummary || "").trim();
     const prompt = [
       "You are the acceptance reviewer for a piece of work another agent just finished. Check it against the task it was given: read the files it changed and run whatever checks are appropriate. Do not redo the work and do not edit files yourself.",
       "",
@@ -355,12 +564,16 @@ export class WorkflowManager {
       `<work_report round="${step.round ?? 1}">`,
       step.output || "(the agent reported nothing)",
       "</work_report>",
+      ...(workspaceChanges ? ["", "<workspace_changes>", workspaceChanges, "</workspace_changes>"] : []),
       "",
       "List the concrete problems that must be fixed, if any. Then end your reply with exactly one line: `VERDICT: PASS` or `VERDICT: FAIL`.",
     ].join("\n");
     const task = this.deps.dispatch({
       groupId: workflow.groupId,
       agent: review.agent,
+      model: review.model,
+      effort: review.effort,
+      cwd: step.worktreePath,
       prompt,
       session: `wf-${step.id}-review`,
       isolateWorktree: false,
@@ -386,6 +599,7 @@ export class WorkflowManager {
     }
     if (!verdict) {
       step.status = "failed";
+      step.phase = undefined;
       step.errorKind = "reviewVerdictMissing";
       step.error = t(step.errorKind);
       return;
@@ -393,6 +607,7 @@ export class WorkflowManager {
     const round = step.round ?? 1;
     if (round >= review.maxRounds) {
       step.status = "failed";
+      step.phase = undefined;
       step.errorKind = "reviewAttemptsExhausted";
       step.error = t(step.errorKind, round);
       return;
@@ -401,18 +616,22 @@ export class WorkflowManager {
     const task = this.deps.dispatch({
       groupId: workflow.groupId,
       agent: step.agent,
-      prompt: [
-        `The reviewer did not accept your work (review ${round} of ${review.maxRounds}). Fix the problems below, then report what you changed.`,
-        "",
-        "<review>",
-        reply,
-        "</review>",
-      ].join("\n"),
+      model: step.model,
+      effort: step.effort,
+      prompt:
+        [
+          `The reviewer did not accept your work (review ${round} of ${review.maxRounds}). Fix the problems below, then report what you changed.`,
+          "",
+          "<review>",
+          reply,
+          "</review>",
+        ].join("\n") + STATUS_INSTRUCTION,
       session: `wf-${step.id}`,
       isolateWorktree: Boolean(step.isolateWorktree),
       contextRefs: [],
       upstreamStepIds: [],
     });
+    step.gateAttempt = 0;
     step.phase = "work";
     step.round = round + 1;
     step.taskId = task.taskId;
@@ -429,40 +648,86 @@ export class WorkflowManager {
     if (!step || step.status !== "running") {
       return;
     }
-    const declared = task.status === "completed" && step.phase !== "review" ? parseStepOutcome(task.outputText ?? "") : undefined;
-    if (declared && !declared.ok) {
-      // The agent's turn ended normally but it says the task did not get done.
+    if (task.status === "failed") {
       step.status = "failed";
-      step.output = task.outputText;
-      step.error = declared.reason;
-    } else if (task.status === "completed" && step.review) {
+      step.phase = undefined;
+      step.error = task.error;
+      this.advance(workflow);
+      return;
+    }
+    if (task.status === "cancelled") {
+      step.status = "cancelled";
+      step.phase = undefined;
+      this.advance(workflow);
+      return;
+    }
+    if (task.status !== "completed") {
+      return;
+    }
+
+    if (step.phase === "review") {
       try {
-        if (step.phase === "review") {
-          this.finishReview(workflow, step, task.outputText ?? "");
-        } else {
-          step.output = task.outputText;
-          this.startReview(workflow, step);
-        }
+        this.finishReview(workflow, step, task.outputText ?? "");
       } catch (err) {
+        step.status = "failed";
+        step.phase = undefined;
+        step.error = err instanceof Error ? err.message : String(err);
+      }
+      this.advance(workflow);
+      return;
+    }
+
+    step.output = task.outputText;
+    step.worktreePath = task.worktreePath ?? step.worktreePath;
+    step.branch = task.branch ?? step.branch;
+    step.workspaceSummary = task.workspaceSummary;
+
+    const declared = parseStepOutcome(task.outputText ?? "");
+    if (!declared.ok && !declared.missingStatus) {
+      step.status = "failed";
+      step.error = declared.reason;
+      step.phase = undefined;
+      this.advance(workflow);
+      return;
+    }
+    if (declared.missingStatus) {
+      this.bounceOrFailGate(workflow, step, declared.reason!);
+      this.advance(workflow);
+      return;
+    }
+
+    if (step.gate && this.deps.runGate) {
+      const gateKey = `${workflow.groupId}:${step.id}`;
+      this.activeGates.get(gateKey)?.ac.abort();
+      const ac = new AbortController();
+      const token = Symbol(gateKey);
+      this.activeGates.set(gateKey, { token, ac });
+      step.phase = "gate";
+      workflow.updatedAt = Date.now();
+      this.deps.onChange(this.clone(workflow)!);
+      void this.evaluateStepGate(workflow, step, task, gateKey, token, ac);
+      return;
+    }
+
+    step.gateNotes = undefined;
+    if (step.review) {
+      try {
+        this.startReview(workflow, step);
+      } catch (err) {
+        step.phase = undefined;
         step.status = "failed";
         step.error = err instanceof Error ? err.message : String(err);
       }
-    } else if (task.status === "completed") {
-      step.status = "completed";
-      step.output = task.outputText;
-      this.deps.saveResult(workflow.groupId, step, task.outputText);
-    } else if (task.status === "failed") {
-      step.status = "failed";
-      step.error = task.error;
-    } else if (task.status === "cancelled") {
-      step.status = "cancelled";
     } else {
-      return;
+      step.phase = undefined;
+      step.status = "completed";
+      this.deps.saveResult(workflow.groupId, step, step.output ?? "");
     }
     this.advance(workflow);
   }
 
   forget(groupId: string): void {
+    this.abortGroupGates(groupId);
     if (this.workflows.delete(groupId)) {
       this.deps.onChange({ groupId, status: "draft", steps: [], updatedAt: Date.now() });
     }
@@ -479,6 +744,7 @@ export class WorkflowManager {
         for (const step of workflow.steps) {
           if (step.status === "running" || step.status === "pending") {
             step.status = "cancelled";
+            step.phase = undefined;
             step.errorKind = "serviceRestarted";
             step.error = t(step.errorKind);
           }
@@ -510,6 +776,8 @@ export class WorkflowManager {
           const task = this.deps.dispatch({
             groupId: workflow.groupId,
             agent: step.agent,
+            model: step.model,
+            effort: step.effort,
             // Background and upstream results travel as context, not inside the step prompt.
             prompt: `${step.prompt}${step.retryGuidance ? `\n\n<lead_guidance>\nAn earlier attempt at this step did not succeed. The lead's guidance for this attempt:\n${step.retryGuidance}\n</lead_guidance>` : ""}${STATUS_INSTRUCTION}`,
             session: `wf-${step.id}`,
@@ -520,8 +788,10 @@ export class WorkflowManager {
           step.status = "running";
           step.taskId = task.taskId;
           step.sessionKey = task.targetSessionKey;
-          if (step.review) {
+          if (step.review || step.gate) {
             step.phase = "work";
+          }
+          if (step.review) {
             step.round = 1;
           }
         } catch (err) {
@@ -559,15 +829,26 @@ export class WorkflowManager {
     }
   }
 
+  private cloneStep(s: WorkflowStep): WorkflowStep {
+    return {
+      ...s,
+      dependsOn: [...s.dependsOn],
+      contextRefs: [...(s.contextRefs ?? [])],
+      review: s.review ? { ...s.review } : undefined,
+      gate: s.gate
+        ? {
+            ...s.gate,
+            files: s.gate.files ? s.gate.files.map((f) => ({ ...f })) : undefined,
+          }
+        : undefined,
+    };
+  }
+
   private clone(workflow: WorkflowRecord | undefined): WorkflowRecord | undefined {
     return workflow
       ? {
           ...workflow,
-          steps: workflow.steps.map((s) => ({
-            ...s,
-            dependsOn: [...s.dependsOn],
-            contextRefs: [...(s.contextRefs ?? [])],
-          })),
+          steps: workflow.steps.map((s) => this.cloneStep(s)),
         }
       : undefined;
   }
