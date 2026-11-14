@@ -1,0 +1,4 @@
+# Launchers must keep the line endings their interpreter expects.
+*.command text eol=lf
+*.sh text eol=lf
+*.vbs text eol=crlf

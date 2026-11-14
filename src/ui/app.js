@@ -696,15 +696,18 @@ function findMessageById(streamKey, messageId) {
   return list.find((m) => m.messageId === messageId) || null;
 }
 
+const SKINS = ["modern", "classic", "roundtable"];
+
 function applySkin(skin) {
-  const classic = skin === "classic";
-  if (classic) document.body.dataset.skin = "classic";
-  else delete document.body.dataset.skin;
+  const next = SKINS.includes(skin) ? skin : "modern";
+  // 默认皮肤不带属性，其余皮肤靠 body[data-skin] 套用各自的配色和装饰
+  if (next === "modern") delete document.body.dataset.skin;
+  else document.body.dataset.skin = next;
   document.querySelectorAll("#skinSeg button").forEach((btn) => {
-    btn.classList.toggle("active", (btn.dataset.skin === "classic") === classic);
+    btn.classList.toggle("active", btn.dataset.skin === next);
   });
   try {
-    localStorage.setItem("agent-hub-skin", classic ? "classic" : "modern");
+    localStorage.setItem("agent-hub-skin", next);
   } catch {
     // ignore storage failures
   }
@@ -3995,7 +3998,7 @@ try {
   setInspectorCollapsed(false);
 }
 try {
-  applySkin(localStorage.getItem("agent-hub-skin") === "classic" ? "classic" : "modern");
+  applySkin(localStorage.getItem("agent-hub-skin") || "modern");
 } catch {
   applySkin("modern");
 }

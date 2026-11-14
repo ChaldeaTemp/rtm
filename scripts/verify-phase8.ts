@@ -381,19 +381,13 @@ async function main(): Promise<void> {
     }
 
     console.log("=== 3. Verify Launcher ASCII Purity & UI Syntax ===");
-    const ps1Path = path.join(PROJECT_ROOT, "scripts", "desktop-launcher.ps1");
-    const ps1Bytes = fs.readFileSync(ps1Path);
-    const nonAscii = [...ps1Bytes].filter((b) => b > 127).length;
-    assert.equal(nonAscii, 0, `desktop-launcher.ps1 must stay pure ASCII, found ${nonAscii} non-ASCII bytes`);
-    execFileSync(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-Command",
-        `$err=$null;[System.Management.Automation.Language.Parser]::ParseFile('${ps1Path.replace(/'/g, "''")}',[ref]$null,[ref]$err)|Out-Null;if($err.Count -gt 0){$err|Format-List;exit 1}`,
-      ],
-      { stdio: "inherit" },
-    );
+    // The double-click wrappers are run by wscript / bash with the system code page:
+    // they must stay pure ASCII.
+    for (const name of ["RTM.vbs", "RTM.command"]) {
+      const bytes = fs.readFileSync(path.join(PROJECT_ROOT, name));
+      const nonAscii = [...bytes].filter((b) => b > 127).length;
+      assert.equal(nonAscii, 0, `${name} must stay pure ASCII, found ${nonAscii} non-ASCII bytes`);
+    }
 
     execFileSync(process.execPath, ["--check", path.join(PROJECT_ROOT, "src", "ui", "app.js")], {
       stdio: "inherit",

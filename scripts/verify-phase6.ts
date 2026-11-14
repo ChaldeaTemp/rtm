@@ -67,50 +67,35 @@ async function run(): Promise<void> {
       );
       console.log("PASS 2: strictPort 冲突拒绝启动");
 
-      // 3. Windows PowerShell launcher -DryRunJson & AgentHub.vbs presence
-      const vbsPath = path.join(rootDir, "AgentHub.vbs");
-      const psScriptPath = path.join(rootDir, "scripts", "desktop-launcher.ps1");
-      assert.equal(fs.existsSync(vbsPath), true, "AgentHub.vbs 应存在于项目根目录");
-      assert.equal(fs.existsSync(psScriptPath), true, "scripts/desktop-launcher.ps1 应存在");
-
-      if (process.platform === "win32") {
-        const dryOut = execFileSync(
-          "powershell.exe",
-          [
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            psScriptPath,
-            "-PreferredPort",
-            String(occupiedPort),
-            "-TestPort",
-            String(occupiedPort),
-            "-InitialCwd",
-            tmpWorkspace,
-            "-DryRunJson",
-          ],
-          { encoding: "utf8", windowsHide: true },
-        ).trim();
-        const parsed = JSON.parse(dryOut) as {
-          ok: boolean;
-          suggestedPort: number;
-          suggestedPortAvailable: boolean;
-          testPort: number;
-          testPortAvailable: boolean;
-          defaultCwd: string;
-        };
-        assert.equal(parsed.ok, true);
-        assert.equal(parsed.testPort, occupiedPort);
-        assert.equal(parsed.testPortAvailable, false, "PS 启动器应检测到测试端口被占用");
-        assert.notEqual(parsed.suggestedPort, occupiedPort, "PS 启动器应跳过冲突端口");
-        assert.equal(parsed.suggestedPortAvailable, true, "PS 启动器推荐端口应可用");
-        console.log(
-          `PASS 3: PowerShell 桌面启动器 DryRunJson 校验通过 (${occupiedPort} -> ${parsed.suggestedPort})`,
-        );
-      } else {
-        console.log("PASS 3 (non-win32 skipped PS dry-run, checked file presence)");
-      }
+      // 3. Cross-platform desktop launcher: double-click wrappers exist, and the launch plan
+      //    skips an occupied port and honours an explicit workspace.
+      assert.equal(fs.existsSync(path.join(rootDir, "RTM.vbs")), true, "RTM.vbs 应存在于项目根目录");
+      assert.equal(fs.existsSync(path.join(rootDir, "RTM.command")), true, "RTM.command 应存在于项目根目录");
+      const dryOut = execFileSync(
+        process.execPath,
+        [
+          path.join(rootDir, "node_modules", "tsx", "dist", "cli.mjs"),
+          path.join(rootDir, "src", "index.ts"),
+          "desktop",
+          "--dry-run",
+          "--port",
+          String(occupiedPort),
+          "--cwd",
+          tmpWorkspace,
+        ],
+        { encoding: "utf8", windowsHide: true, cwd: rootDir },
+      ).trim();
+      const parsed = JSON.parse(dryOut.split(String.fromCharCode(10)).pop() ?? "{}") as {
+        ok: boolean;
+        port: number;
+        preferredPortAvailable: boolean;
+        cwd: string;
+      };
+      assert.equal(parsed.ok, true);
+      assert.equal(parsed.preferredPortAvailable, false, "启动器应检测到首选端口被占用");
+      assert.notEqual(parsed.port, occupiedPort, "启动器应跳过冲突端口");
+      assert.equal(path.resolve(parsed.cwd), path.resolve(tmpWorkspace), "启动器应使用指定的工作目录");
+      console.log(`PASS 3: 桌面启动器计划校验通过 (${occupiedPort} -> ${parsed.port})`);
     } finally {
       await closeNetServer(occupied.server);
     }

@@ -2730,3 +2730,298 @@ button.insp-agent-row {
   opacity: 0.5;
   pointer-events: none;
 }
+
+
+/* ---------------------------------------------------------------------------
+   "Round table" skin: a night-sky command room. Deep indigo panels, antique
+   gold linework, cut corners and serif titles. The dark variant is the main
+   one; the light variant is ivory paper with the same gold and indigo ink.
+   Like the classic skin it only changes tokens and decoration.
+--------------------------------------------------------------------------- */
+body[data-skin="roundtable"] {
+  --rt-gold: #a8842f;
+  --rt-gold-bright: #c9a44a;
+  --rt-gold-soft: rgba(168, 132, 47, 0.16);
+  --rt-serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", "SimSun", Georgia, serif;
+  --bg: #f4efe2;
+  --bg-panel: #ebe4d2;
+  --bg-elevated: #fbf8ee;
+  --ink: #1c2445;
+  --muted: #505a7c;
+  --faint: #8a8fa6;
+  --line: #d9cdaa;
+  --line-strong: #b9a56c;
+  --line-soft: rgba(28, 36, 69, 0.09);
+  --soft: rgba(28, 36, 69, 0.055);
+  --accent: var(--rt-gold);
+  --accent-soft: var(--rt-gold-soft);
+  --on-ink: #fbf8ee;
+  --r-sm: 3px;
+  --r-md: 4px;
+  --r-lg: 6px;
+}
+
+body.dark[data-skin="roundtable"] {
+  --rt-gold: #d2b061;
+  --rt-gold-bright: #ecd08a;
+  --rt-gold-soft: rgba(210, 176, 97, 0.16);
+  --bg: #0e1530;
+  --bg-panel: #0a1024;
+  --bg-elevated: #161f44;
+  --ink: #eceef8;
+  --muted: #a9b2d2;
+  --faint: #7480a8;
+  --line: #27335f;
+  --line-strong: #44548c;
+  --line-soft: rgba(210, 176, 97, 0.14);
+  --soft: rgba(160, 178, 240, 0.08);
+  --on-ink: #0e1530;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.4), 0 12px 28px -12px rgba(0, 0, 0, 0.8);
+}
+
+/* A faint field of stars behind the conversation, brighter towards the top. */
+body.dark[data-skin="roundtable"] .stage {
+  background:
+    radial-gradient(ellipse 90% 55% at 50% -10%, rgba(92, 116, 214, 0.22), transparent 70%),
+    radial-gradient(circle, rgba(236, 208, 138, 0.5) 0.6px, transparent 1.2px) 0 0 / 137px 113px,
+    radial-gradient(circle, rgba(200, 212, 255, 0.35) 0.5px, transparent 1.1px) 41px 67px / 89px 151px,
+    var(--bg);
+}
+
+body:not(.dark)[data-skin="roundtable"] .stage {
+  background:
+    radial-gradient(ellipse 90% 50% at 50% -10%, rgba(168, 132, 47, 0.13), transparent 70%),
+    var(--bg);
+}
+
+body[data-skin="roundtable"] .stage-header,
+body[data-skin="roundtable"] .stage-mode-bar,
+body[data-skin="roundtable"] .session-tabs {
+  background: transparent;
+}
+
+body[data-skin="roundtable"] .sidebar {
+  border-right-color: var(--line-strong);
+}
+
+body[data-skin="roundtable"] .inspector {
+  border-left-color: var(--line-strong);
+}
+
+body[data-skin="roundtable"] ::selection {
+  background: var(--rt-gold);
+  color: var(--on-ink);
+}
+
+/* Titles in serif with a little air; section labels get a gold lozenge. */
+body[data-skin="roundtable"] .brand-title,
+body[data-skin="roundtable"] .stage-task-title,
+body[data-skin="roundtable"] .panel-sec-title,
+body[data-skin="roundtable"] .settings-nav-title,
+body[data-skin="roundtable"] .settings-pane > h2,
+body[data-skin="roundtable"] .alma-modal-title,
+body[data-skin="roundtable"] .empty-inner h2,
+body[data-skin="roundtable"] .insp-goal {
+  font-family: var(--rt-serif);
+  letter-spacing: 0.04em;
+}
+
+body[data-skin="roundtable"] .section-label > span:first-child::before,
+body[data-skin="roundtable"] .insp-sec > summary > span:first-child::before,
+body[data-skin="roundtable"] .panel-sec-title::before {
+  content: "◆";
+  margin-right: 7px;
+  font-size: 0.62em;
+  vertical-align: 0.18em;
+  color: var(--rt-gold);
+}
+
+body[data-skin="roundtable"] .section-label,
+body[data-skin="roundtable"] .insp-sec > summary {
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+body[data-skin="roundtable"] .panel-sec-head {
+  border-bottom: 1px solid var(--line-strong);
+  box-shadow: 0 2px 0 -1px var(--line-soft);
+}
+
+/* Buttons: cut corners; the primary one is struck gold. */
+body[data-skin="roundtable"] .alma-btn {
+  clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+  border-radius: 0;
+  letter-spacing: 0.04em;
+}
+
+body[data-skin="roundtable"] .alma-btn-outline,
+body[data-skin="roundtable"] .alma-btn-danger {
+  border-color: var(--line-strong);
+  background: var(--soft);
+}
+
+body[data-skin="roundtable"] .alma-btn:hover:not(:disabled) {
+  color: var(--rt-gold-bright);
+  background: var(--rt-gold-soft);
+}
+
+body[data-skin="roundtable"] .alma-btn-outline:hover:not(:disabled) {
+  border-color: var(--rt-gold);
+}
+
+body[data-skin="roundtable"] .alma-btn-primary,
+body[data-skin="roundtable"] .alma-btn-primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, var(--rt-gold-bright), var(--rt-gold));
+  border-color: var(--rt-gold-bright);
+  color: #1b1606;
+  font-weight: 650;
+}
+
+body[data-skin="roundtable"] .alma-btn-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+body[data-skin="roundtable"] .alma-btn-danger:hover:not(:disabled) {
+  color: var(--err);
+  background: var(--err-soft);
+  border-color: var(--err);
+}
+
+/* Tabs and switches pick up the gold. */
+body[data-skin="roundtable"] .mode-tab.active::after {
+  background: linear-gradient(90deg, transparent, var(--rt-gold-bright), transparent);
+  height: 2px;
+}
+
+body[data-skin="roundtable"] .mode-tab.active,
+body[data-skin="roundtable"] .settings-nav button.active {
+  color: var(--rt-gold-bright);
+}
+
+body:not(.dark)[data-skin="roundtable"] .mode-tab.active,
+body:not(.dark)[data-skin="roundtable"] .settings-nav button.active {
+  color: var(--ink);
+}
+
+body[data-skin="roundtable"] .settings-seg button.active,
+body[data-skin="roundtable"] .wf-deps .filter-pill.active {
+  background: linear-gradient(180deg, var(--rt-gold-bright), var(--rt-gold));
+  border-color: var(--rt-gold-bright);
+  color: #1b1606;
+}
+
+body[data-skin="roundtable"] .lead-pill.active {
+  border-color: var(--rt-gold);
+  box-shadow: 0 0 0 1px var(--rt-gold-soft);
+}
+
+/* Cards: hairline frame with gold corner marks instead of soft shadows. */
+body[data-skin="roundtable"] .msg-bubble,
+body[data-skin="roundtable"] .composer-box,
+body[data-skin="roundtable"] .breakdown-card,
+body[data-skin="roundtable"] .stat-card,
+body[data-skin="roundtable"] .agent-cfg-card,
+body[data-skin="roundtable"] .empty-stage,
+body[data-skin="roundtable"] .settings-dialog,
+body[data-skin="roundtable"] .alma-modal-card,
+body[data-skin="roundtable"] .wf-popover {
+  border-color: var(--line-strong);
+  background-image:
+    linear-gradient(var(--rt-gold), var(--rt-gold)), linear-gradient(var(--rt-gold), var(--rt-gold)),
+    linear-gradient(var(--rt-gold), var(--rt-gold)), linear-gradient(var(--rt-gold), var(--rt-gold));
+  background-repeat: no-repeat;
+  background-size: 12px 1px, 1px 12px, 12px 1px, 1px 12px;
+  background-position: left 5px top 5px, left 5px top 5px, right 5px bottom 5px, right 5px bottom 5px;
+}
+
+body[data-skin="roundtable"] .settings-dialog {
+  background-color: var(--bg);
+}
+
+body[data-skin="roundtable"] .msg-entry.role-user .msg-bubble,
+body[data-skin="roundtable"] .msg-entry[data-role="user"] .msg-bubble {
+  background-image: none;
+}
+
+body[data-skin="roundtable"] .composer-box:focus-within {
+  border-color: var(--rt-gold);
+  box-shadow: 0 0 0 3px var(--rt-gold-soft), var(--shadow-md);
+}
+
+body[data-skin="roundtable"] .text-input:focus,
+body[data-skin="roundtable"] .perm-select:focus {
+  border-color: var(--rt-gold);
+  box-shadow: 0 0 0 3px var(--rt-gold-soft);
+}
+
+body[data-skin="roundtable"] .group-card.active {
+  border-color: var(--line-strong);
+  box-shadow: inset 3px 0 0 var(--rt-gold), var(--shadow-sm);
+}
+
+body[data-skin="roundtable"] .insp-agent-row.active,
+body[data-skin="roundtable"] .tree-node.active {
+  border-color: var(--rt-gold);
+}
+
+/* Meters and progress read as gold filling up. */
+body[data-skin="roundtable"] .window-meter-fill {
+  background: linear-gradient(90deg, var(--rt-gold), var(--rt-gold-bright));
+}
+
+body[data-skin="roundtable"] .insp-step.status-completed .insp-step-mark,
+body[data-skin="roundtable"] .link-btn {
+  color: var(--rt-gold);
+}
+
+body.dark[data-skin="roundtable"] .insp-step.status-completed .insp-step-mark,
+body.dark[data-skin="roundtable"] .link-btn {
+  color: var(--rt-gold-bright);
+}
+
+/* Workflow: nodes with cut corners on a darker chart. */
+body[data-skin="roundtable"] .wf-node {
+  border-radius: 0;
+  clip-path: polygon(9px 0, 100% 0, 100% calc(100% - 9px), calc(100% - 9px) 100%, 0 100%, 0 9px);
+}
+
+body[data-skin="roundtable"] .wf-node.selected,
+body[data-skin="roundtable"] .wf-node:hover {
+  border-color: var(--rt-gold-bright);
+}
+
+body[data-skin="roundtable"] .wf-edge.done {
+  stroke: var(--rt-gold);
+}
+
+body[data-skin="roundtable"] .wf-canvas-wrap {
+  background:
+    radial-gradient(circle, var(--line-strong) 0.8px, transparent 1px) 0 0 / 22px 22px,
+    var(--bg-panel);
+}
+
+body[data-skin="roundtable"] .mode-badge,
+body[data-skin="roundtable"] .context-pill {
+  border-color: var(--line-strong);
+}
+
+body[data-skin="roundtable"] .brand-title {
+  font-size: 16px;
+}
+
+body[data-skin="roundtable"] *::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+body[data-skin="roundtable"] *::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+}
+
+body[data-skin="roundtable"] *::-webkit-scrollbar-track {
+  background: transparent;
+}

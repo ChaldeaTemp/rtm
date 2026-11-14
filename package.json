@@ -15,6 +15,7 @@
     "start": "tsx src/index.ts",
     "ui": "tsx src/index.ts --ui",
     "desktop": "tsx src/index.ts desktop",
+    "shortcut": "tsx src/index.ts shortcut",
     "status": "tsx src/index.ts status",
     "verify": "tsx scripts/verify-phase1.ts",
     "verify:phase2-3": "tsx scripts/verify-phase2-3.ts",

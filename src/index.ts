@@ -4,6 +4,7 @@ import type { AgentId, PermissionMode } from "./types.js";
 import { findAvailablePort } from "./hub/port-finder.js";
 import { checkAdaptersHealth, PROJECT_ROOT } from "./hub/process-tree.js";
 import { AgentHubServer, readRuntimeFile } from "./hub/server.js";
+import { createDesktopShortcut, planDesktopLaunch, saveDesktopPrefs } from "./desktop.js";
 import { runRepl } from "./cli/repl.js";
 import { openInteractiveWindow } from "./ui/launcher.js";
 
@@ -20,6 +21,13 @@ function parseCliFlags(argv: string[]): {
   autoExitGraceMs?: number;
   permissionMode: PermissionMode;
   positionals: string[];
+  /** --port / --cwd were given, so they override the saved desktop preferences. */
+  portExplicit: boolean;
+  cwdExplicit: boolean;
+  /** desktop: show the folder dialog even though a workspace is remembered. */
+  chooseDir: boolean;
+  /** desktop: print the launch plan as JSON and exit without starting anything. */
+  dryRun: boolean;
 } {
   let command: string | undefined;
   let lead: AgentId | undefined;
@@ -33,6 +41,10 @@ function parseCliFlags(argv: string[]): {
   let autoExitGraceMs: number | undefined;
   let permissionMode: PermissionMode = "approve-all";
   const positionals: string[] = [];
+  let portExplicit = false;
+  let cwdExplicit = false;
+  let chooseDir = false;
+  let dryRun = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -61,15 +73,21 @@ function parseCliFlags(argv: string[]): {
       }
     } else if (arg === "--cwd" && argv[i + 1]) {
       cwd = path.resolve(argv[++i]!);
+      cwdExplicit = true;
     } else if (arg === "--port" && argv[i + 1]) {
       port = Number(argv[++i]!) || 4317;
+      portExplicit = true;
+    } else if (arg === "--choose-dir") {
+      chooseDir = true;
+    } else if (arg === "--dry-run") {
+      dryRun = true;
     } else if (arg === "--approve" && argv[i + 1]) {
       const val = argv[++i]!;
       if (val === "all" || val === "approve-all") permissionMode = "approve-all";
       else if (val === "reads" || val === "approve-reads") permissionMode = "approve-reads";
       else if (val === "manual") permissionMode = "manual";
       else throw new Error(`Invalid --approve mode: ${val}`);
-    } else if (!command && (arg === "status" || arg === "exec" || arg === "ui" || arg === "desktop")) {
+    } else if (!command && (arg === "status" || arg === "exec" || arg === "ui" || arg === "desktop" || arg === "shortcut")) {
       command = arg;
       if (arg === "ui") openUi = true;
     } else {
@@ -90,32 +108,44 @@ function parseCliFlags(argv: string[]): {
     autoExitGraceMs,
     permissionMode,
     positionals,
+    portExplicit,
+    cwdExplicit,
+    chooseDir,
+    dryRun,
   };
 }
 
 async function main(): Promise<void> {
   const opts = parseCliFlags(process.argv.slice(2));
 
+  if (opts.command === "shortcut") {
+    console.log(`Desktop shortcut created: ${createDesktopShortcut()}`);
+    return;
+  }
+
   if (opts.command === "desktop") {
-    if (process.platform === "win32") {
-      const psScript = path.join(PROJECT_ROOT, "scripts", "desktop-launcher.ps1");
-      const child = spawn(
-        "powershell.exe",
-        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Sta", "-File", psScript],
-        {
-          cwd: PROJECT_ROOT,
-          detached: true,
-          stdio: "ignore",
-          windowsHide: true,
-        },
-      );
-      child.unref();
+    const plan = await planDesktopLaunch({
+      port: opts.portExplicit ? opts.port : undefined,
+      cwd: opts.cwdExplicit ? opts.cwd : undefined,
+      chooseDir: opts.chooseDir,
+      ignoreRunning: opts.dryRun,
+    });
+    if (opts.dryRun) {
+      console.log(JSON.stringify({ ok: true, ...plan }));
+      return;
+    }
+    if (plan.reuseUrl) {
+      // Already running: a second launch only brings up another window.
+      if (!opts.noOpen) openInteractiveWindow(plan.reuseUrl, true);
+      console.log(`RTM is already running at ${plan.reuseUrl}`);
       return;
     }
     opts.desktopMode = true;
     opts.openUi = true;
-    opts.autoExit = true;
-    opts.port = await findAvailablePort(opts.port);
+    opts.autoExit = plan.autoExit;
+    opts.port = plan.port;
+    opts.cwd = plan.cwd;
+    saveDesktopPrefs({ port: plan.port, cwd: plan.cwd, autoExit: plan.autoExit });
   }
 
   if (opts.command === "status") {

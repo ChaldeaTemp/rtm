@@ -16,7 +16,8 @@
   <script>
     try {
       if (localStorage.getItem("agent-hub-theme") === "dark") document.body.classList.add("dark");
-      if (localStorage.getItem("agent-hub-skin") === "classic") document.body.dataset.skin = "classic";
+      var savedSkin = localStorage.getItem("agent-hub-skin");
+      if (savedSkin === "classic" || savedSkin === "roundtable") document.body.dataset.skin = savedSkin;
     } catch (e) {}
   </script>
   <div id="workbench" class="workbench">
@@ -276,11 +277,12 @@
           <div class="settings-row">
             <div>
               <div class="settings-label">风格</div>
-              <div class="settings-note">经典是原来的米色背景和方角框线。</div>
+              <div class="settings-note">经典是原来的米色背景和方角框线；圆桌是深蓝配金线，配深色主题最好看。</div>
             </div>
             <div class="settings-seg" id="skinSeg">
               <button type="button" data-skin="modern">简约</button>
               <button type="button" data-skin="classic">经典</button>
+              <button type="button" data-skin="roundtable">圆桌</button>
             </div>
           </div>
           <div class="settings-row">

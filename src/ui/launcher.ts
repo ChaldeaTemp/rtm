@@ -12,11 +12,34 @@ const WINDOWS_APP_BROWSERS = [
   path.join(process.env.LOCALAPPDATA ?? "", "Google\\Chrome\\Application\\chrome.exe"),
 ];
 
+const MAC_APP_BROWSERS = [
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+  "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+  "/Applications/Chromium.app/Contents/MacOS/Chromium",
+  "/Applications/Arc.app/Contents/MacOS/Arc",
+];
+
+const LINUX_APP_BROWSER_NAMES = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"];
+
+/** A Chromium-family browser that can open the workbench as a chromeless app window. */
 function findAppBrowserExecutable(): string | undefined {
-  if (process.platform !== "win32") {
-    return undefined;
+  if (process.platform === "win32") {
+    return WINDOWS_APP_BROWSERS.find((candidate) => candidate && fs.existsSync(candidate));
   }
-  return WINDOWS_APP_BROWSERS.find((candidate) => candidate && fs.existsSync(candidate));
+  if (process.platform === "darwin") {
+    const home = process.env.HOME ?? "";
+    return [...MAC_APP_BROWSERS, ...MAC_APP_BROWSERS.map((p) => path.join(home, p))].find((candidate) =>
+      fs.existsSync(candidate),
+    );
+  }
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+    for (const name of LINUX_APP_BROWSER_NAMES) {
+      const candidate = path.join(dir, name);
+      if (dir && fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -28,37 +51,38 @@ export function openInteractiveWindow(
   preferAppWindow = true,
   options?: { profileDir?: string },
 ): { mode: "app" | "browser"; executable?: string } {
-  if (process.platform === "win32") {
-    if (preferAppWindow) {
-      const exe = findAppBrowserExecutable();
-      if (exe) {
-        const profileDir =
-          options?.profileDir ?? path.join(PROJECT_ROOT, ".agent-hub", "desktop-browser-profile");
-        fs.mkdirSync(profileDir, { recursive: true });
-        const child = spawn(
-          exe,
-          [
-            `--app=${url}`,
-            `--user-data-dir=${profileDir}`,
-            "--window-size=1420,900",
-            "--no-first-run",
-            "--no-default-browser-check",
-            // App window, not a browser: no translate bar, no password or autofill prompts.
-            "--disable-features=Translate,AutofillServerCommunication,PasswordManagerOnboarding",
-            "--disable-save-password-bubble",
-          ],
-          {
-            detached: true,
-            stdio: "ignore",
-            windowsHide: false,
-          },
-        );
-        // A missing browser/opener must not crash the hub.
-        child.on("error", () => {});
-        child.unref();
-        return { mode: "app", executable: exe };
-      }
+  if (preferAppWindow) {
+    const exe = findAppBrowserExecutable();
+    if (exe) {
+      const profileDir =
+        options?.profileDir ?? path.join(PROJECT_ROOT, ".agent-hub", "desktop-browser-profile");
+      fs.mkdirSync(profileDir, { recursive: true });
+      const child = spawn(
+        exe,
+        [
+          `--app=${url}`,
+          `--user-data-dir=${profileDir}`,
+          "--window-size=1420,900",
+          "--no-first-run",
+          "--no-default-browser-check",
+          // App window, not a browser: no translate bar, no password or autofill prompts.
+          "--disable-features=Translate,AutofillServerCommunication,PasswordManagerOnboarding",
+          "--disable-save-password-bubble",
+        ],
+        {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: false,
+        },
+      );
+      // A missing browser/opener must not crash the hub.
+      child.on("error", () => {});
+      child.unref();
+      return { mode: "app", executable: exe };
     }
+  }
+
+  if (process.platform === "win32") {
     const child = spawn("cmd", ["/c", "start", "", url], {
       detached: true,
       stdio: "ignore",

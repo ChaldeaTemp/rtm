@@ -1,8 +1,12 @@
 # RTM（Round Table Meeting）
 
+简体中文 | [English](README.en.md)
+
 RTM 是一个跑在本机的多 Agent 协作台：把 claude、codex、opencode、kimi 等命令行 Agent 接到同一个界面里，让一个 Agent 主导任务，其余的作为子会话协同。
 
 > 名称和图标是暂定的，后续还会调整。当前版本 0.1.0，适合自用和小范围试用。
+
+![对话页：主导会话、进度面板和子代理](docs/screenshots/chat.png)
 
 ## 它能做什么
 
@@ -14,11 +18,14 @@ RTM 是一个跑在本机的多 Agent 协作台：把 claude、codex、opencode�
 - **多目录和项目**：任务可以跨多个目录工作，侧栏按项目分组；任务可以归档和恢复。
 - **重启不丢**：任务、消息、工作流、进度都会保存，重启后接着用。
 
+![工作流：从左到右执行，同一列的步骤同时进行](docs/screenshots/workflow.png)
+
 ## 运行要求
 
-- Node.js 22 或更高版本（开发时用的是 24）。
+- Node.js 22 或更高版本。
 - 至少装好并登录一个支持 ACP 的命令行 Agent，例如 Claude Code、Codex、OpenCode、Kimi。
-- 目前主要在 Windows 上使用和验证，macOS 和 Linux 没有专门测试。
+- 一个 Chromium 内核的浏览器（Edge、Chrome、Brave 等），用来以应用窗口打开界面；没有的话会退回到系统默认浏览器。
+- Windows 和 macOS 用同一套启动方式。日常使用和验证主要在 Windows 上，macOS 的启动流程是按相同逻辑实现的，尚未在真机上跑过。
 
 ## 开始使用
 
@@ -26,19 +33,42 @@ RTM 是一个跑在本机的多 Agent 协作台：把 claude、codex、opencode�
 npm install
 ```
 
+之后任选一种方式启动：
+
+| 方式 | Windows | macOS |
+|---|---|---|
+| 双击启动 | `RTM.vbs` | `RTM.command` |
+| 命令行 | `npm run desktop` | `npm run desktop` |
+
+启动时会做这几件事：
+
+1. 如果 RTM 已经在运行，只是再开一个窗口。
+2. 否则沿用上次的工作目录和端口；端口被占用时自动换一个。第一次启动会弹出系统的文件夹选择框，让你选工作目录。
+3. 以应用窗口打开界面。关掉窗口后服务会自动退出。
+
+想把启动入口放到桌面：
+
 ```bash
-npm run ui
+npm run shortcut
 ```
 
-`npm run ui` 会启动本地服务并打开界面。其他启动方式：
+`npm run desktop` 后面可以跟参数，例如 `npm run desktop -- --choose-dir`：
+
+| 参数 | 作用 |
+|---|---|
+| `--choose-dir` | 重新选择工作目录 |
+| `--cwd <目录>` | 直接指定工作目录 |
+| `--port <端口>` | 指定端口 |
+| `--lead <agent>` | 指定这次运行的默认主导 |
+| `--no-open` | 只启动服务，不开窗口 |
+
+其他命令：
 
 | 命令 | 作用 |
 |---|---|
-| `npm run desktop` | 先弹出启动器选端口和工作目录，再以应用窗口打开 |
-| `npm start` | 命令行交互模式 |
+| `npm run ui` | 在当前目录启动，并在终端里保留命令行交互 |
+| `npm start` | 只有命令行交互，不开界面 |
 | `npm run status` | 查看各 Agent 是否已安装、已登录 |
-
-启动时可以加 `--lead <agent>` 指定这次运行的默认主导；长期的默认主导在界面的「设置 → Agent」里设置。
 
 ## 接入 Agent
 
@@ -47,6 +77,14 @@ npm run ui
 1. 本机已安装的常见 CLI 会被自动识别，点一下即可添加。
 2. 填工具名，交给已接入的 Agent 去找启动命令并完成登记。
 3. 手动填写启动命令和参数。
+
+长期的默认主导也在这里设置。
+
+## 外观
+
+「设置 → 通用」里有三套风格可选：简约、经典、圆桌，各自都有浅色和深色。
+
+![圆桌皮肤，深色](docs/screenshots/skin-roundtable.png)
 
 ## 使用前请知道
 
@@ -69,7 +107,10 @@ npm run typecheck
 - `src/hub/`：本地服务，包括会话池、Agent 注册、共享资源、工作流、状态保存
 - `src/mcp/`：提供给各 Agent 的 MCP 工具（委派、提问、进度、工作流等）
 - `src/ui/`：界面，原生 JavaScript，没有构建步骤
-- `scripts/`：验证脚本、性能测量脚本和桌面启动器
+- `src/desktop.ts`：桌面启动流程，Windows 和 macOS 共用
+- `scripts/`：验证脚本和性能测量脚本
+
+截图里的任务和对话是演示数据。
 
 ## 许可证
 
