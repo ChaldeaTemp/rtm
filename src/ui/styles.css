@@ -3025,3 +3025,278 @@ body[data-skin="roundtable"] *::-webkit-scrollbar-thumb {
 body[data-skin="roundtable"] *::-webkit-scrollbar-track {
   background: transparent;
 }
+
+
+/* ---------------------------------------------------------------------------
+   Inspector link row, thinking state, workflow card, queued messages
+--------------------------------------------------------------------------- */
+.insp-link-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  margin-top: 2px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background-color 0.14s var(--ease), border-color 0.14s var(--ease), color 0.14s var(--ease);
+}
+
+.insp-link-row:hover {
+  background: var(--soft);
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.insp-link-arrow {
+  color: var(--faint);
+  font-size: 15px;
+  line-height: 1;
+}
+
+/* Thinking: three dots that breathe, and a thin moving line across the top of the stage. */
+.msg-waiting.is-thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+}
+
+.thinking-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.thinking-dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: thinking-bounce 1.2s ease-in-out infinite;
+}
+
+.thinking-dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.thinking-dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes thinking-bounce {
+  0%, 60%, 100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+/* While text is arriving, a soft caret follows the last line. */
+.msg-entry.is-streaming .md-body > :last-child:not(.msg-waiting)::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  margin-left: 3px;
+  vertical-align: -0.15em;
+  background: var(--accent);
+  opacity: 0.6;
+  animation: thinking-caret 1s steps(2, start) infinite;
+}
+
+@keyframes thinking-caret {
+  to {
+    opacity: 0;
+  }
+}
+
+.stage {
+  position: relative;
+}
+
+.stage.is-busy::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: 5;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: stage-busy 1.6s linear infinite;
+}
+
+@keyframes stage-busy {
+  from {
+    background-position: -40% 0;
+  }
+  to {
+    background-position: 140% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-dots i,
+  .msg-entry.is-streaming .md-body > :last-child:not(.msg-waiting)::after,
+  .stage.is-busy::before {
+    animation: none;
+  }
+  .stage.is-busy::before {
+    background-size: 100% 100%;
+    opacity: 0.6;
+  }
+}
+
+/* Workflow preview card under the message that proposed it */
+.wf-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: border-color 0.14s var(--ease), box-shadow 0.14s var(--ease);
+}
+
+.wf-card:hover {
+  border-color: var(--ink);
+  box-shadow: var(--shadow-md);
+}
+
+.wf-card.status-running {
+  border-color: var(--warn);
+}
+
+.wf-card.status-completed {
+  border-color: var(--accent);
+}
+
+.wf-card-head,
+.wf-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.wf-card-title {
+  font-weight: 600;
+}
+
+.wf-card-status,
+.wf-card-more {
+  font-size: 12.5px;
+  color: var(--faint);
+}
+
+.wf-card-steps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.wf-card-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wf-card-step.status-completed {
+  color: var(--faint);
+}
+
+.wf-card-arrow {
+  color: var(--faint);
+}
+
+.wf-card-agents {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.wf-card-open {
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.wf-card:hover .wf-card-open {
+  color: var(--ink);
+}
+
+/* Messages waiting for the current turn to end */
+.composer-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px 5px 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--soft);
+  font-size: 13px;
+}
+
+.queue-item.is-steer {
+  border-style: solid;
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.queue-tag {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.queue-item.is-steer .queue-tag {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.queue-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-att {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--faint);
+}

@@ -125,6 +125,7 @@ const ChatBodySchema = z
     prompt: z.string().optional().default(""),
     images: z.array(ChatImageInputSchema).max(6).optional(),
     files: z.array(ChatFileInputSchema).max(MAX_FILES_PER_MESSAGE).optional(),
+    steer: z.boolean().optional(),
     leadAgent: AgentIdSchema.optional(),
     cwd: z.string().optional(),
     session: z.string().optional(),
@@ -173,6 +174,7 @@ const SessionChatBodySchema = z
     prompt: z.string().optional().default(""),
     images: z.array(ChatImageInputSchema).max(6).optional(),
     files: z.array(ChatFileInputSchema).max(MAX_FILES_PER_MESSAGE).optional(),
+    steer: z.boolean().optional(),
     model: z.string().optional(),
     effort: z.string().optional(),
   })
@@ -574,6 +576,13 @@ function autoTitleFromPrompt(prompt: string): string {
   }
   return firstLine.length > 26 ? `${firstLine.slice(0, 26)}…` : firstLine;
 }
+
+/**
+ * Put in front of a message the user sent to redirect a turn they interrupted. The transcript
+ * shows the user's words only; the agent also needs to know why its turn was cut short.
+ */
+const STEER_PREFIX =
+  "[The user interrupted your previous turn on purpose to steer you. Take the guidance below into account, then continue the task you were working on; do not start over unless the guidance says so.]\n\n";
 
 /** Tells the agent where the attached files were saved; empty when there are none. */
 function buildAttachedFilesBlock(files: ChatFileAttachment[]): string {
@@ -2292,6 +2301,8 @@ export class AgentHubServer {
     prompt?: string;
     images?: Array<{ name?: string; mimeType: string; data: string }>;
     files?: Array<{ name: string; mimeType?: string; data: string }>;
+    /** The user interrupted the running turn to redirect it; the agent is told so. */
+    steer?: boolean;
     leadAgent?: AgentId;
     cwd?: string;
     session?: string;
@@ -2322,7 +2333,7 @@ export class AgentHubServer {
     if (!effectiveUserPrompt) {
       throw new Error("请输入消息内容，或至少附带一张图片或一个文件");
     }
-    const promptForAgent = `${effectiveUserPrompt}${buildAttachedFilesBlock(savedFiles)}`;
+    const promptForAgent = `${input.steer ? STEER_PREFIX : ""}${effectiveUserPrompt}${buildAttachedFilesBlock(savedFiles)}`;
 
     if (group.archived) {
       throw new Error("这个任务已归档，先恢复再发消息");
@@ -2485,6 +2496,7 @@ export class AgentHubServer {
     prompt?: string;
     images?: Array<{ name?: string; mimeType: string; data: string }>;
     files?: Array<{ name: string; mimeType?: string; data: string }>;
+    steer?: boolean;
     model?: string;
     effort?: string;
   }): Promise<{
@@ -2510,7 +2522,7 @@ export class AgentHubServer {
     if (!effectiveUserPrompt) {
       throw new Error("请输入消息内容，或至少附带一张图片或一个文件");
     }
-    const promptForAgent = `${effectiveUserPrompt}${buildAttachedFilesBlock(savedFiles)}`;
+    const promptForAgent = `${input.steer ? STEER_PREFIX : ""}${effectiveUserPrompt}${buildAttachedFilesBlock(savedFiles)}`;
 
     const streamKey = `sub:${session.sessionKey}`;
     const now = Date.now();

@@ -37,6 +37,7 @@ const STATE = {
   showArchivedGroups: false,
   draftsByStream: new Map(),
   imageDraftsByStream: new Map(),
+  queuedByStream: new Map(),
   qsItems: [],
   qsActiveIndex: 0,
 };
@@ -103,6 +104,8 @@ const els = {
   attachImageBtn: document.getElementById("attachImageBtn"),
   composerHint: document.getElementById("composerHint"),
   stopSessionBtn: document.getElementById("stopSessionBtn"),
+  steerBtn: document.getElementById("steerBtn"),
+  composerQueue: document.getElementById("composerQueue"),
   sendBtn: document.getElementById("sendBtn"),
   inspSessionCount: document.getElementById("inspSessionCount"),
   inspSessions: document.getElementById("inspSessions"),
@@ -1593,9 +1596,15 @@ function renderStageHeaderAndTabs() {
   const isBusy =
     STATE.sendingStreams.has(STATE.activeStreamKey) ||
     Boolean(activeKey && isSessionRunning(activeKey));
-  els.sendBtn.disabled = STATE.sendingStreams.has(STATE.activeStreamKey);
-  els.sendBtn.textContent = STATE.sendingStreams.has(STATE.activeStreamKey) ? "执行中" : "发送";
+  // 忙的时候仍然可以发：默认排队，等这一轮结束再送出；「引导」则打断当前这一轮
+  els.sendBtn.disabled = false;
+  els.sendBtn.textContent = isBusy ? "排队" : "发送";
+  els.sendBtn.title = isBusy ? "这一轮结束后自动发送（Enter）" : "";
   els.stopSessionBtn.hidden = !isBusy;
+  if (els.steerBtn) els.steerBtn.hidden = !isBusy;
+  // 页面级的「正在工作」提示：对话区顶部一条流动的细线
+  document.querySelector("main.stage")?.classList.toggle("is-busy", isBusy);
+  renderComposerQueue();
   renderModelSelectorBar();
 }
 
@@ -1789,6 +1798,52 @@ function renderEmptyStage(group) {
   return box;
 }
 
+const WORKFLOW_STATUS_TEXT = { draft: "草稿，待发布", running: "运行中", completed: "已完成", failed: "未全部完成" };
+
+// 主导调用 workflow_propose 之后，在那条回复下面放一张工作流预览；点一下去工作流页
+function buildWorkflowCardElement(msg) {
+  if (msg.role !== "assistant" || isSubStream(msg.streamKey)) return null;
+  if (!(msg.toolCalls || []).some((t) => String(t.title || "").includes("workflow_propose"))) return null;
+  const workflow = STATE.workflows.get(msg.groupId);
+  if (!workflow || workflow.steps.length === 0) return null;
+
+  const done = workflow.steps.filter((s) => s.status === "completed").length;
+  const statusText =
+    workflow.status === "running"
+      ? `运行中 ${done}/${workflow.steps.length}`
+      : WORKFLOW_STATUS_TEXT[workflow.status] || workflow.status;
+  const agents = [...new Set(workflow.steps.map((s) => s.agent))];
+  const shown = workflow.steps.slice(0, 5);
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = `wf-card status-${workflow.status}`;
+  card.title = "打开工作流";
+  card.innerHTML = `
+    <div class="wf-card-head">
+      <span class="wf-card-title">工作流 · ${workflow.steps.length} 步</span>
+      <span class="wf-card-status">${escapeHtml(statusText)}</span>
+    </div>
+    <div class="wf-card-steps">
+      ${shown
+        .map(
+          (s) => `<span class="wf-card-step status-${escapeHtml(s.status)}"><span class="dot ${s.status === "running" ? "busy" : s.status === "completed" ? "completed" : s.status === "failed" ? "failed" : "idle"}"></span>${escapeHtml(s.name)}</span>`,
+        )
+        .join('<span class="wf-card-arrow">›</span>')}
+      ${workflow.steps.length > shown.length ? `<span class="wf-card-more">还有 ${workflow.steps.length - shown.length} 步</span>` : ""}
+    </div>
+    <div class="wf-card-foot">
+      <span class="wf-card-agents">${agents.map((a) => agentTagHtml(a)).join("")}</span>
+      <span class="wf-card-open">查看并发布 ›</span>
+    </div>
+  `;
+  const groupId = msg.groupId;
+  card.onclick = () => {
+    if (STATE.activeGroupId !== groupId) selectGroup(groupId, `lead:${groupId}`);
+    setStageView("workflow");
+  };
+  return card;
+}
+
 const TOOL_STATUS_TEXT = { pending: "等待中", in_progress: "进行中", completed: "完成", failed: "失败" };
 const TASK_STATUS_TEXT = { queued: "排队中", running: "进行中", completed: "已完成", failed: "失败", cancelled: "已取消" };
 
@@ -1972,7 +2027,7 @@ async function regenerateAssistantMessage(streamKey, messageId) {
 
 function buildMessageElement(msg, linkedTasks) {
   const entry = document.createElement("div");
-  entry.className = `msg-entry role-${msg.role}`;
+  entry.className = `msg-entry role-${msg.role}${msg.status === "streaming" ? " is-streaming" : ""}`;
   entry.dataset.messageId = msg.messageId;
 
   if (msg.role === "system") {
@@ -2091,7 +2146,7 @@ function buildMessageElement(msg, linkedTasks) {
       bubble.appendChild(body);
     } else if (msg.status === "streaming") {
       // 高思考强度下第一句话可能要等几分钟；显示已等多久，免得看起来像卡住
-      body.innerHTML = `<span class="msg-waiting">思考中 <span class="msg-elapsed" data-since="${Number(msg.timestamp) || Date.now()}"></span></span>`;
+      body.innerHTML = `<span class="msg-waiting is-thinking"><span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>思考中 <span class="msg-elapsed" data-since="${Number(msg.timestamp) || Date.now()}"></span></span>`;
       bubble.appendChild(body);
     } else if (artifactList.length === 0) {
       body.innerHTML =
@@ -2198,6 +2253,8 @@ function buildMessageElement(msg, linkedTasks) {
   if (toolsEl) entry.appendChild(toolsEl);
   entry.appendChild(bubble);
   if (delegEl) entry.appendChild(delegEl);
+  const wfCard = buildWorkflowCardElement(msg);
+  if (wfCard) entry.appendChild(wfCard);
   return entry;
 }
 
@@ -2481,8 +2538,8 @@ function renderInspector() {
     `;
     const more = document.createElement("button");
     more.type = "button";
-    more.className = "link-btn";
-    more.textContent = "查看上下文分析";
+    more.className = "insp-link-row";
+    more.innerHTML = '<span>上下文分析</span><span class="insp-link-arrow">›</span>';
     more.onclick = () => setStageView("telemetry");
     box.appendChild(more);
     els.inspContext.appendChild(box);
@@ -2918,7 +2975,7 @@ async function addImageFilesToComposer(fileList) {
   }
 }
 
-async function sendStreamPrompt(prompt, targetStreamKey, images = []) {
+async function sendStreamPrompt(prompt, targetStreamKey, images = [], options = {}) {
   const cleanPrompt = (prompt || "").trim();
   const allAttachments = Array.isArray(images) ? images : [];
   const cleanImages = allAttachments.filter((a) => !a.isFile);
@@ -2958,6 +3015,7 @@ async function sendStreamPrompt(prompt, targetStreamKey, images = []) {
     if (cleanFiles.length > 0) {
       payload.files = cleanFiles.map((f) => ({ name: f.name, mimeType: f.mimeType || undefined, data: f.base64 }));
     }
+    if (options.steer) payload.steer = true;
     const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2976,25 +3034,123 @@ async function sendStreamPrompt(prompt, targetStreamKey, images = []) {
     if (targetStreamKey === STATE.activeStreamKey) {
       els.promptInput.focus();
     }
+    // 会话状态的更新可能稍晚到；稍等一下再看要不要送出排队的消息
+    setTimeout(() => flushQueue(targetStreamKey), 150);
   }
 }
 
-async function sendPrompt() {
+function streamSessionKey(streamKey) {
+  if (isSubStream(streamKey)) return streamKey.slice(4);
+  const group = STATE.taskGroups.get(streamKey.slice(5));
+  return group ? `${group.leadAgent}:${group.groupId}__lead` : null;
+}
+
+function isStreamBusy(streamKey) {
+  return STATE.sendingStreams.has(streamKey) || isSessionRunning(streamSessionKey(streamKey));
+}
+
+// 排队：这一轮还没结束时发的消息先放着，结束后按顺序送出。只在本页面里，刷新会清空
+function getQueue(streamKey) {
+  return STATE.queuedByStream.get(streamKey) || [];
+}
+
+function renderComposerQueue() {
+  if (!els.composerQueue) return;
+  const queue = getQueue(STATE.activeStreamKey);
+  els.composerQueue.innerHTML = "";
+  els.composerQueue.hidden = queue.length === 0;
+  queue.forEach((item, index) => {
+    const row = document.createElement("div");
+    row.className = `queue-item${item.steer ? " is-steer" : ""}`;
+    const tag = document.createElement("span");
+    tag.className = "queue-tag";
+    tag.textContent = item.steer ? "引导" : `排队 ${index + 1}`;
+    const text = document.createElement("span");
+    text.className = "queue-text";
+    text.textContent = item.prompt || `${item.attachments.length} 个附件`;
+    text.title = item.prompt;
+    row.appendChild(tag);
+    row.appendChild(text);
+    if (item.attachments.length > 0 && item.prompt) {
+      const att = document.createElement("span");
+      att.className = "queue-att";
+      att.textContent = `${item.attachments.length} 个附件`;
+      row.appendChild(att);
+    }
+    if (!item.steer) {
+      const steer = document.createElement("button");
+      steer.type = "button";
+      steer.className = "mini-icon-btn";
+      steer.title = "不等了：打断当前这一轮，立刻用这条消息引导";
+      steer.textContent = "↑";
+      steer.onclick = () => steerWithQueued(STATE.activeStreamKey, item.id);
+      row.appendChild(steer);
+    }
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "mini-icon-btn";
+    remove.title = "取消这条";
+    remove.textContent = "×";
+    remove.onclick = () => {
+      STATE.queuedByStream.set(STATE.activeStreamKey, getQueue(STATE.activeStreamKey).filter((q) => q.id !== item.id));
+      renderComposerQueue();
+    };
+    row.appendChild(remove);
+    els.composerQueue.appendChild(row);
+  });
+}
+
+function enqueuePrompt(streamKey, prompt, attachments, steer) {
+  const item = { id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, prompt, attachments, steer };
+  const queue = getQueue(streamKey);
+  // 引导要抢在排队的消息前面
+  STATE.queuedByStream.set(streamKey, steer ? [item, ...queue.filter((q) => !q.steer)] : [...queue, item]);
+  renderComposerQueue();
+}
+
+// 这一轮结束了就把队首送出去。发送本身会再次触发这里，所以队列是一条一条排空的
+function flushQueue(streamKey) {
+  const queue = getQueue(streamKey);
+  if (queue.length === 0 || isStreamBusy(streamKey)) return;
+  const [next, ...rest] = queue;
+  STATE.queuedByStream.set(streamKey, rest);
+  renderComposerQueue();
+  void sendStreamPrompt(next.prompt, streamKey, next.attachments, { steer: next.steer });
+}
+
+// 引导：打断当前这一轮，等它停下后把这条消息作为引导送出
+function steerWithQueued(streamKey, itemId) {
+  const queue = getQueue(streamKey);
+  const item = queue.find((q) => q.id === itemId);
+  if (!item) return;
+  item.steer = true;
+  STATE.queuedByStream.set(streamKey, [item, ...queue.filter((q) => q.id !== itemId && !q.steer)]);
+  renderComposerQueue();
+  if (isStreamBusy(streamKey)) {
+    void cancelSession(streamSessionKey(streamKey));
+  } else {
+    flushQueue(streamKey);
+  }
+}
+
+async function sendPrompt(options = {}) {
   const prompt = els.promptInput.value.trim();
   const group = getActiveGroup();
   const targetStreamKey = STATE.activeStreamKey;
   const images = [...getActiveImageDrafts(targetStreamKey)];
   if ((!prompt && images.length === 0) || !group) return;
 
-  if (STATE.sendingStreams.has(targetStreamKey)) {
-    return;
-  }
-
   els.promptInput.value = "";
   els.promptInput.style.height = "auto";
   STATE.draftsByStream.delete(targetStreamKey);
   STATE.imageDraftsByStream.delete(targetStreamKey);
   renderComposerAttachments();
+
+  if (isStreamBusy(targetStreamKey)) {
+    enqueuePrompt(targetStreamKey, prompt, images, Boolean(options.steer));
+    if (options.steer) void cancelSession(streamSessionKey(targetStreamKey));
+    return;
+  }
   await sendStreamPrompt(prompt, targetStreamKey, images);
 }
 
@@ -3128,6 +3284,10 @@ function connectWs() {
         appendLog(`${msg.workflow.proposedBy} 起草了一个 ${msg.workflow.steps.length} 步的工作流，等待发布`);
         document.querySelector('.mode-tab[data-stage-view="workflow"]')?.classList.add("has-news");
       }
+      // 对话里的工作流预览卡片要跟着状态变
+      if (msg.workflow.groupId === STATE.activeGroupId && STATE.stageView === "chat") {
+        scheduleUiRender(UI_REGION.messages);
+      }
       window.HUB_APP?.onStateChange?.();
     } else if (msg.type === "settings_updated") {
       applyHubSettings(msg.settings);
@@ -3253,6 +3413,10 @@ function connectWs() {
       }
     } else if (msg.type === "session_updated") {
       STATE.sessions.set(msg.session.sessionKey, msg.session);
+      if (msg.session.status === "idle" && STATE.queuedByStream.size > 0) {
+        const streamKey = msg.session.role === "lead" ? `lead:${msg.session.groupId}` : `sub:${msg.session.sessionKey}`;
+        setTimeout(() => flushQueue(streamKey), 150);
+      }
       scheduleUiRender(
         UI_REGION.sidebar |
           UI_REGION.header |
@@ -3503,9 +3667,13 @@ els.promptInput.addEventListener("keydown", (e) => {
   if (e.isComposing || e.keyCode === 229) return;
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
-    void sendPrompt();
+    void sendPrompt({ steer: (e.ctrlKey || e.metaKey) && isStreamBusy(STATE.activeStreamKey) });
   }
 });
+
+if (els.steerBtn) {
+  els.steerBtn.onclick = () => void sendPrompt({ steer: true });
+}
 
 if (els.attachImageBtn && els.imageFileInput) {
   els.attachImageBtn.onclick = () => els.imageFileInput.click();

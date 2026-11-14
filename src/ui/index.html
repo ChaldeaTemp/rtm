@@ -203,6 +203,7 @@
           <span class="alma-box-corner-tr">+</span>
           <span class="alma-box-corner-bl">+</span>
           <span class="alma-box-corner-br">+</span>
+          <div id="composerQueue" class="composer-queue" hidden></div>
           <div id="composerAttachments" class="composer-attachments" hidden></div>
           <textarea
             id="promptInput"
@@ -220,6 +221,7 @@
             </div>
             <div class="composer-actions">
               <button id="stopSessionBtn" class="alma-btn alma-btn-danger" type="button" hidden>停止</button>
+              <button id="steerBtn" class="alma-btn alma-btn-outline" type="button" hidden title="打断当前这一轮，让 Agent 按这条消息调整后继续（Ctrl+Enter）">引导</button>
               <button id="sendBtn" class="alma-btn alma-btn-primary" type="button">发送</button>
             </div>
           </div>

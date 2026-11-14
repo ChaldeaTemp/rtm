@@ -343,7 +343,7 @@ async function main(): Promise<void> {
         content: [
           {
             type: "text",
-            text: `Workflow draft saved with ${res.workflow.steps.length} step(s): ${res.workflow.steps.map((s) => s.id).join(", ")}. It has NOT started. Tell the user to review and publish it in the Workflow panel.`,
+            text: `Workflow draft saved with ${res.workflow.steps.length} step(s): ${res.workflow.steps.map((s) => s.id).join(", ")}. It has NOT started. A preview card linking to the Workflow panel now appears under your reply, so do not list every step again: say in a sentence or two what the plan is and ask the user to review and publish it.`,
           },
         ],
       };
