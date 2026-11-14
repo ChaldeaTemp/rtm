@@ -693,7 +693,22 @@ export class SharedResourceManager {
       skillLines.length > 0 ? [...skillsHeaderLines, ...skillLines].join("\n") : "";
     const skillsIndexTokens = skillsSection ? estimateTokens(skillsSection) : 0;
 
-    if (ruleBlocks.length === 0 && !skillsSection) {
+    // The hub cannot stop an agent from loading what lives in its own config directory, so
+    // switching such an item off only works if the agent is told about it.
+    const turnedOffNative = items.filter((i) => !i.enabled && i.nativeAgents.includes(agent));
+    const turnedOffSection =
+      turnedOffNative.length > 0
+        ? [
+            "## Turned Off In This Workbench",
+            "The user switched these off for this workbench. Your own configuration still loads them, so they may show up in your skill list or rules. Treat them as absent here: do not invoke these skills or follow these rules, and where your other instructions tell you to use one of them, that instruction does not apply in this workbench.",
+            ...turnedOffNative.map(
+              (i) => `- ${i.kind} \`${i.name}\` (${toForwardSlashes(i.primaryPath)})`,
+            ),
+          ].join("\n")
+        : "";
+    const turnedOffTokens = turnedOffSection ? estimateTokens(turnedOffSection) : 0;
+
+    if (ruleBlocks.length === 0 && !skillsSection && !turnedOffSection) {
       return {
         promptPrefix: "",
         sharedRulesTokens: 0,
@@ -724,11 +739,14 @@ export class SharedResourceManager {
     if (skillsSection) {
       sections.push("", skillsSection);
     }
+    if (turnedOffSection) {
+      sections.push("", turnedOffSection);
+    }
     sections.push("</shared_resources_context>", "");
 
     return {
       promptPrefix: `${sections.join("\n")}\n`,
-      sharedRulesTokens,
+      sharedRulesTokens: sharedRulesTokens + turnedOffTokens,
       skillsIndexTokens,
       injectedRules,
       injectedSkillsCount: skillLines.length - (omittedSkills > 0 ? 1 : 0),
