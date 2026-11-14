@@ -1,13 +1,14 @@
+import "./isolate-data.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { AgentHubServer } from "../src/hub/server.js";
 import { PROJECT_ROOT } from "../src/hub/process-tree.js";
 import type { AgentResourceBudget, SharedResourceItem, TelemetrySnapshot, SessionRecord } from "../src/types.js";
-import { dataDir } from "../src/hub/data-dir.js";
+import { installDataDir } from "../src/hub/data-dir.js";
 
 async function main(): Promise<void> {
-  const agentHubDir = dataDir(PROJECT_ROOT);
+  const agentHubDir = installDataDir(PROJECT_ROOT);
   const hadAgentHubDir = fs.existsSync(agentHubDir);
   const hadResourcesDir = fs.existsSync(path.join(agentHubDir, "resources"));
 

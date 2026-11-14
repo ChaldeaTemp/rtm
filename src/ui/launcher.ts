@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { PROJECT_ROOT } from "../hub/process-tree.js";
-import { dataDir } from "../hub/data-dir.js";
+import { installDataDir } from "../hub/data-dir.js";
 
 const WINDOWS_APP_BROWSERS = [
   path.join(process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)", "Microsoft\\Edge\\Application\\msedge.exe"),
@@ -56,7 +56,7 @@ export function openInteractiveWindow(
     const exe = findAppBrowserExecutable();
     if (exe) {
       const profileDir =
-        options?.profileDir ?? path.join(dataDir(PROJECT_ROOT), "desktop-browser-profile");
+        options?.profileDir ?? path.join(installDataDir(PROJECT_ROOT), "desktop-browser-profile");
       fs.mkdirSync(profileDir, { recursive: true });
       const child = spawn(
         exe,

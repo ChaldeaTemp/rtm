@@ -3,6 +3,7 @@
 // 预热模式：npx tsx scripts/bench-turn-latency.ts opencode 2 --warm
 //   建任务后先调 /api/sessions/warm，等 3 s（BENCH_WARM_WAIT_MS 可改）再发第一条消息。
 // 输出每轮的 total 以及 session 状态变化、首个 chunk 的时间点（毫秒，相对发送时刻）。
+import "./isolate-data.js";
 import { performance } from "node:perf_hooks";
 import WebSocket from "ws";
 import { AgentHubServer } from "../src/hub/server.js";

@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -726,6 +727,13 @@ export class AcpPool extends EventEmitter {
       options.sessionName,
       options.isolateWorktree,
     );
+    // spawn() reports a missing working directory as "ENOENT <executable>", which reads as if
+    // the agent were not installed. Say what is actually wrong.
+    if (!fs.existsSync(workspace.effectiveCwd)) {
+      throw new Error(
+        `工作目录不存在：${workspace.effectiveCwd}。请在任务的「目录」里改成一个存在的目录。`,
+      );
+    }
     const resolvedCmd = this.registry
       ? this.registry.resolveCommand(options.agent)
       : resolveAdapterCommand(options.agent);

@@ -4,11 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ALL_AGENTS, type AdapterHealth, type AgentDefinition, type AgentId } from "../types.js";
-import { dataDir } from "./data-dir.js";
+import { installDataDir } from "./data-dir.js";
 
 const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const PROJECT_ROOT = path.resolve(THIS_DIR, "../..");
-const LOCAL_SECRETS_FILE = path.join(dataDir(PROJECT_ROOT), "secrets.json");
+const LOCAL_SECRETS_FILE = path.join(installDataDir(PROJECT_ROOT), "secrets.json");
 
 export interface ResolvedCommand {
   command: string;

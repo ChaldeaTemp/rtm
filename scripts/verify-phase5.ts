@@ -1,3 +1,4 @@
+import "./isolate-data.js";
 import assert from "node:assert/strict";
 import { AgentHubServer } from "../src/hub/server.js";
 import type { AgentModelCatalog, SessionRecord, TaskGroup } from "../src/types.js";

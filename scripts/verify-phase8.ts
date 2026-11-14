@@ -1,3 +1,4 @@
+import "./isolate-data.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -11,7 +12,7 @@ import {
 } from "../src/hub/process-tree.js";
 import { buildHubWorkbenchGuide, SharedResourceManager } from "../src/hub/resources.js";
 import { AgentHubServer } from "../src/hub/server.js";
-import { dataDir } from "../src/hub/data-dir.js";
+import { installDataDir } from "../src/hub/data-dir.js";
 
 // Valid 1x1 transparent PNG (67 bytes)
 const TINY_PNG_BASE64 =
@@ -217,7 +218,7 @@ async function main(): Promise<void> {
   assert.ok(opencodeInj.skillsIndexTokens <= 1350, `Expected slim skills index, got ${opencodeInj.skillsIndexTokens}`);
 
   console.log("=== 2. Verify Native ImageContent + ACP elicitation/create Bridge + Fallback Image Path ===");
-  const mockDir = dataDir(PROJECT_ROOT);
+  const mockDir = installDataDir(PROJECT_ROOT);
   fs.mkdirSync(mockDir, { recursive: true });
   const mockScriptPath = path.join(mockDir, "tmp-phase8-mock-agent.mjs");
   fs.writeFileSync(mockScriptPath, MOCK_ACP_SCRIPT_SOURCE.trimStart(), "utf8");
@@ -345,7 +346,7 @@ async function main(): Promise<void> {
     assert.ok(userMsg?.images?.length === 1, "Expected image attachment on user message");
     const imgUrl = userMsg!.images![0]!.url;
     assert.match(imgUrl, /^\/uploads\/img-[a-z0-9_-]+\.png$/i);
-    createdUploadFiles.push(path.join(dataDir(PROJECT_ROOT), imgUrl));
+    createdUploadFiles.push(path.join(installDataDir(PROJECT_ROOT), imgUrl));
 
     const imgGet = await fetch(`${url}${imgUrl}`);
     assert.equal(imgGet.status, 200);
@@ -378,7 +379,7 @@ async function main(): Promise<void> {
     const group2Messages = hub.getMessages({ groupId: grp2Json.group.groupId });
     const userMsg2 = group2Messages.find((m) => m.role === "user");
     if (userMsg2?.images?.[0]?.url) {
-      createdUploadFiles.push(path.join(dataDir(PROJECT_ROOT), userMsg2.images[0].url));
+      createdUploadFiles.push(path.join(installDataDir(PROJECT_ROOT), userMsg2.images[0].url));
     }
 
     console.log("=== 3. Verify Launcher ASCII Purity & UI Syntax ===");

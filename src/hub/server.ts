@@ -38,13 +38,13 @@ import { WorkflowManager } from "./workflow.js";
 import { HubStateStore } from "./state-store.js";
 import { SharedResourceManager } from "./resources.js";
 import { summarizeWorkspaceChanges } from "./worktree.js";
-import { dataDir } from "./data-dir.js";
+import { installDataDir } from "./data-dir.js";
 
 const MAX_PEER_DEPTH = 3;
-const RUNTIME_FILE = path.join(dataDir(PROJECT_ROOT), "runtime.json");
-const UPLOADS_DIR = path.join(dataDir(PROJECT_ROOT), "uploads");
-const SETTINGS_FILE = path.join(dataDir(PROJECT_ROOT), "settings.json");
-const STATE_FILE = path.join(dataDir(PROJECT_ROOT), "state.json");
+const RUNTIME_FILE = path.join(installDataDir(PROJECT_ROOT), "runtime.json");
+const UPLOADS_DIR = path.join(installDataDir(PROJECT_ROOT), "uploads");
+const SETTINGS_FILE = path.join(installDataDir(PROJECT_ROOT), "settings.json");
+const STATE_FILE = path.join(installDataDir(PROJECT_ROOT), "state.json");
 /** Events that never change what is persisted; everything else schedules a save. */
 const TRANSIENT_EVENT_TYPES = new Set(["agent_chunk", "tool_event", "snapshot", "models_updated"]);
 /** Session-name suffix of the throwaway session that names a task; never shown in the UI. */

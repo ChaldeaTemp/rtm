@@ -33,3 +33,16 @@ export function dataDir(base: string): string {
   resolved.set(key, result);
   return result;
 }
+
+/**
+ * The install-level data directory: tasks, settings, uploads, runtime info. `RTM_DATA_DIR`
+ * redirects it, which is how tests and benchmarks keep their hubs away from real data.
+ */
+export function installDataDir(projectRoot: string): string {
+  const override = process.env.RTM_DATA_DIR?.trim();
+  if (override) {
+    fs.mkdirSync(override, { recursive: true });
+    return path.resolve(override);
+  }
+  return dataDir(projectRoot);
+}
