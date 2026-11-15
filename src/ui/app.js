@@ -636,6 +636,7 @@ function applySkin(skin) {
   document.querySelectorAll("#skinSeg button").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.skin === next);
   });
+  window.HUB_BOARD?.render?.();
   refreshThemeSensitiveFrames();
   try {
     localStorage.setItem("agent-hub-skin", next);
@@ -3817,6 +3818,7 @@ function connectWs() {
       window.HUB_BOARD?.render?.();
     } else if (msg.type === "progress_updated") {
       STATE.progress.set(msg.progress.groupId, msg.progress);
+      window.HUB_BOARD?.onProgress?.(msg.progress.groupId);
       scheduleUiRender(UI_REGION.inspector);
     } else if (msg.type === "workflow_updated") {
       const prev = STATE.workflows.get(msg.workflow.groupId);
@@ -4802,7 +4804,7 @@ window.addEventListener("blur", () => syncAttentionIndicators());
 document.addEventListener("visibilitychange", () => syncAttentionIndicators());
 
 document.addEventListener("keydown", (e) => {
-  if (e.isComposing || e.keyCode === 229) return;
+  if (e.isComposing || e.keyCode === 229 || e.target.closest?.(".board-overlay[open]")) return;
   const key = e.key.toLowerCase();
 
   if ((e.ctrlKey || e.metaKey) && key === "k") {
@@ -5125,6 +5127,7 @@ window.HUB_APP = {
   appendLog,
   selectGroup,
   openPendingTask,
+  projectKey,
   buildArtifactUrl,
   setStageView,
   setScreenMode,

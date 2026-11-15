@@ -1,4 +1,4 @@
-import { apiFetch, displayTaskTitle, t, th } from "./i18n.js";
+import { apiFetch, displayTaskTitle, getLocale, t, th } from "./i18n.js";
 
 let nextDraftId = 1;
 
@@ -10,11 +10,14 @@ const BOARD_STATE = {
   leadAgent: "",
   leadTouched: false,
   common: "",
-  moreOpen: false,
   confirmedOpen: false,
   submitting: false,
   errorText: "",
   actionBusyIds: new Set(),
+  search: "",
+  project: "",
+  overlay: null,
+  rejectDrafts: new Map(),
 };
 
 const dom = {
@@ -153,6 +156,7 @@ function renderBriefRows(focusDraftId = null) {
       textarea.value = draft.text;
       textarea.addEventListener("input", () => {
         draft.text = textarea.value;
+        row.classList.toggle("has-multiline", draft.text.includes("\n"));
         if (BOARD_STATE.errorText) {
           BOARD_STATE.errorText = "";
           updateErrorBanner();
@@ -160,7 +164,7 @@ function renderBriefRows(focusDraftId = null) {
         updatePublishButtonLabel();
       });
       textarea.addEventListener("keydown", (e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        if (!e.isComposing && (e.ctrlKey || e.metaKey) && e.key === "Enter") {
           e.preventDefault();
           void handlePublish();
         }
@@ -190,9 +194,11 @@ function renderBriefRows(focusDraftId = null) {
     if (textarea) {
       const placeholder = t("boardPublishPlaceholder");
       if (textarea.placeholder !== placeholder) textarea.placeholder = placeholder;
+      textarea.setAttribute("aria-label", canRemove ? t("boardBriefNumber", idx + 1) : t("boardBriefLabel"));
       if (document.activeElement !== textarea && textarea.value !== draft.text) {
         textarea.value = draft.text;
       }
+      row.classList.toggle("has-multiline", draft.text.includes("\n"));
       textarea.disabled = BOARD_STATE.submitting;
     }
 
@@ -274,6 +280,7 @@ async function handleBrowseDirectory() {
       BOARD_STATE.cwd = picked;
       BOARD_STATE.cwdTouched = true;
       if (dom.cwdInput) dom.cwdInput.value = picked;
+      renderPublisherStaticLabels();
     }
   } catch (err) {
     BOARD_STATE.errorText = err?.message || String(err);
@@ -285,7 +292,9 @@ async function handlePublish() {
   if (BOARD_STATE.submitting) return;
   const cwd = (dom.cwdInput ? dom.cwdInput.value : BOARD_STATE.cwd).trim();
   BOARD_STATE.cwd = cwd;
-  const leadAgent = BOARD_STATE.leadAgent || resolveDefaultLead(getHubState());
+  const leadAgent = dom.screen.classList.contains("board-simple")
+    ? resolveDefaultLead(getHubState())
+    : BOARD_STATE.leadAgent || resolveDefaultLead(getHubState());
   const common = (dom.commonInput ? dom.commonInput.value : BOARD_STATE.common).trim();
   BOARD_STATE.common = common;
 
@@ -305,7 +314,7 @@ async function handlePublish() {
   BOARD_STATE.errorText = "";
   updateErrorBanner();
   renderBriefRows();
-  updatePublishButtonLabel();
+  renderPublisherStaticLabels();
 
   try {
     const items = nonEmptyBriefs.map((brief) => ({
@@ -322,7 +331,7 @@ async function handlePublish() {
       }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data?.ok === false) {
+    if (!res.ok || data?.ok !== true) {
       throw new Error(data?.error || `HTTP ${res.status}`);
     }
 
@@ -330,6 +339,7 @@ async function handlePublish() {
     BOARD_STATE.drafts = [{ id: nextDraftId++, text: "" }];
     BOARD_STATE.common = "";
     if (dom.commonInput) dom.commonInput.value = "";
+    if (dom.screen.classList.contains("board-simple")) dom.moreDetails.open = false;
     BOARD_STATE.errorText = "";
   } catch (err) {
     BOARD_STATE.errorText = err?.message || String(err);
@@ -341,10 +351,10 @@ async function handlePublish() {
   }
 }
 
-async function handleCardAction(card, action) {
+async function handleCardAction(card, action, detail = null) {
   if (!card?.groupId || BOARD_STATE.actionBusyIds.has(card.groupId)) return;
   const app = getApp();
-  if (action === "cancel") {
+  if (!detail && action === "cancel") {
     const confirmed = await app.showConfirmModal({
       title: t("boardCancelTitle", getCardTitle(card)),
       message: t(card.board.status === "queued" ? "boardCancelQueued" : "boardCancelRunning"),
@@ -355,8 +365,8 @@ async function handleCardAction(card, action) {
     });
     if (!confirmed) return;
   }
-  let note;
-  if (action === "reject") {
+  let note = detail?.note;
+  if (!detail && action === "reject") {
     const showPrompt = getApp().showPromptModal;
     const rawNote = typeof showPrompt === "function"
       ? await showPrompt({
@@ -372,6 +382,7 @@ async function handleCardAction(card, action) {
 
   if (BOARD_STATE.actionBusyIds.has(card.groupId)) return;
   BOARD_STATE.actionBusyIds.add(card.groupId);
+  if (detail) detail.error = "";
   BOARD_STATE.errorText = "";
   updateErrorBanner();
   renderColumns();
@@ -387,14 +398,19 @@ async function handleCardAction(card, action) {
       }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data?.ok === false) {
+    if (!res.ok || data?.ok !== true) {
       throw new Error(data?.error || `HTTP ${res.status}`);
     }
+    if (action === "reject") BOARD_STATE.rejectDrafts.delete(card.groupId);
+    if (detail) detail.prompt = null;
   } catch (err) {
-    BOARD_STATE.errorText = err?.message || String(err);
-    updateErrorBanner();
-    if (dom.screen?.hidden) {
-      void app.showConfirmModal({ message: BOARD_STATE.errorText, confirmText: t("ok") });
+    const message = err?.message || String(err);
+    if (detail && BOARD_STATE.overlay === detail) {
+      detail.error = message;
+    } else {
+      BOARD_STATE.errorText = message;
+      updateErrorBanner();
+      if (dom.screen?.hidden) void app.showConfirmModal({ message, confirmText: t("ok") });
     }
   } finally {
     BOARD_STATE.actionBusyIds.delete(card.groupId);
@@ -422,7 +438,7 @@ function getShortCwd(cwd) {
 }
 
 function getWaitingBadgeInfo(card) {
-  const reason = card?.waitingReason || (card?.board?.interrupted ? "interrupted" : card?.board?.stalled ? "stalled" : "question");
+  const reason = getWaitingReason(card);
   if (reason === "permission") {
     return { text: t("boardWaitPermission"), cls: "is-permission" };
   }
@@ -433,6 +449,58 @@ function getWaitingBadgeInfo(card) {
     return { text: t("boardWaitStalled"), cls: "is-stalled" };
   }
   return { text: t("boardWaitQuestion"), cls: "is-question" };
+}
+
+function getWaitingReason(card) {
+  return card.waitingReason || (card.board.interrupted ? "interrupted" : card.board.stalled ? "stalled" : "question");
+}
+
+function getBoardCards() {
+  const cards = getHubState().boardCards;
+  return Array.isArray(cards) ? cards : [];
+}
+
+function getColumnKey(card) {
+  return card.board.status === "running" && card.waiting ? "waiting" : card.board.status;
+}
+
+function getProjectLabel(cwd) {
+  return getShortCwd(cwd) || t("noDirectorySelected");
+}
+
+function getCardNumber(card) {
+  return `#${card.groupId.replace(/^grp-/, "")}`;
+}
+
+function openInWorkbench(card, reason) {
+  getApp().openPendingTask?.(card.groupId, reason);
+}
+
+function getCardActions(card, columnKey) {
+  const status = card.board.status;
+  const cancel = { action: "cancel", label: t("boardActionCancel"), cls: "is-secondary" };
+  if (status === "delivered") {
+    return [
+      { action: "confirm", label: t("boardActionConfirm"), cls: "is-primary" },
+      { action: "reject", label: t("boardActionReject"), cls: "is-warning" },
+    ];
+  }
+  if (status === "failed") return [{ action: "retry", label: t("boardActionRetry"), cls: "is-primary" }];
+  if (status === "queued") return [cancel];
+  if (status !== "running") return [];
+  if (card.board.interrupted || card.waitingReason === "interrupted") {
+    return [{ action: "resume", label: t("boardActionResume"), cls: "is-primary" }, cancel];
+  }
+  if (columnKey !== "waiting") return [cancel];
+  const reason = getWaitingReason(card);
+  const label = reason === "permission" ? "boardActionPermission" : reason === "stalled" ? "boardActionGuide" : "boardActionAnswer";
+  return [{ action: "handle", label: t(label), cls: "is-primary" }, cancel];
+}
+
+function renderCardActions(actions, busy) {
+  return actions.map(({ action, label, cls }) =>
+    `<button type="button" class="board-card-btn ${cls}" data-board-action="${action}" ${busy ? "disabled" : ""}>${escapeHtml(label)}</button>`
+  ).join("");
 }
 
 function renderDeliverable(card, item, index) {
@@ -505,36 +573,10 @@ function createCardElement(card, columnKey) {
     extraBodyHtml += `<div class="board-card-fail-reason">${escapeHtml(failReason)}</div>`;
   }
 
-  // Action buttons per D3 spec
-  const actions = [];
-  const status = card?.board?.status;
-  const isInterrupted = card?.waitingReason === "interrupted" || Boolean(card?.board?.interrupted);
-
-  if (status === "delivered") {
-    actions.push({ action: "confirm", label: t("boardActionConfirm"), cls: "is-primary" });
-    actions.push({ action: "reject", label: t("boardActionReject"), cls: "is-warning" });
-  } else if (status === "failed") {
-    actions.push({ action: "retry", label: t("boardActionRetry"), cls: "is-primary" });
-  } else if (status === "running") {
-    if (isInterrupted) {
-      actions.push({ action: "resume", label: t("boardActionResume"), cls: "is-primary" });
-    } else if (columnKey === "waiting") {
-      const label = card.waitingReason === "permission" ? "boardActionPermission"
-        : card.waitingReason === "stalled" ? "boardActionGuide" : "boardActionAnswer";
-      actions.push({ action: "handle", label: t(label), cls: "is-primary" });
-    }
-    actions.push({ action: "cancel", label: t("boardActionCancel"), cls: "is-secondary" });
-  } else if (status === "queued") {
-    actions.push({ action: "cancel", label: t("boardActionCancel"), cls: "is-secondary" });
-  }
+  const actions = getCardActions(card, columnKey);
 
   const actionsHtml = actions.length
-    ? `<div class="board-card-actions">${actions
-      .map(
-        (btn) =>
-          `<button type="button" class="board-card-btn ${btn.cls}" data-board-action="${btn.action}" ${isBusy ? "disabled" : ""}>${escapeHtml(btn.label)}</button>`
-      )
-      .join("")}</div>`
+    ? `<div class="board-card-actions">${renderCardActions(actions, isBusy)}</div>`
     : "";
 
   el.innerHTML = `
@@ -555,27 +597,306 @@ function createCardElement(card, columnKey) {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       const action = btn.getAttribute("data-board-action");
-      if (action === "handle") getApp().openPendingTask(card.groupId, card.waitingReason);
+      if (action === "handle") openInWorkbench(card, getWaitingReason(card));
       else if (action) void handleCardAction(card, action);
     });
   });
 
-  const openCardInWorkbench = () => {
-    const app = getApp();
-    app.selectGroup?.(card.groupId, `lead:${card.groupId}`);
-    app.setScreenMode?.("workbench");
-  };
-
   el.addEventListener("click", (e) => {
-    if (!e.target.closest("a, .board-card-deliverables")) openCardInWorkbench();
+    if (!e.target.closest("a, .board-card-deliverables")) openInWorkbench(card);
   });
 
   return el;
 }
 
+const SIMPLE_COLUMN_LABELS = {
+  queued: "boardColQueued",
+  running: "boardColRunning",
+  waiting: "boardColDecision",
+  delivered: "boardColReview",
+  failed: "boardColFailed",
+  done: "boardColConfirmed",
+};
+
+function cardHint(card, key) {
+  if (key === "waiting") return getWaitingBadgeInfo(card).text;
+  if (key === "delivered") return t("boardReviewHint", card.board.deliverables?.length || 0);
+  if (key === "failed") return card.board.failReason || t("boardFailedHint");
+  return t({ queued: "boardQueuedHint", running: "boardRunningHint", done: "boardColConfirmed" }[key]);
+}
+
+function createSimpleCard(card, key, pick) {
+  const button = document.createElement("button");
+  const title = getCardTitle(card);
+  button.type = "button";
+  button.className = `board-simple-card is-${key}`;
+  button.dataset.boardTask = card.groupId;
+  button.setAttribute("aria-label", title);
+  button.setAttribute("aria-haspopup", "dialog");
+  button.innerHTML = `
+    <span class="board-simple-card-meta">
+      <span title="${escapeHtml(card.cwd)}">${escapeHtml(getProjectLabel(card.cwd))}</span>
+      <span class="board-simple-number" title="${escapeHtml(card.groupId)}">${escapeHtml(getCardNumber(card))}</span>
+    </span>
+    <span class="board-simple-card-title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
+    <span class="board-simple-card-hint">${escapeHtml(cardHint(card, key))}</span>
+  `;
+  button.addEventListener("click", () => pick(card.groupId, button));
+  return button;
+}
+
+function filteredBoardCards(cards) {
+  const query = BOARD_STATE.search.trim().toLocaleLowerCase();
+  const projectKey = getApp().projectKey;
+  return cards.filter((card) => {
+    if (BOARD_STATE.project && projectKey(card.cwd) !== BOARD_STATE.project) return false;
+    return !query || [getCardTitle(card), getProjectLabel(card.cwd), card.cwd, card.groupId, getCardNumber(card)]
+      .some((value) => String(value || "").toLocaleLowerCase().includes(query));
+  });
+}
+
+function renderSimpleFilters(allCards, filtered) {
+  const { projectKey } = getApp();
+  const paths = new Map(allCards.filter((card) => card.cwd).map((card) => [projectKey(card.cwd), card.cwd]));
+  if (BOARD_STATE.project && !paths.has(BOARD_STATE.project)) paths.set(BOARD_STATE.project, BOARD_STATE.project);
+  const choices = [...paths].sort(([, a], [, b]) => getProjectLabel(a).localeCompare(getProjectLabel(b)) || a.localeCompare(b));
+  const project = dom.projectFilter;
+  const options = `<option value="">${th("boardAllProjects")}</option>` +
+    choices.map(([key, cwd]) => `<option value="${escapeHtml(key)}" title="${escapeHtml(cwd)}">${escapeHtml(getProjectLabel(cwd))}</option>`).join("");
+  if (dom.projectOptions !== options) {
+    project.innerHTML = options;
+    dom.projectOptions = options;
+  }
+  project.value = BOARD_STATE.project;
+  dom.searchInput.placeholder = t("boardSearchTasks");
+  dom.searchInput.setAttribute("aria-label", t("boardSearchTasks"));
+  project.setAttribute("aria-label", t("boardFilterProject"));
+  dom.clearFilters.textContent = t("boardClearFilters");
+  dom.clearFilters.disabled = !BOARD_STATE.search && !BOARD_STATE.project;
+  dom.resultCount.textContent = t("boardVisibleCount", filtered.length, allCards.length);
+
+  for (const btn of dom.attentionButtons) {
+    const key = btn.dataset.boardAttention;
+    const count = filtered.filter((card) => getColumnKey(card) === key).length;
+    btn.textContent = t(key === "waiting" ? "boardDecisionCount" : "boardReviewCount", count);
+  }
+}
+
+function openBoardOverlay(data, origin) {
+  BOARD_STATE.overlay = { ...data, origin, originColumn: origin.closest(".board-col")?.dataset.column };
+  dom.overlayMarkup = null;
+  renderBoardOverlay(filteredBoardCards(getBoardCards()));
+  dom.overlay.showModal();
+  dom.overlay.querySelector("#boardOverlayTitle").focus();
+}
+
+function closeBoardOverlay() {
+  if (!dom.overlay.open) return;
+  const { origin, originColumn, originGroupId } = BOARD_STATE.overlay;
+  BOARD_STATE.overlay = null;
+  dom.overlay.close();
+  const column = originColumn && dom.columnsWrap.querySelector(`[data-column="${originColumn}"]`);
+  const replacement = originGroupId && column?.querySelector(`[data-board-task="${CSS.escape(originGroupId)}"]`);
+  if (dom.screen.hidden || !dom.screen.classList.contains("board-simple")) return;
+  const focus = origin.isConnected ? origin : replacement;
+  focus?.focus({ preventScroll: true });
+  if (!focus || document.activeElement !== focus) (column || dom.searchInput).focus({ preventScroll: true });
+}
+
+function renderDetailSection(label, text, cls = "") {
+  if (!text) return "";
+  return `<section class="board-detail-section ${cls}">
+    <h3>${escapeHtml(label)}</h3><p>${escapeHtml(text)}</p>
+  </section>`;
+}
+
+function renderDetailPrompt(detail, card, busy) {
+  const action = detail.prompt.action;
+  const cancel = action === "cancel";
+  return `
+    <section class="board-detail-prompt">
+      <h3>${cancel ? th("boardCancelTitle", getCardTitle(card)) : th("boardRejectPromptTitle")}</h3>
+      ${cancel
+        ? `<p>${th(card.board.status === "queued" ? "boardCancelQueued" : "boardCancelRunning")}</p>`
+        : `<label for="boardRejectNote">${th("boardRejectPromptMsg")}</label>
+           <textarea id="boardRejectNote" class="text-area" rows="3" data-board-overlay-ui="note" ${busy ? "disabled" : ""}></textarea>`}
+      <div class="board-card-actions">
+        <button type="button" class="board-card-btn" data-board-overlay-ui="dismiss-prompt" ${busy ? "disabled" : ""}>${cancel ? th("boardKeepTask") : th("boardActionCancel")}</button>
+        <button type="button" class="board-card-btn ${cancel ? "is-secondary" : "is-warning"}" data-board-overlay-ui="submit-prompt" ${busy ? "disabled" : ""}>${cancel ? th("boardCancelConfirm") : th("boardActionReject")}</button>
+      </div>
+    </section>`;
+}
+
+function getDecisionContext(card) {
+  const state = getHubState();
+  const reason = getWaitingReason(card);
+  if (reason === "question") {
+    const pending = [...(state.pendingQuestions?.values() || [])].find((item) => item.groupId === card.groupId);
+    return pending?.fields?.map((item) => item.question).filter(Boolean).join("\n") || pending?.title;
+  }
+  if (reason === "permission") {
+    return [...(state.pendingPermissions?.values() || [])].find((item) => item.groupId === card.groupId)?.toolTitle;
+  }
+  return "";
+}
+
+function renderTaskDetail(detail, card) {
+  const title = card ? getCardTitle(card) : (detail.title || t("taskBoard"));
+  detail.title = title;
+  const key = card ? getColumnKey(card) : null;
+  const busy = BOARD_STATE.actionBusyIds.has(detail.groupId);
+  const actions = card ? getCardActions(card, key) : [];
+  if (detail.prompt && (!actions.some(({ action }) => action === detail.prompt.action) ||
+    (detail.prompt.action === "cancel" && card.board.status !== detail.prompt.status) ||
+    (detail.prompt.action === "reject" && card.board.deliveredAt !== detail.prompt.deliveredAt))) {
+    detail.prompt = null;
+    if (!busy && card) detail.error = t("boardActionStateChanged");
+  }
+  const info = card?.board;
+  const progress = key === "running" ? getHubState().progress?.get(detail.groupId)?.summary : "";
+  const startedAt = key === "running" && info.startedAt
+    ? t("boardStartedAt", new Date(info.startedAt).toLocaleString(getLocale(), { dateStyle: "medium", timeStyle: "short" }))
+    : "";
+  const decision = key === "waiting" ? getDecisionContext(card) : "";
+  const deliverables = (key === "delivered" || key === "done") ? info.deliverables || [] : [];
+  const back = detail.bucket
+    ? `<button type="button" class="board-card-btn" data-board-overlay-ui="back">${th("boardBackToList")}</button>`
+    : "";
+  return {
+    title,
+    meta: card ? `<span class="board-detail-status is-${key}">${th(SIMPLE_COLUMN_LABELS[key])}</span>
+      <span>${escapeHtml(getProjectLabel(card.cwd))} · ${escapeHtml(getCardNumber(card))}</span>` : "",
+    body: `
+      ${card ? `
+        ${renderDetailSection(t("boardBriefLabel"), info.brief)}
+        ${key === "waiting" ? renderDetailSection(decision ? cardHint(card, key) : t("boardColDecision"), decision || cardHint(card, key), "is-decision") : ""}
+        ${key === "failed" ? renderDetailSection(t("boardFailureReason"), cardHint(card, key), "is-failure") : ""}
+        ${renderDetailSection(t(key === "running" ? "boardProgress" : "boardResult"), info.summary || progress || startedAt)}
+        ${deliverables.length ? `<div class="board-card-deliverables">
+          <div class="board-deliverables-count">${th("boardDeliverablesCount", deliverables.length)}</div>
+          <ul class="board-deliverables-list">${deliverables.map((item, i) => renderDeliverable(card, item, i)).join("")}</ul>
+        </div>` : ""}
+        ${renderDetailSection(t("workingDirectory"), card.cwd, "is-directory")}
+        ${renderDetailSection(t("boardRejectPromptTitle"), info.rejectNote)}
+        ${detail.prompt ? renderDetailPrompt(detail, card, busy) : ""}
+      ` : `<p role="status">${th("boardTaskUnavailable")}</p>`}
+    `,
+    error: detail.error,
+    footer: `
+      <div class="board-card-actions">${back}
+        ${card ? `<button type="button" class="board-card-btn" data-board-overlay-ui="workbench">${th("boardOpenSession")}</button>` : ""}
+      </div>
+      <div class="board-card-actions">${detail.prompt ? "" : renderCardActions(actions.toReversed(), busy)}</div>`,
+  };
+}
+
+function renderBoardOverlay(filtered) {
+  const detail = BOARD_STATE.overlay;
+  if (!detail) return;
+  const selected = detail.groupId ? getBoardCards().find((card) => card.groupId === detail.groupId) : null;
+  const model = detail.groupId ? renderTaskDetail(detail, selected) : {
+    title: t(SIMPLE_COLUMN_LABELS[detail.bucket]),
+    meta: "",
+    body: "",
+    footer: "",
+  };
+  const list = detail.groupId ? null : filtered.filter((card) => getColumnKey(card) === detail.bucket);
+  const markup = `
+    <header class="board-overlay-header">
+      <button type="button" class="board-overlay-close" data-board-overlay-ui="close" aria-label="${th("close")}">&times;</button>
+      ${model.meta ? `<div class="board-overlay-meta">${model.meta}</div>` : ""}
+      <h2 id="boardOverlayTitle" tabindex="-1">${escapeHtml(model.title)}</h2>
+    </header>
+    <div class="board-overlay-body">${model.body}</div>
+    ${model.error ? `<p role="alert" class="board-publish-error board-overlay-error">${escapeHtml(model.error)}</p>` : ""}
+    ${model.footer ? `<footer class="board-overlay-footer">${model.footer}</footer>` : ""}`;
+  // Do not replace controls after pushes that leave this panel unchanged.
+  const listKey = list && JSON.stringify(list.map((card) => [card.groupId, card.cwd, getCardTitle(card), cardHint(card, detail.bucket)]));
+  if (dom.overlayMarkup === markup && dom.overlayListKey === listKey) return;
+  const active = document.activeElement;
+  const focusAttr = ["data-board-overlay-ui", "data-board-action", "data-board-task"].find((attr) => active?.hasAttribute(attr));
+  const restoreFocus = dom.overlay.contains(active);
+  const scroll = dom.overlay.querySelector(".board-overlay-body")?.scrollTop || 0;
+  dom.overlayMarkup = markup;
+  dom.overlayListKey = listKey;
+  dom.overlay.innerHTML = markup;
+  const body = dom.overlay.querySelector(".board-overlay-body");
+  const note = dom.overlay.querySelector("#boardRejectNote");
+  if (note) {
+    note.value = BOARD_STATE.rejectDrafts.get(detail.groupId) || "";
+    dom.overlay.querySelector('[data-board-overlay-ui="submit-prompt"]').disabled = note.disabled || !note.value.trim();
+  }
+  if (list?.length) {
+    body.classList.add("board-overlay-list");
+    for (const card of list) {
+      body.append(createSimpleCard(card, detail.bucket, (groupId) => {
+        detail.groupId = groupId;
+        renderBoardOverlay(filteredBoardCards(getBoardCards()));
+        dom.overlay.querySelector(".board-overlay-body").scrollTop = 0;
+        dom.overlay.querySelector("#boardOverlayTitle").focus();
+      }));
+    }
+  } else if (list) {
+    body.innerHTML = `<p class="board-col-empty">${th("boardEmptyColumn")}</p>`;
+  }
+  body.scrollTop = scroll;
+  if (restoreFocus) {
+    const focus = focusAttr && dom.overlay.querySelector(`[${focusAttr}="${CSS.escape(active.getAttribute(focusAttr))}"]:not(:disabled)`);
+    (focus || dom.overlay.querySelector("#boardOverlayTitle")).focus({ preventScroll: true });
+    if (focus && focus === note) note.setSelectionRange(active.selectionStart, active.selectionEnd, active.selectionDirection);
+  }
+}
+
+function handleOverlayClick(event) {
+  const detail = BOARD_STATE.overlay;
+  const control = event.target.closest("[data-board-overlay-ui], [data-board-action]");
+  if (!detail || !control) return;
+  const ui = control.dataset.boardOverlayUi;
+  if (ui === "close") return closeBoardOverlay();
+  if (ui === "back") {
+    const previous = detail.groupId;
+    Object.assign(detail, { groupId: null, prompt: null, error: "" });
+    renderBoardOverlay(filteredBoardCards(getBoardCards()));
+    dom.overlay.querySelector(`[data-board-task="${CSS.escape(previous)}"]`)?.focus();
+    return;
+  }
+  const card = getBoardCards().find(({ groupId }) => groupId === detail.groupId);
+  if (!card) return;
+  if (ui === "workbench") {
+    closeBoardOverlay();
+    openInWorkbench(card);
+    return;
+  }
+  if (BOARD_STATE.actionBusyIds.has(card.groupId)) return;
+  if (ui === "dismiss-prompt") {
+    const action = detail.prompt.action;
+    detail.prompt = null;
+    renderBoardOverlay(filteredBoardCards(getBoardCards()));
+    dom.overlay.querySelector(`[data-board-action="${action}"]`)?.focus();
+    return;
+  }
+  const action = ui === "submit-prompt" ? detail.prompt?.action : control.dataset.boardAction;
+  if (!getCardActions(card, getColumnKey(card)).some((item) => item.action === action)) return;
+  if (action === "handle") {
+    closeBoardOverlay();
+    openInWorkbench(card, getWaitingReason(card));
+    return;
+  }
+  if (ui !== "submit-prompt" && (action === "cancel" || action === "reject")) {
+    detail.error = "";
+    detail.prompt = { action, status: card.board.status, deliveredAt: card.board.deliveredAt };
+    renderBoardOverlay(filteredBoardCards(getBoardCards()));
+    dom.overlay.querySelector(action === "cancel" ? '[data-board-overlay-ui="dismiss-prompt"]' : "#boardRejectNote")?.focus();
+    return;
+  }
+  detail.note = action === "reject" ? BOARD_STATE.rejectDrafts.get(card.groupId)?.trim() : undefined;
+  if (action === "reject" && !detail.note) return;
+  void handleCardAction(card, action, detail);
+}
+
 function renderTopbar() {
   const state = getHubState();
-  const cards = Array.isArray(state.boardCards) ? state.boardCards : [];
+  const cards = getBoardCards();
   const activeRunningCount = cards.filter((c) => c?.board?.status === "running" && !c?.waiting).length;
   const maxParallel = Number(state.settings?.boardParallel) || 2;
 
@@ -606,6 +927,7 @@ function renderTopbar() {
 }
 
 function renderPublisherStaticLabels() {
+  dom.publisher.setAttribute("aria-label", t("boardPublisherLabel"));
   if (dom.addBriefBtn) {
     dom.addBriefBtn.textContent = t("boardAddAnotherItem");
     dom.addBriefBtn.disabled = BOARD_STATE.submitting;
@@ -626,14 +948,20 @@ function renderPublisherStaticLabels() {
     dom.commonInput.placeholder = t("boardSharedPlaceholder");
     dom.commonInput.disabled = BOARD_STATE.submitting;
   }
+  dom.publishPath.textContent = BOARD_STATE.cwd || t("defaultWorkingDirectoryOptional");
+  dom.publishPath.title = BOARD_STATE.cwd;
+  dom.publishOptions.textContent = t("boardBatchOptions");
+  dom.publishOptions.setAttribute("aria-expanded", String(dom.moreDetails.open));
   updatePublishButtonLabel();
   updateErrorBanner();
 }
 
 function renderColumns() {
   if (!dom.columnsWrap) return;
-  const state = getHubState();
-  const cards = Array.isArray(state.boardCards) ? state.boardCards : [];
+  const simple = dom.screen.classList.contains("board-simple");
+  const allCards = getBoardCards();
+  const cards = simple ? filteredBoardCards(allCards) : allCards;
+  if (simple) renderSimpleFilters(allCards, cards);
 
   const buckets = {
     queued: [],
@@ -644,35 +972,37 @@ function renderColumns() {
     failed: [],
   };
 
-  for (const card of cards) {
-    const status = card?.board?.status;
-    if (status === "queued") {
-      buckets.queued.push(card);
-    } else if (status === "running") {
-      if (card.waiting) buckets.waiting.push(card);
-      else buckets.running.push(card);
-    } else if (status === "delivered") {
-      buckets.delivered.push(card);
-    } else if (status === "done") {
-      buckets.done.push(card);
-    } else if (status === "failed") {
-      buckets.failed.push(card);
-    }
-  }
+  for (const card of cards) buckets[getColumnKey(card)]?.push(card);
 
   const columnsMeta = [
     { key: "queued", label: t("boardColQueued"), items: buckets.queued },
     { key: "running", label: t("boardColRunning"), items: buckets.running },
-    { key: "waiting", label: t("boardColWaiting"), items: buckets.waiting },
-    { key: "delivered", label: t("boardColDelivered"), items: buckets.delivered, doneItems: buckets.done },
+    { key: "waiting", label: t(simple ? "boardColDecision" : "boardColWaiting"), items: buckets.waiting },
+    { key: "delivered", label: t(simple ? "boardColReview" : "boardColDelivered"), items: buckets.delivered, doneItems: buckets.done },
     { key: "failed", label: t("boardColFailed"), items: buckets.failed },
   ];
 
-  dom.columnsWrap.innerHTML = "";
+  const scrollPositions = new Map();
+  const active = document.activeElement;
+  const activeColumn = active?.closest("[data-column]");
+  const confirmed = dom.columnsWrap.querySelector(".board-confirmed-details");
+  if (confirmed) BOARD_STATE.confirmedOpen = confirmed.open;
+  for (const col of dom.columnsWrap.children) {
+    scrollPositions.set(col.dataset.column, col.querySelector(".board-col-body").scrollTop);
+  }
+  const columns = document.createDocumentFragment();
+  const createColumnCard = simple ? (card, key) => createSimpleCard(card, key, (groupId, origin) => {
+    openBoardOverlay({ groupId, originGroupId: groupId }, origin);
+  }) : createCardElement;
 
   for (const col of columnsMeta) {
     const colEl = document.createElement("section");
     colEl.className = `board-col board-col-${col.key}`;
+    colEl.dataset.column = col.key;
+    if (simple) {
+      colEl.tabIndex = -1;
+      colEl.setAttribute("aria-label", col.label);
+    }
 
     const totalCount = col.items.length;
     const headerEl = document.createElement("header");
@@ -692,11 +1022,12 @@ function renderColumns() {
     if (col.items.length === 0 && (!col.doneItems || col.doneItems.length === 0)) {
       const emptyEl = document.createElement("div");
       emptyEl.className = "board-col-empty";
-      emptyEl.textContent = t("boardEmptyColumn");
+      emptyEl.textContent = t(simple && !cards.length && (BOARD_STATE.search.trim() || BOARD_STATE.project)
+        ? "boardNoFilterMatches" : "boardEmptyColumn");
       bodyEl.appendChild(emptyEl);
     } else {
       for (const card of col.items) {
-        bodyEl.appendChild(createCardElement(card, col.key));
+        bodyEl.appendChild(createColumnCard(card, col.key));
       }
     }
 
@@ -704,27 +1035,37 @@ function renderColumns() {
       const detailsEl = document.createElement("details");
       detailsEl.className = "board-confirmed-details";
       detailsEl.open = BOARD_STATE.confirmedOpen;
-      detailsEl.addEventListener("toggle", () => {
-        BOARD_STATE.confirmedOpen = detailsEl.open;
-      });
 
       const summaryEl = document.createElement("summary");
       summaryEl.className = "board-confirmed-summary";
-      summaryEl.textContent = t("boardConfirmedSection", col.doneItems.length);
+      summaryEl.textContent = t(simple ? "boardAcceptedSection" : "boardConfirmedSection", col.doneItems.length);
       detailsEl.appendChild(summaryEl);
 
       const confirmedList = document.createElement("div");
       confirmedList.className = "board-confirmed-list";
       for (const doneCard of col.doneItems) {
-        confirmedList.appendChild(createCardElement(doneCard, "delivered"));
+        confirmedList.appendChild(createColumnCard(doneCard, simple ? "done" : "delivered"));
       }
       detailsEl.appendChild(confirmedList);
       bodyEl.appendChild(detailsEl);
     }
 
     colEl.appendChild(bodyEl);
-    dom.columnsWrap.appendChild(colEl);
+    columns.appendChild(colEl);
   }
+  dom.columnsWrap.replaceChildren(columns);
+  for (const col of dom.columnsWrap.children) {
+    col.querySelector(".board-col-body").scrollTop = scrollPositions.get(col.dataset.column) || 0;
+  }
+  if (simple && activeColumn) {
+    const column = dom.columnsWrap.querySelector(`[data-column="${activeColumn.dataset.column}"]`);
+    const groupId = active.dataset.boardTask;
+    const replacement = groupId ? column.querySelector(`[data-board-task="${CSS.escape(groupId)}"]`)
+      : active.matches("summary") ? column.querySelector("summary") : null;
+    replacement?.focus({ preventScroll: true });
+    if (!replacement || document.activeElement !== replacement) column.focus({ preventScroll: true });
+  }
+  if (simple) renderBoardOverlay(cards);
 }
 
 function mountBoardScreen() {
@@ -754,22 +1095,28 @@ function mountBoardScreen() {
     </header>
 
     <div class="board-main">
-      <section class="board-publisher" aria-label="Task Publisher">
+      <div class="board-attention board-simple-only">
+        <button type="button" class="board-attention-btn is-waiting" data-board-attention="waiting" aria-haspopup="dialog"></button>
+        <button type="button" class="board-attention-btn is-delivered" data-board-attention="delivered" aria-haspopup="dialog"></button>
+      </div>
+      <section class="board-publisher">
         <div id="boardBriefList" class="board-brief-list"></div>
         <div class="board-publisher-bar">
+          <span id="boardPublishPath" class="board-publish-path board-simple-only"></span>
+          <button id="boardPublishOptions" class="alma-btn alma-btn-outline board-simple-only" type="button" aria-controls="boardMoreDetails boardCwdGroup boardAddBriefBtn"></button>
           <button id="boardAddBriefBtn" class="alma-btn alma-btn-outline board-add-item-btn" type="button"></button>
-          <div class="board-cwd-group">
-            <span id="boardCwdLabel" class="board-cwd-label"></span>
+          <div id="boardCwdGroup" class="board-cwd-group">
+            <label id="boardCwdLabel" class="board-cwd-label" for="boardCwdInput"></label>
             <input id="boardCwdInput" class="text-input board-cwd-input" list="projectChoices" autocomplete="off" />
             <button id="boardBrowseCwdBtn" class="alma-btn alma-btn-outline" type="button"></button>
           </div>
           <button id="boardPublishBtn" class="alma-btn alma-btn-primary board-publish-btn" type="button"></button>
         </div>
-        <div id="boardPublishError" class="board-publish-error" hidden></div>
+        <div id="boardPublishError" class="board-publish-error" role="alert" hidden></div>
         <details id="boardMoreDetails" class="board-more-options">
           <summary id="boardMoreSummary" class="board-more-summary"></summary>
           <div class="board-more-body">
-            <div class="board-option-field">
+            <div class="board-option-field board-option-lead">
               <span id="boardLeadLabel" class="board-option-label"></span>
               <div id="boardLeadChips" class="agent-chips"></div>
             </div>
@@ -781,8 +1128,15 @@ function mountBoardScreen() {
         </details>
       </section>
 
-      <section id="boardColumnsWrap" class="board-columns" aria-label="Task Progress Columns"></section>
+      <div class="board-filters board-simple-only">
+        <input id="boardSearch" class="text-input" type="search" autocomplete="off" />
+        <select id="boardProjectFilter" class="text-input"></select>
+        <button id="boardClearFilters" class="alma-btn alma-btn-outline" type="button"></button>
+        <span id="boardResultCount" class="board-result-count" role="status"></span>
+      </div>
+      <section id="boardColumnsWrap" class="board-columns"></section>
     </div>
+    <dialog class="board-overlay board-simple-only" aria-labelledby="boardOverlayTitle"></dialog>
   `;
 
   dom.titleEl = screen.querySelector("#boardTitleText");
@@ -792,6 +1146,9 @@ function mountBoardScreen() {
   dom.settingsLabel = screen.querySelector("#boardSettingsLabel");
   dom.workbenchBtn = screen.querySelector("#boardOpenWorkbenchBtn");
   dom.workbenchLabel = screen.querySelector("#boardWorkbenchLabel");
+  dom.publisher = screen.querySelector(".board-publisher");
+  dom.publishPath = screen.querySelector("#boardPublishPath");
+  dom.publishOptions = screen.querySelector("#boardPublishOptions");
   dom.briefList = screen.querySelector("#boardBriefList");
   dom.addBriefBtn = screen.querySelector("#boardAddBriefBtn");
   dom.cwdLabel = screen.querySelector("#boardCwdLabel");
@@ -806,6 +1163,12 @@ function mountBoardScreen() {
   dom.commonLabel = screen.querySelector("#boardCommonLabel");
   dom.commonInput = screen.querySelector("#boardCommonInput");
   dom.columnsWrap = screen.querySelector("#boardColumnsWrap");
+  dom.attentionButtons = [...screen.querySelectorAll("[data-board-attention]")];
+  dom.searchInput = screen.querySelector("#boardSearch");
+  dom.projectFilter = screen.querySelector("#boardProjectFilter");
+  dom.clearFilters = screen.querySelector("#boardClearFilters");
+  dom.resultCount = screen.querySelector("#boardResultCount");
+  dom.overlay = screen.querySelector(".board-overlay");
 
   dom.settingsBtn?.addEventListener("click", () => {
     getApp().openSettings?.("general");
@@ -822,6 +1185,7 @@ function mountBoardScreen() {
   dom.cwdInput?.addEventListener("input", () => {
     BOARD_STATE.cwd = dom.cwdInput.value;
     BOARD_STATE.cwdTouched = true;
+    renderPublisherStaticLabels();
   });
   dom.browseBtn?.addEventListener("click", () => {
     void handleBrowseDirectory();
@@ -829,11 +1193,48 @@ function mountBoardScreen() {
   dom.publishBtn?.addEventListener("click", () => {
     void handlePublish();
   });
-  dom.moreDetails?.addEventListener("toggle", () => {
-    BOARD_STATE.moreOpen = Boolean(dom.moreDetails?.open);
+  dom.publishOptions.addEventListener("click", () => {
+    dom.moreDetails.open = !dom.moreDetails.open;
+    renderPublisherStaticLabels();
   });
   dom.commonInput?.addEventListener("input", () => {
     BOARD_STATE.common = dom.commonInput.value;
+  });
+  for (const btn of dom.attentionButtons) {
+    btn.addEventListener("click", () => openBoardOverlay({ bucket: btn.dataset.boardAttention }, btn));
+  }
+  dom.searchInput.addEventListener("input", () => {
+    BOARD_STATE.search = dom.searchInput.value;
+    renderColumns();
+  });
+  dom.projectFilter.addEventListener("change", () => {
+    BOARD_STATE.project = dom.projectFilter.value;
+    renderColumns();
+  });
+  dom.clearFilters.addEventListener("click", () => {
+    BOARD_STATE.search = "";
+    BOARD_STATE.project = "";
+    dom.searchInput.value = "";
+    renderColumns();
+    dom.searchInput.focus();
+  });
+  dom.overlay.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeBoardOverlay();
+  });
+  let pointerOnBackdrop = false;
+  dom.overlay.addEventListener("pointerdown", (event) => {
+    pointerOnBackdrop = event.target === dom.overlay;
+  });
+  dom.overlay.addEventListener("click", (event) => {
+    if (event.target === dom.overlay && pointerOnBackdrop) closeBoardOverlay();
+    else handleOverlayClick(event);
+    pointerOnBackdrop = false;
+  });
+  dom.overlay.addEventListener("input", (event) => {
+    if (event.target.id !== "boardRejectNote") return;
+    BOARD_STATE.rejectDrafts.set(BOARD_STATE.overlay.groupId, event.target.value);
+    dom.overlay.querySelector('[data-board-overlay-ui="submit-prompt"]').disabled = !event.target.value.trim();
   });
 
   BOARD_STATE.mounted = true;
@@ -842,6 +1243,9 @@ function mountBoardScreen() {
 
 export function renderBoard() {
   if (!mountBoardScreen()) return;
+  const simple = !document.body.dataset.skin || document.body.dataset.skin === "modern";
+  if ((!simple || dom.screen.hidden) && dom.overlay.open) closeBoardOverlay();
+  dom.screen.classList.toggle("board-simple", simple);
   syncDefaultsFromState();
   renderTopbar();
   renderPublisherStaticLabels();
@@ -853,6 +1257,9 @@ export function renderBoard() {
 window.HUB_BOARD = {
   render: renderBoard,
   resume: (card) => handleCardAction(card, "resume"),
+  onProgress(groupId) {
+    if (BOARD_STATE.overlay?.groupId === groupId) renderBoardOverlay();
+  },
 };
 
 if (document.readyState === "loading") {

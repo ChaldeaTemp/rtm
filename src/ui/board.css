@@ -754,3 +754,441 @@ body.dark .board-card-btn.is-warning {
     grid-template-columns: 1fr;
   }
 }
+
+/* Minimal skin. Keep the board chrome and theme tokens shared with the workbench. */
+.board-screen:not(.board-simple) .board-simple-only {
+  display: none;
+}
+
+.board-simple {
+  height: 100dvh;
+  min-height: 0;
+  overflow: auto;
+}
+
+.board-simple .board-main {
+  gap: 14px;
+  min-height: 420px;
+  padding-bottom: 20px;
+}
+
+.board-attention {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.board-attention-btn {
+  padding: 6px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.board-attention-btn:hover {
+  border-color: currentColor;
+}
+
+.board-attention-btn.is-waiting,
+.board-detail-status.is-waiting,
+.board-detail-section.is-decision {
+  color: color-mix(in srgb, var(--warn) 76%, var(--ink));
+  background: var(--warn-soft);
+}
+
+.board-attention-btn.is-delivered,
+.board-detail-status.is-delivered {
+  color: var(--agent-agy);
+  background: color-mix(in srgb, var(--agent-agy) 10%, transparent);
+}
+
+.board-simple .board-publisher {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 18%) auto auto;
+  grid-template-areas: "brief path more publish" "add cwd cwd cwd" "extra extra extra extra" "error error error error";
+  align-items: center;
+  gap: 0 10px;
+  background: var(--bg-elevated);
+  border-radius: var(--r-md);
+  box-shadow: none;
+  padding: 10px 12px;
+}
+
+.board-simple .board-publisher-bar {
+  display: contents;
+}
+
+.board-simple .board-brief-list {
+  grid-area: brief;
+  max-height: 168px;
+  overflow-y: auto;
+  padding: 2px;
+  scrollbar-width: thin;
+}
+
+.board-simple .board-brief-input {
+  min-width: 0;
+  min-height: 38px;
+  height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg-elevated);
+}
+
+.board-simple .has-multiline .board-brief-input,
+.board-simple .board-publisher:has(.board-more-options[open]) .board-brief-input {
+  min-height: 55px;
+}
+
+.board-simple .board-publish-path {
+  grid-area: path;
+  overflow: hidden;
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font: 11px var(--mono);
+}
+
+.board-simple #boardPublishOptions { grid-area: more; }
+.board-simple .board-add-item-btn { grid-area: add; justify-self: start; }
+.board-simple .board-cwd-group { grid-area: cwd; }
+.board-simple .board-publish-btn { grid-area: publish; }
+.board-simple .board-publish-error { grid-area: error; }
+.board-simple .board-more-options { grid-area: extra; }
+
+.board-simple .board-add-item-btn,
+.board-simple .board-cwd-group,
+.board-simple .board-publish-error {
+  margin-top: 8px;
+}
+
+.board-simple .board-publisher:not(:has(.board-more-options[open])) :is(.board-add-item-btn, .board-cwd-group, .board-more-options),
+.board-simple :is(.board-more-summary, .board-option-lead) {
+  display: none;
+}
+
+.board-simple .board-cwd-group,
+.board-simple .board-cwd-input {
+  min-width: 0;
+}
+
+.board-simple .board-more-options[open] {
+  margin-top: 8px;
+}
+
+.board-simple .board-more-body {
+  grid-template-columns: 1fr;
+  margin-top: 0;
+}
+
+.board-simple .board-common-input,
+.board-detail-prompt textarea {
+  padding: 8px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+
+.board-filters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.board-filters .text-input {
+  height: 35px;
+  padding: 6px 10px;
+  background: var(--bg-elevated);
+  border-radius: var(--r-sm);
+}
+
+.board-filters input {
+  width: min(245px, 100%);
+}
+
+.board-filters select {
+  width: min(150px, 100%);
+}
+
+.board-result-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.board-simple .board-columns {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  align-items: stretch;
+  min-height: 150px;
+}
+
+.board-simple .board-col {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.board-simple .board-col-header {
+  justify-content: flex-start;
+  background: transparent;
+  padding: 3px 3px 10px;
+}
+
+.board-simple .board-col-dot {
+  box-shadow: none;
+}
+
+.board-simple .board-col-count {
+  background: var(--soft);
+  border: 0;
+  border-radius: 4px;
+  min-width: 20px;
+  height: 17px;
+}
+
+.board-simple .board-col-body {
+  min-height: 0;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding: 10px 3px 4px;
+}
+
+.board-simple .board-col-empty {
+  margin: 0;
+}
+
+.board-simple-card {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: 100%;
+  min-height: 110px;
+  gap: 8px;
+  padding: 11px 13px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  text-align: left;
+  cursor: pointer;
+  color: var(--ink);
+}
+
+.board-simple-card:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+.board-simple-card.is-waiting {
+  border-top: 2px solid var(--warn);
+}
+
+.board-simple-card.is-delivered {
+  border-top: 2px solid var(--agent-agy);
+}
+
+.board-simple-card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.board-simple-card-meta > :first-child,
+.board-simple-card-hint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-simple-number {
+  flex-shrink: 0;
+  font: 10.5px var(--mono);
+}
+
+.board-simple-card-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-size: 13.5px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.board-simple-card-hint {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.board-simple-card.is-failed .board-simple-card-hint {
+  color: var(--err);
+}
+
+.board-overlay[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.board-overlay {
+  --panel: var(--bg-elevated);
+  --ink-2: var(--ink);
+  --hover: var(--soft);
+  width: 640px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100dvh - 64px);
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg-elevated);
+  color: var(--ink);
+  box-shadow: var(--shadow-md);
+}
+
+.board-overlay::backdrop {
+  background: rgba(17, 24, 28, 0.39);
+}
+
+.board-overlay-header {
+  position: relative;
+  padding: 20px 58px 16px 24px;
+  border-bottom: 1px solid var(--line);
+}
+
+.board-overlay-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.board-detail-status {
+  flex-shrink: 0;
+  border-radius: var(--r-sm);
+  background: var(--soft);
+  padding: 2px 8px;
+}
+
+.board-overlay h2 {
+  margin: 0;
+  max-height: 5em;
+  overflow: auto;
+  font-size: 20px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.board-overlay h2:focus { outline: none; }
+
+.board-overlay-close {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  cursor: pointer;
+  font-size: 19px;
+}
+
+.board-overlay-close:hover { background: var(--soft); }
+
+.board-overlay-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  padding: 18px 24px 22px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.board-overlay-body > * { flex: none; }
+.board-overlay-list { gap: 10px; }
+
+.board-overlay-footer {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 13px 24px;
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+}
+
+.board-overlay :is(h3, p) { margin: 0; }
+.board-overlay .board-overlay-error { margin: 0 24px 12px; }
+.board-overlay .board-card-btn { min-height: 34px; padding-inline: 12px; font-size: 12px; }
+.board-overlay .board-card-btn:disabled { opacity: 0.55; cursor: default; }
+.board-overlay .board-card-btn.is-warning { color: var(--warn); }
+.board-overlay h3, .board-detail-prompt label { font-size: 12px; font-weight: 650; }
+
+.board-detail-section {
+  display: grid;
+  gap: 5px;
+  font-size: 13px;
+}
+
+.board-detail-section h3 { color: var(--muted); }
+.board-detail-section p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.board-detail-section.is-directory p { font: 12px var(--mono); }
+
+.board-detail-section.is-decision,
+.board-detail-section.is-failure,
+.board-detail-prompt {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+
+.board-detail-section.is-failure {
+  color: var(--err);
+  background: var(--err-soft);
+}
+
+.board-detail-prompt {
+  display: grid;
+  gap: 9px;
+  font-size: 13px;
+  background: var(--bg);
+}
+
+.board-detail-prompt textarea {
+  width: 100%;
+  min-height: 70px;
+  resize: vertical;
+}
+
+@media (max-width: 900px) {
+  .board-simple .board-columns {
+    grid-template-columns: repeat(5, minmax(155px, 1fr));
+    overflow-x: auto;
+  }
+}
+
+@media (max-width: 650px) {
+  .board-simple .board-publisher {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas: "brief brief brief" "path more publish" "add cwd cwd" "extra extra extra" "error error error";
+    row-gap: 6px;
+  }
+  .board-simple .board-publish-path { padding-left: 0; border-left: 0; }
+  .board-simple .board-cwd-group { flex-wrap: wrap; }
+}
