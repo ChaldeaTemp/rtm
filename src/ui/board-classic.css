@@ -208,12 +208,19 @@ body.dark[data-skin="classic"] {
 .cb-small.is-stale,
 .cb-small.is-loading { fill: var(--faint); }
 .cb-selected { font: 12px var(--mono); fill: var(--accent); }
-.cb-chip-caption { font: 10px var(--mono); fill: var(--muted); }
-.cb-chip-count { font: 32px var(--mono); fill: var(--ink); }
-.cb-chip-sub { font-size: 8px; fill: var(--muted); }
-.cb-module-count { font: 22px var(--mono); fill: var(--ink); }
-.cb-task-id { font: 13px var(--mono); fill: var(--ink); }
-.cb-stack-count { font: 15px var(--mono); fill: var(--ink); }
+/* Face text is drawn upright, so it can stay small without becoming illegible. */
+.cb-chip-caption { font: 9px var(--mono); letter-spacing: 0.08em; fill: var(--muted); }
+.cb-chip-count { font: 600 26px var(--mono); fill: var(--ink); }
+.cb-chip-sub { font-size: 9px; fill: var(--muted); }
+.cb-module-count { font: 600 18px var(--mono); fill: var(--ink); }
+.cb-task-id { font: 600 13px var(--mono); fill: var(--ink); }
+.cb-stack-count { font: 600 14px var(--mono); fill: var(--ink); }
+.cb-chip-caption,
+.cb-chip-sub,
+.cb-chip-count,
+.cb-module-count,
+.cb-task-id,
+.cb-stack-count { pointer-events: none; }
 
 .cb-trace {
   fill: none;
@@ -274,6 +281,9 @@ body.dark[data-skin="classic"] {
 .cb-seg.is-on { stroke: var(--lcd-ink); }
 .cb-lcd-caption { font: 10px var(--mono); fill: var(--lcd-ink); }
 .cb-lcd-cell { fill: transparent; stroke: transparent; stroke-width: 1; }
+.cb-lcd-divider { stroke: var(--lcd-off); stroke-width: 1; stroke-dasharray: 3 3; }
+/* Finished tasks are a record, not live work: the readout is quieter than the three banks. */
+.cb-lcd-readout.is-done .cb-seg.is-on { stroke: color-mix(in srgb, var(--lcd-ink) 82%, var(--lcd-bg)); }
 
 .cb-lcd-readout:hover .cb-lcd-cell,
 .cb-lcd-readout:focus-visible .cb-lcd-cell,

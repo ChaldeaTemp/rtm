@@ -20,12 +20,36 @@ const NS = "http://www.w3.org/2000/svg";
 // Scene drawn in 1380×720 units; the visible window is the viewBox below. Every shape, hit
 // area and animation uses these same units.
 const VIEWBOX = "100 85 1170 620";
-const BANKS = {
-  queued: { index: 0, x: 220, y: 300, route: [[570, 363], [525, 385], [460, 392]] },
-  running: { index: 1, x: 940, y: 170, route: [[752, 349], [830, 374], [895, 342], [895, 229]] },
-  attention: { index: 2, x: 960, y: 470, route: [[738, 389], [825, 417], [825, 500], [915, 529]] },
+
+// A shallow oblique projection: u runs right (barely descending), v comes toward the viewer
+// (down and slightly left), z is up. Text is never projected; it is drawn upright at the
+// centre of the face it labels, so the scene stays readable.
+const PROJ = { b: 0.42, c: 0.18, d: 0.55 };
+const point = (x, y, u, v, z = 0) => [x + u - PROJ.b * v, y + PROJ.c * u + PROJ.d * v - z];
+const round = (p) => p.map((n) => Math.round(n * 10) / 10);
+
+// Agent CPU: a substrate with a raised chip. Ports sit on the substrate's top edges.
+const CPU = { x: 623, y: 290, w: 146, d: 124 };
+const CHIP = point(CPU.x, CPU.y, 22, 18, 10);
+const CPU_PORTS = {
+  queued: round(point(CPU.x, CPU.y, 0, 70, 10)),
+  running: round(point(CPU.x, CPU.y, CPU.w, 40, 10)),
+  attention: round(point(CPU.x, CPU.y, CPU.w, 100, 10)),
 };
-const CPU_OUT = [[670, 336], [670, 363]];
+const CPU_OUT = [round(point(CHIP[0], CHIP[1], 51, 41, 22)), round(point(CPU.x, CPU.y, 73, 62, 10))];
+
+// Banks: a base of 230×82 with three sockets. Each trace runs from its CPU port along a
+// horizontal, a vertical at `busX`, and a horizontal into the bank's side port.
+const BANKS = {
+  queued: { index: 0, x: 190, y: 330, side: "right", busX: 500 },
+  running: { index: 1, x: 930, y: 190, side: "left", busX: 830 },
+  attention: { index: 2, x: 950, y: 480, side: "left", busX: 850 },
+};
+for (const [key, bank] of Object.entries(BANKS)) {
+  const from = CPU_PORTS[key];
+  const to = round(point(bank.x, bank.y, bank.side === "right" ? 236 : -6, 41, 5));
+  bank.route = [from, [bank.busX, from[1]], [bank.busX, to[1]], to];
+}
 const BASE = ["var(--bg)", "var(--bg-panel)", "var(--cb-side)"];
 const RAISED = ["var(--bg-elevated)", "var(--bg-panel)", "var(--cb-side)"];
 const GROUP_LABEL = { queued: "boardColQueued", running: "boardColRunning", attention: "classicAttention" };
@@ -38,7 +62,6 @@ const MODULES = {
 };
 
 const reducedMotion = () => globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
-const point = (x, y, u, v, z = 0) => [x + u - 0.65 * v, y + 0.32 * u + 0.48 * v - z];
 const pts = (list) => list.map((p) => p.join(",")).join(" ");
 const pathD = (list) => "M " + list.map((p) => p.join(" ")).join(" L ");
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -67,7 +90,13 @@ function box(parent, x, y, w, depth, h, colors, capClass = "") {
   el("polygon", { points: pts([a, b, c, f]), fill: colors[0], class: `cb-edge ${capClass}`.trim() }, parent);
 }
 
-const topFace = (parent, x, y) => el("g", { transform: `matrix(1 .32 -.65 .48 ${x} ${y})` }, parent);
+// Decorations painted onto a top face (marks, insets) follow the projection.
+const topFace = (parent, x, y) => el("g", { transform: `matrix(1 ${PROJ.c} ${-PROJ.b} ${PROJ.d} ${x} ${y})` }, parent);
+
+// Upright text centred on a screen point.
+function faceText(parent, [x, y], text, cls, dy = 0) {
+  return txt(Math.round(x * 10) / 10, Math.round((y + dy) * 10) / 10, text, { "text-anchor": "middle", "dominant-baseline": "central", class: cls }, parent);
+}
 
 function shortId(card) {
   return String(card.groupId || "").replace(/^grp-/, "").slice(0, 4);
@@ -113,7 +142,6 @@ export function createClassicBoard(api) {
           <span class="cb-mono" data-cb="activeCount"></span>
         </div>
         <div class="cb-actions">
-          <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-cb="finished" data-scene-key="finished" aria-haspopup="dialog"></button>
           <button type="button" class="alma-btn alma-btn-outline alma-btn-sm" data-cb="replay"></button>
         </div>
       </div>
@@ -149,7 +177,6 @@ export function createClassicBoard(api) {
       api.setProject(dom.project.value);
       api.renderBody();
     });
-    dom.finished.addEventListener("click", () => openPanel({ type: "finished", query: "" }, dom.finished, "finished"));
     dom.replay.addEventListener("click", () => {
       if (intro) skipIntro();
       else void playIntro();
@@ -267,7 +294,6 @@ export function createClassicBoard(api) {
     dom.project.title = currentScope();
     dom.tasksLabel.textContent = t("classicActiveTasks");
     dom.activeCount.textContent = loaded ? String(model.active) : "—";
-    dom.finished.textContent = t("classicFinished", model.done.length);
     dom.stageLabel.textContent = t("classicRegister");
     dom.annotation.textContent = t("classicAnnotation", PREVIEW_SLOTS);
     dom.svg.setAttribute("aria-label", t("classicSceneLabel"));
@@ -347,26 +373,27 @@ export function createClassicBoard(api) {
     drawCore(counts.agents);
     drawMonitor(loaded);
     drawCollaborators(counts);
-    txt(670, 450, t("classicCpuName"), { "text-anchor": "middle", class: "cb-label-lg" }, dom.modules);
-    txt(670, 474, "", { "text-anchor": "middle", class: "cb-selected", "data-cb-selected": "" }, dom.modules);
+    txt(670, 414, t("classicCpuName"), { "text-anchor": "middle", class: "cb-label-lg" }, dom.modules);
+    txt(670, 437, "", { "text-anchor": "middle", class: "cb-selected", "data-cb-selected": "" }, dom.modules);
     for (const key of CLASSIC_GROUPS) drawBank(key, loaded);
     if (focusKey) dom.svg.querySelector(`[data-scene-key="${CSS.escape(focusKey)}"]`)?.focus({ preventScroll: true });
   }
 
   function drawIntake() {
     const g = el("g", { class: "cb-object" }, dom.modules);
-    box(g, 250, 152, 86, 64, 16, RAISED, "cb-cap");
-    el("path", { d: "M 28 30 H 58 M 43 15 V 45", class: "cb-plus" }, topFace(g, 250, 136));
-    txt(270, 240, t("classicIntake"), { "text-anchor": "middle", class: "cb-label-lg" }, g);
-    txt(270, 261, t("classicNewTask"), { "text-anchor": "middle", class: "cb-label-sm" }, g);
-    el("path", { d: "M 249 214 L 209 234 L 209 288", class: "cb-trace" }, dom.traces);
+    const [x, y] = [250, 150];
+    box(g, x, y, 86, 64, 16, RAISED, "cb-cap");
+    el("path", { d: "M 28 32 H 58 M 43 17 V 47", class: "cb-plus" }, topFace(g, x, y - 16));
+    txt(280, 230, t("classicIntake"), { "text-anchor": "middle", class: "cb-label-lg" }, g);
+    txt(280, 251, t("classicNewTask"), { "text-anchor": "middle", class: "cb-label-sm" }, g);
+    el("path", { d: "M 223 185 L 205 195 V 322", class: "cb-trace" }, dom.traces);
     interactive(g, "intake", t("classicIntakeLabel"), (node) => openPanel({ type: "publish" }, node, "intake"));
   }
 
   function drawCore(count) {
     const core = el("g", { class: "cb-object" }, dom.modules);
-    box(core, 635, 300, 146, 124, 10, BASE);
-    const [cx, cy] = point(635, 300, 22, 18, 10);
+    box(core, CPU.x, CPU.y, CPU.w, CPU.d, 10, BASE);
+    const [cx, cy] = CHIP;
     // Pins lie on the substrate; the raised chip sits above them.
     for (let i = 0; i < 6; i++) {
       const u = 13 + i * 15, v = 10 + i * 12;
@@ -375,13 +402,12 @@ export function createClassicBoard(api) {
       }
     }
     box(core, cx, cy, 102, 82, 22, RAISED, "cb-cap");
-    const top = topFace(core, cx, cy - 22);
-    el("rect", { x: 6, y: 6, width: 90, height: 70, class: "cb-inset" }, top);
-    txt(51, 23, "AGENT CPU", { "text-anchor": "middle", class: "cb-chip-caption" }, top);
-    txt(51, 57, count.text, { "text-anchor": "middle", class: "cb-chip-count" }, top);
-    txt(51, 70, t("classicCpuCaption"), { "text-anchor": "middle", class: "cb-chip-sub" }, top);
-    for (const [key, bank] of Object.entries(BANKS)) {
-      const [x, y] = bank.route[0];
+    el("rect", { x: 6, y: 6, width: 90, height: 70, class: "cb-inset" }, topFace(core, cx, cy - 22));
+    const centre = point(cx, cy, 51, 41, 22);
+    faceText(core, centre, "AGENT CPU", "cb-chip-caption", -19);
+    faceText(core, centre, count.text, "cb-chip-count", 1);
+    faceText(core, centre, t("classicCpuCaption"), "cb-chip-sub", 21);
+    for (const [key, [x, y]] of Object.entries(CPU_PORTS)) {
       el("circle", { cx: x, cy: y, r: 4, class: "cb-port", "data-key": key }, core);
     }
     interactive(core, "module:agents", moduleLabel("agents", count), (node) => openModule("agents", node));
@@ -404,66 +430,75 @@ export function createClassicBoard(api) {
 
   function drawMonitor(loaded) {
     const panel = el("g", { role: "group", "aria-label": "TASK MONITOR" }, dom.modules);
-    el("path", { d: "M 467 108 H 791 V 219 H 467 Z", class: "cb-plate-back" }, panel);
-    el("rect", { x: 460, y: 100, width: 324, height: 112, class: "cb-plate" }, panel);
-    el("rect", { x: 470, y: 123, width: 304, height: 79, class: "cb-lcd" }, panel);
-    txt(474, 115, "TASK MONITOR", { class: "cb-small" }, panel);
-    txt(767, 115, t("classicMonitorTotal", loaded ? model.active : "--"), { "text-anchor": "end", class: "cb-small" }, panel);
-    CLASSIC_GROUPS.forEach((key, i) => {
-      const g = el("g", { class: "cb-object cb-lcd-readout", "data-key": key }, panel);
-      const x = 477 + i * 100;
+    el("path", { d: "M 427 108 H 851 V 219 H 427 Z", class: "cb-plate-back" }, panel);
+    el("rect", { x: 420, y: 100, width: 424, height: 112, class: "cb-plate" }, panel);
+    el("rect", { x: 430, y: 123, width: 404, height: 79, class: "cb-lcd" }, panel);
+    txt(434, 115, "TASK MONITOR", { class: "cb-small" }, panel);
+    txt(830, 115, t("classicMonitorTotal", loaded ? model.active : "--"), { "text-anchor": "end", class: "cb-small" }, panel);
+    // Three active banks, then the finished count behind a divider; done tasks are not active.
+    const cells = [
+      ...CLASSIC_GROUPS.map((key) => ({ key, caption: t(GROUP_LABEL[key]), count: model.groups[key].length, open: (node) => openGroup(key, node, "", `lcd:${key}`) })),
+      { key: "done", caption: t("classicDone"), count: model.done.length, open: (node) => openPanel({ type: "finished", query: "" }, node, "lcd:done") },
+    ];
+    cells.forEach(({ key, caption, count, open }, i) => {
+      const g = el("g", { class: `cb-object cb-lcd-readout${key === "done" ? " is-done" : ""}`, "data-key": key }, panel);
+      const x = 437 + i * 100;
       el("rect", { x, y: 129, width: 92, height: 68, class: "cb-lcd-cell" }, g);
-      txt(x + 9, 141, t(GROUP_LABEL[key]), { class: "cb-lcd-caption" }, g);
-      const count = model.groups[key].length;
+      txt(x + 9, 141, caption, { class: "cb-lcd-caption" }, g);
       lcdNumber(g, x + 16, 150, loaded ? count : null);
-      interactive(g, `lcd:${key}`, t("classicLcdLabel", t(GROUP_LABEL[key]), loaded ? count : "—"), (node) => openGroup(key, node, "", `lcd:${key}`));
+      interactive(g, `lcd:${key}`, t("classicLcdLabel", caption, loaded ? count : "—"), open);
     });
-    el("path", { d: "M 622 219 V 237", class: "cb-trace is-faint" }, dom.traces);
+    el("path", { d: "M 733 131 V 195", class: "cb-lcd-divider" }, panel);
+    el("path", { d: "M 632 219 V 281", class: "cb-trace is-faint" }, dom.traces);
 
     const reasons = el("g", { role: "group", "aria-label": t("classicReasonsTitle") }, dom.modules);
-    el("rect", { x: 190, y: 552, width: 286, height: 102, class: "cb-plate-back" }, reasons);
-    el("rect", { x: 184, y: 546, width: 286, height: 102, class: "cb-plate" }, reasons);
-    txt(198, 566, t("classicReasonsTitle"), { class: "cb-small" }, reasons);
+    el("rect", { x: 190, y: 546, width: 286, height: 102, class: "cb-plate-back" }, reasons);
+    el("rect", { x: 184, y: 540, width: 286, height: 102, class: "cb-plate" }, reasons);
+    txt(198, 560, t("classicReasonsTitle"), { class: "cb-small" }, reasons);
     ATTENTION_REASONS.forEach((reason, i) => {
       const g = el("g", { class: "cb-object cb-reason", "data-reason": reason }, reasons);
       const x = 198 + i * 87;
-      el("rect", { x, y: 578, width: 77, height: 55, class: "cb-reason-cell" }, g);
-      el("path", { d: `M ${x + 1} 579 V 632`, class: `cb-reason-mark is-${reason}` }, g);
+      el("rect", { x, y: 572, width: 77, height: 55, class: "cb-reason-cell" }, g);
+      el("path", { d: `M ${x + 1} 573 V 626`, class: `cb-reason-mark is-${reason}` }, g);
       const count = model.reasons[reason];
       // Short captions: the cells are narrow; the dialog and aria-label use the full wording.
-      txt(x + 10, 598, t({ decision: "classicCellDecision", review: "classicCellReview", failed: "classicCellFailed" }[reason]), { class: "cb-small" }, g);
-      txt(x + 10, 623, loaded ? pad2(count) : "--", { class: "cb-reason-value" }, g);
+      txt(x + 10, 592, t({ decision: "classicCellDecision", review: "classicCellReview", failed: "classicCellFailed" }[reason]), { class: "cb-small" }, g);
+      txt(x + 10, 617, loaded ? pad2(count) : "--", { class: "cb-reason-value" }, g);
       interactive(g, `reason:${reason}`, t("classicLcdLabel", t(REASON_LABEL[reason]), loaded ? count : "—"),
         (node) => openGroup("attention", node, reason, `reason:${reason}`));
     });
   }
 
   function drawCollaborators(counts) {
-    el("path", { d: "M 625 408 L 515 460 V 515 H 838 M 558 515 V 562 M 698 515 V 562 M 838 515 V 562", class: "cb-trace is-dashed" }, dom.traces);
-    for (const [key, x] of [["resources", 540], ["rules", 680], ["mcp", 820]]) {
-      const y = 568;
+    el("path", { d: "M 575 360 L 545 385 V 490 H 835 M 575 490 V 532 M 705 490 V 532 M 835 490 V 532", class: "cb-trace is-dashed" }, dom.traces);
+    for (const [key, x] of [["resources", 547], ["rules", 677], ["mcp", 807]]) {
+      const y = 562;
       const g = el("g", { class: "cb-object" }, dom.modules);
       let height = 25;
+      let centre = point(x, y, 38, 25, height);
       if (key === "resources") {
         // Three shallow trays form a shared resource archive.
         for (let i = 0; i < 3; i++) box(g, x, y - i * 9, 76, 50, 7, RAISED, i === 2 ? "cb-cap" : "");
       } else if (key === "rules") {
         height = 18;
-        box(g, x, y, 76, 50, 18, RAISED, "cb-cap");
-        const face = topFace(g, x, y - 18);
-        el("rect", { x: 8, y: 8, width: 25, height: 33, class: "cb-doc" }, face);
-        el("path", { d: "M 13 16 H 28 M 13 23 H 28 M 13 30 H 23", class: "cb-doc-lines" }, face);
+        box(g, x, y, 76, 50, height, RAISED, "cb-cap");
+        const face = topFace(g, x, y - height);
+        el("rect", { x: 7, y: 8, width: 22, height: 34, class: "cb-doc" }, face);
+        el("path", { d: "M 11 16 H 25 M 11 23 H 25 M 11 30 H 21", class: "cb-doc-lines" }, face);
+        centre = point(x, y, 53, 25, height);
       } else {
-        box(g, x, y, 76, 50, 25, RAISED, "cb-cap");
-        const front = el("g", { transform: `matrix(1 .32 0 1 ${x - 32.5} ${y - 1})` }, g);
-        for (let i = 0; i < 3; i++) el("rect", { x: 8 + i * 22, y: -15, width: 15, height: 10, class: "cb-doc" }, front);
+        box(g, x, y, 76, 50, height, RAISED, "cb-cap");
+        // Interface sockets on the front face.
+        const [fx, fy] = point(x, y, 0, 50, 0);
+        const front = el("g", { transform: `matrix(1 ${PROJ.c} 0 1 ${fx} ${fy})` }, g);
+        for (let i = 0; i < 3; i++) el("rect", { x: 9 + i * 22, y: -19, width: 15, height: 10, class: "cb-doc" }, front);
       }
       const count = counts[key];
-      txt(key === "rules" ? 54 : 38, 33, count.text, { "text-anchor": "middle", class: "cb-module-count" }, topFace(g, x, y - height));
+      faceText(g, centre, count.text, "cb-module-count");
       const caption = key === "mcp" ? "MCP" : t(MODULES[key].name);
-      txt(x + 22, y + 70, caption, { "text-anchor": "middle", class: "cb-small" }, g);
+      txt(x + 28, y + 70, caption, { "text-anchor": "middle", class: "cb-small" }, g);
       if (count.state !== "ok") {
-        txt(x + 22, y + 84, t(count.state === "stale" ? "classicModuleStale" : count.state === "error" ? "classicModuleFailed" : "classicLoading"),
+        txt(x + 28, y + 84, t(count.state === "stale" ? "classicModuleStale" : count.state === "error" ? "classicModuleFailed" : "classicLoading"),
           { "text-anchor": "middle", class: `cb-small is-${count.state}` }, g);
       }
       interactive(g, `module:${key}`, moduleLabel(key, count), (node) => openModule(key, node));
@@ -493,9 +528,8 @@ export function createClassicBoard(api) {
       const reason = attentionReason(card);
       const g = el("g", { class: `cb-object cb-task${reason ? ` is-${reason}` : ""}`, "data-slot": `${key}:${i}`, "data-group-id": id }, group);
       box(g, x + 4, y + 3, 50, 46, 26, RAISED, "cb-cap");
-      const top = topFace(g, x + 4, y - 23);
-      txt(25, 28, shortId(card), { "text-anchor": "middle", class: "cb-task-id" }, top);
-      el("path", { d: "M 8 7 H 17 M 33 37 h 10", class: "cb-task-mark" }, top);
+      el("path", { d: "M 6 6 H 15 M 35 40 h 10", class: "cb-task-mark" }, topFace(g, x + 4, y + 3 - 26));
+      faceText(g, point(x + 4, y + 3, 25, 23, 26), shortId(card), "cb-task-id");
       const title = `${api.getCardNumber(card)} · ${api.getCardTitle(card)}`;
       interactive(g, `task:${id}`, `${title}${reason ? ` · ${reasonText(card)}` : ""}`, (node) => openTask(card, node));
       g.addEventListener("mouseenter", () => showTip(g, title));
@@ -509,11 +543,11 @@ export function createClassicBoard(api) {
       const [x, y] = slotPos(bank, 2);
       const g = el("g", { class: "cb-object cb-stack", "data-slot": `${key}:stack` }, group);
       for (let z = 0; z < 3; z++) box(g, x + 4, y + 3 - z * 7, 50, 46, 5, RAISED, z === 2 ? "cb-cap" : "");
-      txt(25, 28, `+${hidden}`, { "text-anchor": "middle", class: "cb-stack-count" }, topFace(g, x + 4, y - 16));
+      faceText(g, point(x + 4, y + 3 - 14, 25, 23, 5), `+${hidden}`, "cb-stack-count");
       interactive(g, `stack:${key}`, t("classicStackLabel", t(GROUP_LABEL[key]), hidden, all.length), (node) => openGroup(key, node, "", `stack:${key}`));
       if (isHidden(`${key}:stack`)) g.style.visibility = "hidden";
     }
-    const lx = bank.x + 80, ly = bank.y + 132;
+    const lx = bank.x + 98, ly = bank.y + 120;
     txt(lx, ly, `R${bank.index}   ${t(GROUP_LABEL[key])}`, { "text-anchor": "middle", class: "cb-label-lg" }, group);
     txt(lx, ly + 23, !loaded ? "—" : all.length ? t("classicBankCount", all.length, featured[key].length) : t("classicBankEmpty"),
       { "text-anchor": "middle", class: "cb-label-sm" }, group);
@@ -571,10 +605,10 @@ export function createClassicBoard(api) {
 
   // ---- Animation -------------------------------------------------------------------------
 
-  function makeActor(label) {
+  function makeActor(text) {
     const actor = el("g", { class: "cb-actor" }, dom.flight);
     box(actor, 0, 0, 50, 46, 26, RAISED, "cb-cap");
-    txt(25, 28, label, { class: "cb-task-id", "text-anchor": "middle" }, topFace(actor, 0, -26));
+    faceText(actor, point(0, 0, 25, 23, 26), text, "cb-task-id");
     return actor;
   }
 
@@ -998,7 +1032,7 @@ export function createClassicBoard(api) {
     const fallback = id && find(`task:${id}`);
     if (fallback) return fallback;
     const key = id && categoryIndex(model).get(id);
-    return find(detail.originKey) || (key && find(key === "done" ? "finished" : `stack:${key}`)) || find(key ? `lcd:${key}` : "") || dom.stage;
+    return find(detail.originKey) || (key && find(key === "done" ? "lcd:done" : `stack:${key}`)) || find(key ? `lcd:${key}` : "") || dom.stage;
   }
 
   async function closeOverlay(dialog, detail, animate) {
@@ -1011,10 +1045,14 @@ export function createClassicBoard(api) {
         { transform: `translate(${to.left + to.width / 2 - (from.left + from.width / 2)}px, ${to.top + to.height / 2 - (from.top + from.height / 2)}px) scale(.15)`, opacity: 0 },
       ], { duration: 190, easing: "ease-in", fill: "forwards" });
       closing = anim;
+      // A hidden or throttled page may not advance animation frames; never leave it open.
+      const guard = setTimeout(() => anim.playState === "running" && anim.finish(), 400);
       try {
         await anim.finished;
       } catch {
         return; // reopened while collapsing
+      } finally {
+        clearTimeout(guard);
       }
       if (closing !== anim) return;
       closing = null;
