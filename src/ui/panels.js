@@ -1445,7 +1445,14 @@ function wfClosePopover() {
 // 明细浮窗：草稿状态下可编辑，运行中只读。贴着被点的节点出现，不遮住它
 function wfOpenPopover(ctx, stepId) {
   const { group, draft, server, running, showResults, agents, steps } = ctx;
-  document.getElementById("wfPopover")?.remove();
+  const previous = document.getElementById("wfPopover");
+  const popoverKey = `${group.groupId}:${stepId}`;
+  const openSections = new Set(previous?.dataset.stepKey === popoverKey
+    ? [...previous.querySelectorAll("details[data-wf-section][open]")].map((el) => el.dataset.wfSection)
+    : []);
+  const previousScroll = previous?.dataset.stepKey === popoverKey ? previous.scrollTop : 0;
+  previous?.remove();
+  const sectionAttrs = (key) => `class="wf-pop-section" data-wf-section="${key}"${openSections.has(key) ? " open" : ""}`;
   const esc = app.escapeHtml;
   const index = steps.findIndex((s) => s.id === stepId);
   const step = steps[index];
@@ -1493,6 +1500,7 @@ function wfOpenPopover(ctx, stepId) {
   const pop = document.createElement("div");
   pop.id = "wfPopover";
   pop.className = "wf-popover";
+  pop.dataset.stepKey = popoverKey;
   pop.innerHTML = `
     <div class="wf-pop-head">
       ${
@@ -1527,18 +1535,21 @@ function wfOpenPopover(ctx, stepId) {
     ${
       readonly
         ? ""
-        : `<div class="wf-pop-block">
-            <label>${th("wfStepModel")}</label>
-            <div class="wf-pop-head">
-              <select class="perm-select" data-wf-field="model">
+        : `<details ${sectionAttrs("model")}>
+            <summary>${th("wfStepModel")}</summary>
+            <div class="wf-pop-head wf-pop-section-body">
+              <select class="perm-select" data-wf-field="model" aria-label="${th("selectTheModelForTheCurrentSession")}">
                 ${wfRenderModelOptionsHtml(step.agent, step.model)}
               </select>
-              <select class="perm-select" data-wf-field="effort">
+              <select class="perm-select" data-wf-field="effort" aria-label="${th("selectReasoningEffort")}">
                 ${wfRenderEffortOptionsHtml(step.effort)}
               </select>
             </div>
-          </div>`
+          </details>`
     }
+    ${!readonly && (others.length > 0 || sectionKeys.length > 0)
+      ? `<details ${sectionAttrs("dependencies")}><summary>${th("wfDependencies")}</summary><div class="wf-pop-section-body">`
+      : ""}
     ${
       others.length > 0
         ? `<div class="wf-pop-block">
@@ -1577,6 +1588,7 @@ function wfOpenPopover(ctx, stepId) {
           </div>`
         : ""
     }
+    ${!readonly && (others.length > 0 || sectionKeys.length > 0) ? "</div></details>" : ""}
     <div class="wf-pop-block">
       <label>${th("instructions")}</label>
       ${
@@ -1593,19 +1605,23 @@ function wfOpenPopover(ctx, stepId) {
     ${
       readonly
         ? ""
-        : `<div class="wf-pop-block">
-            <label>${th("wfNodeGate")}</label>
-            <input class="text-input" data-wf-gate="command" value="${esc(step.gate?.command || "")}" placeholder="${th("wfGateCommandPlaceholder")}" />
-            <textarea class="rule-editor-textarea" data-wf-gate="files" rows="2" placeholder="${th("wfGateFilesPlaceholder")}">${esc((step.gate?.files || []).map((f) => (typeof f === "string" ? f : f.path)).filter(Boolean).join("\n"))}</textarea>
-            <div class="wf-pop-head">
-              <input class="text-input" data-wf-gate="outputPattern" value="${esc(step.gate?.outputPattern || "")}" placeholder="${th("wfGatePatternPlaceholder")}" style="flex:1" />
-              <select class="perm-select" data-wf-gate="maxRetries" title="${th("wfGateRetries", step.gate?.maxRetries ?? 2)}">
+        : `<details ${sectionAttrs("gate")}>
+            <summary>${th("wfNodeGate")}</summary>
+            <div class="wf-pop-section-body wf-pop-block">
+              <label for="wfGateCommand">${th("wfGateCommand")}</label>
+              <input id="wfGateCommand" class="text-input" data-wf-gate="command" value="${esc(step.gate?.command || "")}" placeholder="${th("wfGateCommandPlaceholder")}" />
+              <label for="wfGateFiles">${th("wfGateFiles")}</label>
+              <textarea id="wfGateFiles" class="rule-editor-textarea" data-wf-gate="files" rows="2" placeholder="${th("wfGateFilesPlaceholder")}">${esc((step.gate?.files || []).map((f) => (typeof f === "string" ? f : f.path)).filter(Boolean).join("\n"))}</textarea>
+              <label for="wfGatePattern">${th("wfGatePattern")}</label>
+              <input id="wfGatePattern" class="text-input" data-wf-gate="outputPattern" value="${esc(step.gate?.outputPattern || "")}" placeholder="${th("wfGatePatternPlaceholder")}" />
+              <label for="wfGateRetries">${th("wfGateRetryLimit")}</label>
+              <select id="wfGateRetries" class="perm-select" data-wf-gate="maxRetries">
                 ${[1, 2, 3, 4, 5]
                   .map((n) => `<option value="${n}" ${(step.gate?.maxRetries ?? 2) === n ? "selected" : ""}>${th("wfGateRetries", n)}</option>`)
                   .join("")}
               </select>
             </div>
-          </div>`
+          </details>`
     }
     ${(() => {
       if (!readonly && !running && !showResults) return "";
@@ -1650,8 +1666,9 @@ function wfOpenPopover(ctx, stepId) {
           live?.reviewNotes ? `<details class="wf-review-notes"><summary>${th("reviewFeedback")}</summary><pre>${esc(live.reviewNotes)}</pre></details>` : ""
         }</div>`;
       }
-      return `<div class="wf-pop-block">
-        <label>${th("acceptanceReview")}</label>
+      return `<details ${sectionAttrs("review")}>
+        <summary>${th("acceptanceReview")}</summary>
+        <div class="wf-pop-section-body wf-pop-block">
         <div class="wf-pop-head">
           <select class="perm-select" data-wf-review="agent">
             <option value="">${th("noReview")}</option>
@@ -1668,17 +1685,18 @@ function wfOpenPopover(ctx, stepId) {
         ${
           review?.agent
             ? `<div class="wf-pop-head" style="margin-top:4px">
-                 <select class="perm-select" data-wf-review="model">
+                 <select class="perm-select" data-wf-review="model" aria-label="${th("wfReviewerModel")}">
                    ${wfRenderModelOptionsHtml(review.agent, review.model)}
                  </select>
-                 <select class="perm-select" data-wf-review="effort">
+                 <select class="perm-select" data-wf-review="effort" aria-label="${th("selectReasoningEffort")}">
                    ${wfRenderEffortOptionsHtml(review.effort)}
                  </select>
                </div>`
             : ""
         }
         ${review ? `<textarea class="rule-editor-textarea" data-wf-review="criteria" rows="2" placeholder="${th("acceptanceCriteriaOptionalDefaultsToTheStep")}">${esc(review.criteria || "")}</textarea>` : ""}
-      </div>`;
+        </div>
+      </details>`;
     })()}
     ${live?.error && (running || showResults) ? `<div class="wf-error">${esc(workflowErrorText(live))}</div>` : ""}
     ${(() => {
@@ -1696,14 +1714,18 @@ function wfOpenPopover(ctx, stepId) {
   document.body.appendChild(pop);
 
   // 位置：优先放在节点右侧，放不下就放左侧；上下不超出窗口
-  const rect = nodeEl.getBoundingClientRect();
-  const pw = pop.offsetWidth;
-  const ph = pop.offsetHeight;
-  let left = rect.right + 12;
-  if (left + pw > window.innerWidth - 12) left = Math.max(12, rect.left - pw - 12);
-  const top = Math.min(Math.max(12, rect.top), Math.max(12, window.innerHeight - ph - 12));
-  pop.style.left = `${left}px`;
-  pop.style.top = `${top}px`;
+  const positionPopover = () => {
+    const rect = nodeEl.getBoundingClientRect();
+    const pw = pop.offsetWidth;
+    let left = rect.right + 12;
+    if (left + pw > window.innerWidth - 12) left = Math.max(12, rect.left - pw - 12);
+    const top = Math.min(Math.max(12, rect.top), Math.max(12, window.innerHeight - pop.offsetHeight - 12));
+    pop.style.left = `${left}px`;
+    pop.style.top = `${top}px`;
+  };
+  positionPopover();
+  pop.scrollTop = previousScroll;
+  pop.querySelectorAll("details[data-wf-section]").forEach((el) => el.addEventListener("toggle", positionPopover));
 
   pop.querySelector("#wfPopClose").onclick = wfClosePopover;
   const rerenderKeepingOpen = () => {
@@ -1773,6 +1795,10 @@ function wfOpenPopover(ctx, stepId) {
       rerenderKeepingOpen();
     };
   });
+  const existingFileMap = new Map((step.gate?.files || []).map((f) =>
+    typeof f === "string" ? [f, { path: f }] : [f.path, f],
+  ));
+  const gateTimeout = step.gate?.timeoutSeconds ?? 120;
   const applyGate = (structural = false) => {
     const target = draft.steps[index];
     if (!target) return;
@@ -1782,14 +1808,6 @@ function wfOpenPopover(ctx, stepId) {
     const retriesEl = pop.querySelector('[data-wf-gate="maxRetries"]');
 
     const command = cmdEl?.value?.trim() || "";
-    const existingFileMap = new Map();
-    if (Array.isArray(target.gate?.files)) {
-      for (const f of target.gate.files) {
-        if (typeof f === "object" && f && f.path) {
-          existingFileMap.set(f.path, f);
-        }
-      }
-    }
     const rawFiles = filesEl?.value || "";
     const files = rawFiles
       .split("\n")
@@ -1810,7 +1828,7 @@ function wfOpenPopover(ctx, stepId) {
         files,
         outputPattern,
         maxRetries,
-        timeoutSeconds: target.gate?.timeoutSeconds || 120,
+        timeoutSeconds: gateTimeout,
       };
     }
     wfTouch(draft, structural);

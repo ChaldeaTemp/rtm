@@ -21,6 +21,18 @@
   scrollbar-width: none;
 }
 
+.stage-mode-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+#pendingRequestSelect {
+  max-width: min(220px, 25vw);
+  text-overflow: ellipsis;
+}
+
 .mode-tab {
   position: relative;
   display: inline-flex;
@@ -2308,6 +2320,24 @@ body.dark .wf-node {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.wf-pop-section {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.wf-pop-section > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.wf-pop-section-body {
+  margin-top: 8px;
+}
+
+.wf-pop-section-body > .wf-pop-block + .wf-pop-block {
+  margin-top: 8px;
 }
 
 .wf-popover .wf-deps {

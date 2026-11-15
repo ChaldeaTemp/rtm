@@ -137,9 +137,12 @@
             <span id="navTokBadge" class="mode-badge">0</span>
           </button>
         </div>
-        <button id="liveContextPill" class="context-pill" type="button" title="查看当前会话上下文注入与 Token 消耗" data-i18n-title="viewContextAndTokenUsageForThe" data-i18n="contextInitial">
-          上下文 -
-        </button>
+        <div class="stage-mode-actions">
+          <select id="pendingRequestSelect" class="perm-select" hidden></select>
+          <button id="liveContextPill" class="context-pill" type="button" title="查看当前会话上下文注入与 Token 消耗" data-i18n-title="viewContextAndTokenUsageForThe" data-i18n="contextInitial">
+            上下文 -
+          </button>
+        </div>
       </nav>
 
       <header id="chatStageHeader" class="stage-header">
@@ -177,6 +180,10 @@
 
       <div id="permBanner" class="perm-banner" hidden></div>
       <div id="questionBanner" class="perm-banner question-banner" hidden></div>
+      <div id="boardResumeBanner" class="perm-banner perm-row" hidden>
+        <span data-i18n="boardWaitInterrupted">重启中断，待继续</span>
+        <button id="boardResumeBtn" class="alma-btn alma-btn-primary alma-btn-sm" type="button" data-i18n="boardActionResume">继续</button>
+      </div>
 
       <section id="messages" class="messages"></section>
 

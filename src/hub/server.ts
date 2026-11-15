@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
+import { pipeline } from "node:stream/promises";
 import * as acp from "@agentclientprotocol/sdk";
 import { WebSocketServer, type WebSocket } from "ws";
 import { z } from "zod";
@@ -14,6 +15,7 @@ import {
   type ArtifactRecord,
   type BoardCard,
   type BoardDeliverable,
+  type BoardStatus,
   type BoardWaitingReason,
   type ChatImageAttachment,
   type ChatMessagePart,
@@ -55,10 +57,13 @@ import {
   type BoardAction,
   DEFAULT_BOARD_PARALLEL,
   applyBoardAction,
+  buildBoardPrompt,
   clampBoardParallel,
   clampIdleLeadMinutes,
   missingDeliverables,
   pickToStart,
+  readLegacyBoardDispatch,
+  resolveDeliverableFile,
 } from "./task-board.js";
 import { SharedResourceManager, estimateTokens } from "./resources.js";
 import {
@@ -274,6 +279,7 @@ const BoardActionBodySchema = z.object({
   groupId: z.string().min(1),
   action: z.enum(["confirm", "reject", "cancel", "retry", "resume"]),
   note: z.string().optional(),
+  expectedStatus: z.enum(["queued", "running"]).optional(),
 });
 
 const SessionChatBodySchema = z
@@ -1168,6 +1174,7 @@ export class AgentHubServer {
         }
         const gId = this.findGroupIdForSessionKey(event.permission.sessionKey);
         if (gId) {
+          event.permission.groupId = gId;
           this.permissionGroupByRequestId.set(event.permission.requestId, gId);
           permissionBoardGroupId = gId;
         }
@@ -2021,13 +2028,12 @@ export class AgentHubServer {
           group.board.startedAt = Date.now();
           this.boardChanged(group);
 
-          const rejectPrefix = group.board.rejectNote
-            ? `<rejected>\nThe user sent your previous delivery back. Their note: ${group.board.rejectNote}\n</rejected>\n\n`
-            : "";
-          const prompt = `${rejectPrefix}${group.board.brief}\n\n<task_board>\nThis task was published on the task board. When the work is finished, call the \`task_report\` tool with outcome "delivered", a short summary, and every deliverable (files as paths relative to the working directory). If the task cannot be done, call \`task_report\` with outcome "failed" and the reason. Do not end without calling it: the board only frees this task's slot when you report.\n</task_board>`;
-
           const startedBoard = group.board;
-          void this.runLeadChat({ groupId, prompt }).catch((err) => {
+          void this.runLeadChat({
+            groupId,
+            prompt: startedBoard.brief,
+            boardDispatch: { rejectNote: startedBoard.rejectNote },
+          }).catch((err) => {
             if (group.board === startedBoard && group.board.status === "running") {
               group.board.status = "failed";
               group.board.failReason = err instanceof Error ? err.message : String(err);
@@ -2147,17 +2153,9 @@ export class AgentHubServer {
       delete group.board.stalled;
       delete group.board.interrupted;
     } else {
-      const isExistingFile = (absPath: string): boolean => {
-        try {
-          return fs.statSync(absPath).isFile();
-        } catch {
-          return false;
-        }
-      };
       const missing = missingDeliverables(
         input.deliverables ?? [],
         [group.cwd, ...(group.extraDirs ?? [])],
-        isExistingFile,
       );
       if (missing.length > 0) {
         throw new Error(
@@ -2186,7 +2184,12 @@ export class AgentHubServer {
     return { ...group.board };
   }
 
-  async actOnBoardTask(input: { groupId: string; action: BoardAction; note?: string }): Promise<TaskGroup> {
+  async actOnBoardTask(input: {
+    groupId: string;
+    action: BoardAction;
+    note?: string;
+    expectedStatus?: Extract<BoardStatus, "queued" | "running">;
+  }): Promise<TaskGroup> {
     const group = this.groups.get(input.groupId);
     if (!group) {
       throw new Error(`Unknown task group: ${input.groupId}`);
@@ -2198,6 +2201,9 @@ export class AgentHubServer {
       throw new Error("This task is archived.");
     }
     const prevStatus = group.board.status;
+    if (input.action === "cancel" && input.expectedStatus && prevStatus !== input.expectedStatus) {
+      throw new Error(t("boardCancelStateChanged"));
+    }
     let earliestQueuedAt: number | undefined;
     for (const candidate of this.groups.values()) {
       if (
@@ -2950,7 +2956,15 @@ export class AgentHubServer {
 
     let compactedPersistedTools = false;
     for (const msg of state.messages ?? []) {
-      if (!this.groups.has(msg.groupId)) continue;
+      const group = this.groups.get(msg.groupId);
+      if (!group) continue;
+      if (group.board && msg.role === "user" && msg.streamKey === `lead:${msg.groupId}` && !msg.boardDispatch) {
+        const legacy = readLegacyBoardDispatch(msg.text, group.board.brief);
+        if (legacy) {
+          msg.text = group.board.brief;
+          msg.boardDispatch = legacy;
+        }
+      }
       if (msg.status === "streaming") {
         msg.status = "cancelled";
         msg.completedAt = msg.completedAt ?? Date.now();
@@ -3337,7 +3351,10 @@ export class AgentHubServer {
       boardCards: this.listBoardCards(),
       sessions: this.listVisibleSessions(),
       tasks: [...this.tasks.values()],
-      pendingPermissions: this.pool.getPendingPermissions(),
+      pendingPermissions: this.pool.getPendingPermissions().map((p) => ({
+        ...p,
+        groupId: this.permissionGroupByRequestId.get(p.requestId) ?? this.findGroupIdForSessionKey(p.sessionKey),
+      })),
       pendingQuestions: this.listPendingQuestions(),
       memory: this.memory.get(),
       ledger,
@@ -4187,6 +4204,7 @@ export class AgentHubServer {
       steer?: boolean;
       handoff?: { from: AgentId; brief: string };
       notice?: { summary: string; detail: string };
+      boardDispatch?: ChatMessageRecord["boardDispatch"];
       reuseMessageId?: string;
       replaceAssistantMessageId?: string;
     },
@@ -4201,6 +4219,7 @@ export class AgentHubServer {
     }>;
     savedFiles: ChatFileAttachment[];
     displayUserText: string;
+    boardDispatch: ChatMessageRecord["boardDispatch"];
     effectiveUserPrompt: string;
     promptForAgent: string;
   } {
@@ -4250,12 +4269,14 @@ export class AgentHubServer {
 
     const displayUserText =
       (input.notice?.summary ?? input.handoff?.brief ?? input.prompt ?? "").trim() || (validReuse?.text ?? "").trim();
-    const effectiveUserPrompt =
+    const userPrompt =
       displayUserText ||
       (savedFiles.length > 0 ? "请查看附带的文件。" : savedImages.length > 0 ? "请查看并分析附带的图片。" : "");
-    if (!effectiveUserPrompt) {
+    if (!userPrompt) {
       throw new Error(t("messageRequired"));
     }
+    const boardDispatch = input.boardDispatch ?? validReuse?.boardDispatch;
+    const effectiveUserPrompt = boardDispatch ? buildBoardPrompt(userPrompt, boardDispatch.rejectNote) : userPrompt;
     const promptForAgent = input.notice
       ? input.notice.detail
       : input.handoff
@@ -4267,6 +4288,7 @@ export class AgentHubServer {
       savedImages,
       savedFiles,
       displayUserText,
+      boardDispatch,
       effectiveUserPrompt,
       promptForAgent,
     };
@@ -4300,6 +4322,7 @@ export class AgentHubServer {
     handoff?: { from: AgentId; brief: string };
     /** A turn the hub starts to tell the lead what happened; `summary` is what the user sees. */
     notice?: { summary: string; detail: string };
+    boardDispatch?: ChatMessageRecord["boardDispatch"];
     reuseMessageId?: string;
     replaceAssistantMessageId?: string;
     leadAgent?: AgentId;
@@ -4335,7 +4358,9 @@ export class AgentHubServer {
       this.autoLeadTurns.delete(group.groupId);
     }
     const forced = /^\/lead\s+(\S+)\s*$/i.exec((input.prompt ?? "").trim());
-    if (forced && !input.handoff) {
+    const reused = input.reuseMessageId ? this.messages.get(input.reuseMessageId.trim()) : undefined;
+    const reusingBoardDispatch = reused?.streamKey === `lead:${group.groupId}` && reused.boardDispatch;
+    if (forced && !input.handoff && !input.boardDispatch && !reusingBoardDispatch) {
       const previous = group.leadAgent;
       const enabled = this.registry.listEnabledDefinitions();
       const wanted = forced[1]!.toLowerCase();
@@ -4432,6 +4457,7 @@ export class AgentHubServer {
         senderLabel: input.notice ? "系统" : input.handoff ? `${this.agentLabel(input.handoff.from)} 交接` : "你",
         agent: input.handoff?.from,
         text: displayUserText,
+        boardDispatch: prepared.boardDispatch,
         thoughtText: "",
         toolCalls: [],
         status: "done",
@@ -4516,7 +4542,7 @@ export class AgentHubServer {
       this.completePendingHandoff(group, lead, endedNormally);
 
       if (promptDerivedTitle && this.settings.autoTitle && result.stopReason !== "cancelled") {
-        void this.generateTaskTitle(group, promptDerivedTitle, effectiveUserPrompt, result.outputText);
+        void this.generateTaskTitle(group, promptDerivedTitle, displayUserText || effectiveUserPrompt, result.outputText);
       }
 
       return {
@@ -5236,6 +5262,35 @@ export class AgentHubServer {
         const body = BoardActionBodySchema.parse(await readJsonBody(req));
         const group = await this.actOnBoardTask(body);
         sendJson(res, 200, { ok: true, group });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/board/deliverable") {
+        const group = this.groups.get(reqUrl.searchParams.get("groupId") ?? "");
+        const index = reqUrl.searchParams.get("index") ?? "";
+        const item = /^\d+$/.test(index) ? group?.board?.deliverables?.[Number(index)] : undefined;
+        const reportedPath = item?.kind === "file" ? item.path : undefined;
+        const file = group && reportedPath && resolveDeliverableFile(reportedPath, [group.cwd, ...(group.extraDirs ?? [])]);
+        if (!file || !reportedPath) {
+          sendJson(res, 404, { ok: false, error: t("boardDeliverableUnavailable") });
+          return;
+        }
+        const filename = encodeURIComponent(path.basename(reportedPath)).replace(/['()*]/g, (c) =>
+          `%${c.charCodeAt(0).toString(16)}`,
+        );
+        const handle = await fs.promises.open(file, "r").catch(() => undefined);
+        if (!handle) {
+          sendJson(res, 404, { ok: false, error: t("boardDeliverableUnavailable") });
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": "application/octet-stream",
+          "Content-Disposition": `attachment; filename*=UTF-8''${filename}`,
+          "X-Content-Type-Options": "nosniff",
+          "Cache-Control": "no-store",
+        });
+        // A disconnected download already has a response header and cannot return JSON.
+        await pipeline(handle.createReadStream(), res).catch(() => res.destroy());
         return;
       }
 

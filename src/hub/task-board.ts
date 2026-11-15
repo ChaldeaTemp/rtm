@@ -1,7 +1,29 @@
+import fs from "node:fs";
 import path from "node:path";
 import type { BoardDeliverable, TaskBoardInfo } from "../types.js";
 
 export type BoardAction = "confirm" | "reject" | "cancel" | "retry" | "resume";
+
+const BOARD_REPORT_INSTRUCTIONS =
+  '\n\n<task_board>\nThis task was published on the task board. When the work is finished, call the `task_report` tool with outcome "delivered", a short summary, and every deliverable (files as paths relative to the working directory). If the task cannot be done, call `task_report` with outcome "failed" and the reason. Do not end without calling it: the board only frees this task\'s slot when you report.\n</task_board>';
+
+const BOARD_REJECT_PREFIX = "<rejected>\nThe user sent your previous delivery back. Their note: ";
+const BOARD_REJECT_SUFFIX = "\n</rejected>\n\n";
+
+export function buildBoardPrompt(brief: string, rejectNote?: string): string {
+  const prefix = rejectNote ? `${BOARD_REJECT_PREFIX}${rejectNote}${BOARD_REJECT_SUFFIX}` : "";
+  return `${prefix}${brief}${BOARD_REPORT_INSTRUCTIONS}`;
+}
+
+export function readLegacyBoardDispatch(text: string, brief: string): { rejectNote?: string } | undefined {
+  const plainPrompt = buildBoardPrompt(brief);
+  if (text === plainPrompt) return {};
+  const rejectedSuffix = BOARD_REJECT_SUFFIX + plainPrompt;
+  if (text.startsWith(BOARD_REJECT_PREFIX) && text.endsWith(rejectedSuffix)) {
+    return { rejectNote: text.slice(BOARD_REJECT_PREFIX.length, -rejectedSuffix.length) };
+  }
+  return undefined;
+}
 
 export const DEFAULT_BOARD_PARALLEL = 2;
 
@@ -128,39 +150,30 @@ export function applyBoardAction(
   }
 }
 
-export function missingDeliverables(
-  deliverables: BoardDeliverable[],
-  roots: string[],
-  exists: (absPath: string) => boolean,
-): string[] {
-  const missing: string[] = [];
-  for (const item of deliverables) {
-    if (item.kind !== "file") continue;
-    if (!item.path || !item.path.trim()) {
-      missing.push("(no path)");
-      continue;
-    }
-    let found = false;
-    for (const root of roots) {
-      const rootAbs = path.resolve(root);
-      const resolved = path.resolve(rootAbs, item.path);
-      const rel = path.relative(rootAbs, resolved);
-      if (
-        rel !== "" &&
-        rel !== "." &&
-        rel !== ".." &&
-        !rel.startsWith(".." + path.sep) &&
-        !rel.startsWith("../") &&
-        !path.isAbsolute(rel) &&
-        exists(resolved)
-      ) {
-        found = true;
-        break;
+function isInside(root: string, file: string): boolean {
+  const rel = path.relative(root, file);
+  return Boolean(rel) && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+}
+
+export function resolveDeliverableFile(file: string, roots: string[]): string | undefined {
+  for (const root of roots) {
+    const rootAbs = path.resolve(root);
+    const candidate = path.resolve(rootAbs, file);
+    if (!isInside(rootAbs, candidate)) continue;
+    try {
+      const realFile = fs.realpathSync(candidate);
+      if (isInside(fs.realpathSync(rootAbs), realFile) && fs.statSync(realFile).isFile()) {
+        return realFile;
       }
-    }
-    if (!found) {
-      missing.push(item.path);
+    } catch {
+      // The file or an allowed directory may have been moved or removed.
     }
   }
-  return missing;
+  return undefined;
+}
+
+export function missingDeliverables(deliverables: BoardDeliverable[], roots: string[]): string[] {
+  return deliverables
+    .filter((item) => item.kind === "file" && !resolveDeliverableFile(item.path || "", roots))
+    .map((item) => item.path?.trim() ? item.path : "(no path)");
 }

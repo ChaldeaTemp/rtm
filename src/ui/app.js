@@ -363,8 +363,9 @@ function setStageView(view) {
   if (els.sessionTabs) els.sessionTabs.hidden = !isChat || !shouldShowSessionTabs();
   const wtBar = document.getElementById("subWorktreeBar");
   if (wtBar) wtBar.hidden = !isChat;
-  if (els.permBanner) els.permBanner.hidden = !isChat || STATE.pendingPermissions.size === 0;
-  if (els.questionBanner) els.questionBanner.hidden = !isChat || STATE.pendingQuestions.size === 0;
+  if (els.permBanner) els.permBanner.hidden = !isChat;
+  if (els.questionBanner) els.questionBanner.hidden = !isChat;
+  renderBoardResume();
   if (els.messages) els.messages.hidden = !isChat;
   if (els.chatComposerWrap) els.chatComposerWrap.hidden = !isChat;
   if (els.telemetryView) els.telemetryView.hidden = view !== "telemetry";
@@ -911,7 +912,7 @@ function openAppModal(opts) {
         els.appModalInput.focus();
         els.appModalInput.select();
       } else {
-        els.appModalConfirmBtn.focus();
+        (opts.focusCancel ? els.appModalCancelBtn : els.appModalConfirmBtn).focus();
       }
     });
   });
@@ -1789,7 +1790,66 @@ function sessionHasPendingQuestion(sessionKey) {
   return false;
 }
 
+function permissionGroupId(permission) {
+  return permission.groupId || STATE.sessions.get(permission.sessionKey)?.groupId || STATE.defaultGroupId;
+}
+
+const pendingRequestSelect = document.getElementById("pendingRequestSelect");
+
+function renderPendingRequestSelect() {
+  const questions = [...STATE.pendingQuestions.values()];
+  const permissions = [...STATE.pendingPermissions.values()];
+  const label = t("allPendingRequests", questions.length + permissions.length);
+  const options = [
+    ...questions.map((q) => ({ id: q.questionId, groupId: q.groupId, title: q.title || t("boardWaitQuestion") })),
+    ...permissions.map((p) => ({ id: p.requestId, groupId: permissionGroupId(p), title: p.toolTitle || t("boardWaitPermission") })),
+  ];
+  pendingRequestSelect.hidden = options.length === 0;
+  pendingRequestSelect.setAttribute("aria-label", label);
+  const html = `<option value="">${escapeHtml(label)}</option>` + options.map(({ id, groupId, title }) => {
+    const group = STATE.taskGroups.get(groupId);
+    const taskTitle = group ? displayTaskTitle(group) : groupId;
+    return `<option value="${escapeHtml(id)}">${escapeHtml(taskTitle)} · ${escapeHtml(title)}</option>`;
+  }).join("");
+  if (pendingRequestSelect.innerHTML !== html) pendingRequestSelect.innerHTML = html;
+}
+
+function openPendingTask(groupId, reason, requestId) {
+  const question = reason === "question" ? [...STATE.pendingQuestions.values()]
+    .find((q) => q.groupId === groupId && (!requestId || q.questionId === requestId)) : null;
+  const permission = reason === "permission" ? [...STATE.pendingPermissions.values()]
+    .find((p) => permissionGroupId(p) === groupId && (!requestId || p.requestId === requestId)) : null;
+  const session = STATE.sessions.get(question?.sessionKey || permission?.sessionKey);
+  selectGroup(groupId, session?.role === "sub" ? `sub:${session.sessionKey}` : `lead:${groupId}`);
+  setScreenMode("workbench");
+  const row = question ? els.questionBanner.querySelector(`[data-question-id="${CSS.escape(question.questionId)}"]`)
+    : permission ? els.permBanner.querySelector(`[data-request-id="${CSS.escape(permission.requestId)}"]`)
+    : null;
+  (row?.querySelector("input, textarea, .perm-actions button, .question-card-actions button") || row || els.promptInput).focus();
+}
+
+pendingRequestSelect.onchange = () => {
+  const id = pendingRequestSelect.value;
+  const question = STATE.pendingQuestions.get(id);
+  const permission = STATE.pendingPermissions.get(id);
+  pendingRequestSelect.value = "";
+  if (question) openPendingTask(question.groupId, "question", id);
+  else if (permission) openPendingTask(permissionGroupId(permission), "permission", id);
+};
+
+function renderBoardResume() {
+  const banner = document.getElementById("boardResumeBanner");
+  const group = STATE.taskGroups.get(STATE.activeGroupId);
+  const resumable = STATE.stageView === "chat" && !group?.archived &&
+    group?.board?.status === "running" && group.board.interrupted;
+  banner.hidden = !resumable;
+  if (resumable) {
+    document.getElementById("boardResumeBtn").onclick = () => window.HUB_BOARD?.resume?.(group);
+  }
+}
+
 function syncAttentionIndicators(notifyPayload = null) {
+  renderPendingRequestSelect();
   const permCount = STATE.pendingPermissions.size;
   const qCount = STATE.pendingQuestions.size;
   const total = permCount + qCount;
@@ -1861,8 +1921,8 @@ function syncAttentionIndicators(notifyPayload = null) {
 
 function renderPermissions() {
   syncAttentionIndicators();
-  const items = [...STATE.pendingPermissions.values()];
-  if (items.length === 0) {
+  const items = [...STATE.pendingPermissions.values()].filter((p) => permissionGroupId(p) === STATE.activeGroupId);
+  if (STATE.stageView !== "chat" || items.length === 0) {
     els.permBanner.hidden = true;
     els.permBanner.innerHTML = "";
     return;
@@ -1875,6 +1935,7 @@ function renderPermissions() {
     const grp = sess ? STATE.taskGroups.get(sess.groupId) : null;
     const row = document.createElement("div");
     row.className = "perm-row";
+    row.dataset.requestId = p.requestId;
     row.innerHTML = `
       <div>
         <strong class="mono">${th("confirmationRequired")}</strong>
@@ -3100,6 +3161,7 @@ function renderAll() {
   renderSidebarGroups();
   renderStageHeaderAndTabs();
   renderPermissions();
+  renderBoardResume();
   renderMessages();
   renderInspector();
   refreshHeaderMetrics();
@@ -3801,7 +3863,7 @@ function connectWs() {
         scheduleUiRender(UI_REGION.sidebar | UI_REGION.header);
         syncAttentionIndicators({
           body: t("asked", msg.question.agent || "Agent", msg.question.title),
-          groupId: STATE.sessions.get(msg.question.sessionKey)?.groupId,
+          groupId: msg.question.groupId,
         });
         appendLog(t("pendingQuestion", msg.question.title));
       }
@@ -3821,6 +3883,8 @@ function connectWs() {
       window.HUB_APP?.onResourcesUpdated?.();
     } else if (msg.type === "group_created" || msg.type === "group_updated") {
       STATE.taskGroups.set(msg.group.groupId, msg.group);
+      renderBoardResume();
+      renderPendingRequestSelect();
       renderDesktopControls();
       renderSidebarGroups();
       renderStageHeaderAndTabs();
@@ -3960,7 +4024,7 @@ function connectWs() {
       const permSess = STATE.sessions.get(msg.permission.sessionKey);
       syncAttentionIndicators({
         body: t("requestsConfirmation", msg.permission.agent, msg.permission.toolTitle),
-        groupId: permSess?.groupId,
+        groupId: permissionGroupId(msg.permission),
         streamKey: permSess
           ? permSess.role === "lead"
             ? `lead:${permSess.groupId}`
@@ -5060,6 +5124,8 @@ window.HUB_APP = {
   renderMarkdown,
   appendLog,
   selectGroup,
+  openPendingTask,
+  buildArtifactUrl,
   setStageView,
   setScreenMode,
   refreshHeaderMetrics,

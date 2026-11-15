@@ -445,15 +445,15 @@ body.dark .board-publish-error {
 }
 
 .board-card:hover,
-.board-card:focus-visible {
-  border-color: var(--brand);
+.board-card:focus-within {
+  border-color: var(--accent);
   box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
   transform: translateY(-1px);
   outline: none;
 }
 
 body.dark .board-card:hover,
-body.dark .board-card:focus-visible {
+body.dark .board-card:focus-within {
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.32);
 }
 
@@ -490,6 +490,12 @@ body.dark .board-card:focus-visible {
 }
 
 .board-card-title {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
   font-size: 13px;
   font-weight: 700;
   color: var(--ink);
@@ -613,9 +619,17 @@ body.dark .board-deliverables-count {
 }
 
 .board-deliverable-item {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.board-deliverable-item a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.board-deliverable-note {
+  color: var(--muted);
 }
 
 .board-card-fail-reason {
@@ -659,13 +673,14 @@ body.dark .board-card-fail-reason {
 }
 
 .board-card-btn.is-primary {
-  background: var(--brand);
-  border-color: var(--brand);
-  color: #fff;
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--on-ink);
 }
 
-.board-card-btn.is-primary:hover {
-  filter: brightness(1.06);
+.board-card-btn.is-primary:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
 }
 
 .board-card-btn.is-warning {
@@ -677,13 +692,15 @@ body.dark .board-card-btn.is-warning {
   color: #fbbf24;
 }
 
-.board-card-btn.is-danger {
-  border-color: rgba(239, 68, 68, 0.4);
-  color: #dc2626;
+.board-card-btn.is-secondary {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
 }
 
-body.dark .board-card-btn.is-danger {
-  color: #f87171;
+.board-card-btn.is-secondary:hover:not(:disabled) {
+  border-color: var(--line);
+  color: var(--ink);
 }
 
 /* Confirmed collapsible section inside Delivered column */
@@ -712,7 +729,13 @@ body.dark .board-card-btn.is-danger {
 /* Responsive layout */
 @media (max-width: 1320px) {
   .board-columns {
-    grid-template-columns: repeat(3, minmax(240px, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1150px) {
+  .board-columns {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 

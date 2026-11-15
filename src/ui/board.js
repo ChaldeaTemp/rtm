@@ -343,6 +343,18 @@ async function handlePublish() {
 
 async function handleCardAction(card, action) {
   if (!card?.groupId || BOARD_STATE.actionBusyIds.has(card.groupId)) return;
+  const app = getApp();
+  if (action === "cancel") {
+    const confirmed = await app.showConfirmModal({
+      title: t("boardCancelTitle", getCardTitle(card)),
+      message: t(card.board.status === "queued" ? "boardCancelQueued" : "boardCancelRunning"),
+      confirmText: t("boardCancelConfirm"),
+      cancelText: t("boardKeepTask"),
+      danger: true,
+      focusCancel: true,
+    });
+    if (!confirmed) return;
+  }
   let note;
   if (action === "reject") {
     const showPrompt = getApp().showPromptModal;
@@ -358,7 +370,10 @@ async function handleCardAction(card, action) {
     if (!note) return;
   }
 
+  if (BOARD_STATE.actionBusyIds.has(card.groupId)) return;
   BOARD_STATE.actionBusyIds.add(card.groupId);
+  BOARD_STATE.errorText = "";
+  updateErrorBanner();
   renderColumns();
   try {
     const res = await apiFetch("/api/board/action", {
@@ -368,6 +383,7 @@ async function handleCardAction(card, action) {
         groupId: card.groupId,
         action,
         note,
+        expectedStatus: action === "cancel" ? card.board.status : undefined,
       }),
     });
     const data = await res.json().catch(() => ({}));
@@ -377,6 +393,9 @@ async function handleCardAction(card, action) {
   } catch (err) {
     BOARD_STATE.errorText = err?.message || String(err);
     updateErrorBanner();
+    if (dom.screen?.hidden) {
+      void app.showConfirmModal({ message: BOARD_STATE.errorText, confirmText: t("ok") });
+    }
   } finally {
     BOARD_STATE.actionBusyIds.delete(card.groupId);
     renderColumns();
@@ -416,13 +435,40 @@ function getWaitingBadgeInfo(card) {
   return { text: t("boardWaitQuestion"), cls: "is-question" };
 }
 
+function renderDeliverable(card, item, index) {
+  const label = item.kind === "text" ? item.note || item.path : item.path || item.note;
+  let displayLabel = label;
+  let href;
+  if (item.kind === "file" && item.path) {
+    href = `/api/board/deliverable?${new URLSearchParams({ groupId: card.groupId, index })}`;
+  } else if (item.kind === "link" && label) {
+    const url = URL.canParse(label, location.href) ? new URL(label, location.href) : null;
+    if (url?.origin === location.origin && url.pathname.startsWith("/artifacts/")) {
+      const id = url.pathname.slice("/artifacts/".length);
+      const artifact = getHubState().artifacts?.get(id);
+      if (artifact?.groupId === card.groupId) {
+        href = getApp().buildArtifactUrl(id);
+        displayLabel = artifact.title || label;
+      }
+    } else if (/^https?:\/\//i.test(label) && (url?.protocol === "https:" || url?.protocol === "http:")) {
+      href = url.href;
+    }
+  }
+  const text = escapeHtml(displayLabel || item.kind);
+  const note = item.kind !== "text" && item.path && item.note
+    ? `<div class="board-deliverable-note">${escapeHtml(item.note)}</div>`
+    : "";
+  const linkLabel = item.kind === "file" ? t("boardDownloadFile", label) : label;
+  return `<li class="board-deliverable-item">${href
+    ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(linkLabel)}">${text}</a>`
+    : text}${note}</li>`;
+}
+
 function createCardElement(card, columnKey) {
   const el = document.createElement("article");
   const isDone = card?.board?.status === "done";
   const isBusy = BOARD_STATE.actionBusyIds.has(card.groupId);
   el.className = `board-card is-${columnKey}${isDone ? " is-done" : ""}${isBusy ? " is-busy" : ""}`;
-  el.tabIndex = 0;
-  el.setAttribute("role", "button");
 
   const title = getCardTitle(card);
   const leadBadgeHtml = getApp().agentTagHtml?.(card.leadAgent) || `<span class="agent-tag">${escapeHtml(card.leadAgent || "")}</span>`;
@@ -447,13 +493,7 @@ function createCardElement(card, columnKey) {
     extraBodyHtml += `<div class="board-card-summary">${escapeHtml(summary)}</div>`;
   }
   if ((columnKey === "delivered" || isDone) && deliverables.length > 0) {
-    const itemsHtml = deliverables
-      .slice(0, 4)
-      .map((item) => {
-        const label = item.path || item.note || item.kind;
-        return `<li class="board-deliverable-item" title="${escapeHtml(label)}">${escapeHtml(label)}</li>`;
-      })
-      .join("");
+    const itemsHtml = deliverables.map((item, index) => renderDeliverable(card, item, index)).join("");
     extraBodyHtml += `
       <div class="board-card-deliverables">
         <div class="board-deliverables-count">${escapeHtml(t("boardDeliverablesCount", deliverables.length))}</div>
@@ -478,10 +518,14 @@ function createCardElement(card, columnKey) {
   } else if (status === "running") {
     if (isInterrupted) {
       actions.push({ action: "resume", label: t("boardActionResume"), cls: "is-primary" });
+    } else if (columnKey === "waiting") {
+      const label = card.waitingReason === "permission" ? "boardActionPermission"
+        : card.waitingReason === "stalled" ? "boardActionGuide" : "boardActionAnswer";
+      actions.push({ action: "handle", label: t(label), cls: "is-primary" });
     }
-    actions.push({ action: "cancel", label: t("boardActionCancel"), cls: "is-danger" });
+    actions.push({ action: "cancel", label: t("boardActionCancel"), cls: "is-secondary" });
   } else if (status === "queued") {
-    actions.push({ action: "cancel", label: t("boardActionCancel"), cls: "is-danger" });
+    actions.push({ action: "cancel", label: t("boardActionCancel"), cls: "is-secondary" });
   }
 
   const actionsHtml = actions.length
@@ -495,7 +539,7 @@ function createCardElement(card, columnKey) {
 
   el.innerHTML = `
     <div class="board-card-top">
-      <div class="board-card-title">${escapeHtml(title)}</div>
+      <button type="button" class="board-card-title">${escapeHtml(title)}</button>
       ${leadBadgeHtml}
     </div>
     <div class="board-card-meta">
@@ -511,7 +555,8 @@ function createCardElement(card, columnKey) {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       const action = btn.getAttribute("data-board-action");
-      if (action) void handleCardAction(card, action);
+      if (action === "handle") getApp().openPendingTask(card.groupId, card.waitingReason);
+      else if (action) void handleCardAction(card, action);
     });
   });
 
@@ -521,13 +566,8 @@ function createCardElement(card, columnKey) {
     app.setScreenMode?.("workbench");
   };
 
-  el.addEventListener("click", openCardInWorkbench);
-  el.addEventListener("keydown", (e) => {
-    if (e.target !== el) return;
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      openCardInWorkbench();
-    }
+  el.addEventListener("click", (e) => {
+    if (!e.target.closest("a, .board-card-deliverables")) openCardInWorkbench();
   });
 
   return el;
@@ -812,6 +852,7 @@ export function renderBoard() {
 
 window.HUB_BOARD = {
   render: renderBoard,
+  resume: (card) => handleCardAction(card, "resume"),
 };
 
 if (document.readyState === "loading") {

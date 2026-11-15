@@ -195,7 +195,7 @@ function renderQuestions() {
   if (!container) return;
 
   const isChat = app.STATE.stageView === "chat";
-  const items = [...app.STATE.pendingQuestions.values()];
+  const items = [...app.STATE.pendingQuestions.values()].filter((q) => q.groupId === app.STATE.activeGroupId);
   if (!isChat || items.length === 0) {
     container.hidden = true;
     container.innerHTML = "";
@@ -213,6 +213,8 @@ function renderQuestions() {
     const draft = INTERACTIVE_STATE.questionDrafts.get(q.questionId);
     const card = document.createElement("div");
     card.className = "question-card";
+    card.dataset.questionId = q.questionId;
+    card.tabIndex = -1;
 
     const head = document.createElement("div");
     head.className = "question-card-head";

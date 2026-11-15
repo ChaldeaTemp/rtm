@@ -346,6 +346,7 @@ export interface TaskRecord {
 
 export interface PendingPermission {
   requestId: string;
+  groupId?: string;
   sessionKey: string;
   agent: AgentId;
   toolTitle: string;
@@ -422,6 +423,8 @@ export interface ChatMessageRecord {
   leadHandoff?: [previousLead: string, nextLead: string];
   agent?: AgentId;
   text: string;
+  /** Board dispatch context used to rebuild the model prompt when regenerating a reply. */
+  boardDispatch?: { rejectNote?: string };
   thoughtText: string;
   toolCalls: SessionToolCall[];
   /** Chronological interleaving of thought, text and tool call references when available. */

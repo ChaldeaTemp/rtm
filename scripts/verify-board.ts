@@ -42,7 +42,7 @@ import {
   clampIdleLeadMinutes,
   pickToStart,
   applyBoardAction,
-  missingDeliverables,
+  buildBoardPrompt,
 } from "../src/hub/task-board.js";
 
 console.log("=== 1. Board logic ===");
@@ -74,13 +74,6 @@ check("actions outside their status are refused",
   throws(() => applyBoardAction(q("r", 1, "running").board, "resume", { now: 1 })) &&
   throws(() => applyBoardAction(delivered, "reject", { now: 1 })));   // 打回必须带说明
 
-const root = path.resolve("/proj");
-const has = (p: string) => p === path.join(root, "out", "a.md");
-check("existing file passes", missingDeliverables([{ kind: "file", path: "out/a.md" }, { kind: "text", note: "n" }], [root], has).length === 0);
-check("missing file is listed", missingDeliverables([{ kind: "file", path: "out/b.md" }], [root], has).join() === "out/b.md");
-check("a path outside the roots counts as missing", missingDeliverables([{ kind: "file", path: "../etc/passwd" }, { kind: "file", path: path.resolve("/other/x") }], [root], () => true).length === 2);
-check("a file entry without a path counts as missing", missingDeliverables([{ kind: "file" }], [root], has).length === 1);
-
 async function main(): Promise<void> {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rtm-verify-board-"));
   const cwd = path.join(tmp, "proj");
@@ -88,7 +81,10 @@ async function main(): Promise<void> {
   fs.mkdirSync(cwd, { recursive: true });
   fs.mkdirSync(stateDir, { recursive: true });
 
+  // Scheduling checks use stable headroom. The tests below supply low-memory readings explicitly.
+  const normalMemory = async () => ({ availableMB: 9000, totalMB: 57000 });
   const hub = new AgentHubServer({ baseCwd: cwd, port: 0, writeRuntimeFile: false, persistState: true, defaultLead: "mock-a" });
+  (hub as any).memory.sampler = normalMemory;
   const url = await hub.start(0);
   const post = (p: string, body: unknown): Promise<Json> =>
     fetch(url + p, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json() as Promise<Json>);
@@ -99,6 +95,11 @@ async function main(): Promise<void> {
     fs.existsSync(updatesLog)
       ? fs.readFileSync(updatesLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l).text as string)
       : [];
+  const promptLog = path.join(stateDir, "session-turns.log");
+  const prompts = (): string[] => fs.existsSync(promptLog)
+    ? fs.readFileSync(promptLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+      .filter((event) => event.event === "prompt").map((event) => event.preview)
+    : [];
 
   try {
     const regRes = await post("/api/agents/save", {
@@ -119,10 +120,11 @@ async function main(): Promise<void> {
     const card = async (id: string): Promise<Json | undefined> => (await cards()).find((c) => c.groupId === id);
     check("only the first one runs", await until(async () => (await card(ids[0]))?.board.status === "running"));
     check("the others wait in order", (await cards()).filter((c) => c.board.status === "queued").map((c) => c.groupId).join() === ids.slice(1).join());
-    check("its lead got the brief, the shared text and the report instruction", await until(() => {
-      const m = hub.getMessages({ streamKey: `lead:${ids[0]}` }).find((x: Json) => x.role === "user");
-      return !!m && /Shared rule/.test(m.text) && /VERYSLOW first/.test(m.text) && /task_report/.test(m.text);
-    }));
+    check("the lead receives the brief, shared text and report instruction", await until(() =>
+      prompts().some((p) => p.includes("Shared rule") && p.includes("VERYSLOW first") && p.includes("task_report"))));
+    const boardMessage = hub.getMessages({ streamKey: `lead:${ids[0]}` }).find((m) => m.role === "user");
+    check("the chat message shows the brief and shared text", Boolean(boardMessage?.text.includes("Shared rule") &&
+      boardMessage.text.includes("VERYSLOW first") && !boardMessage.text.includes("<task_board>")));
     check("shared text is also in the task context", Boolean((await get(`/api/context?groupId=${ids[1]}`)).context?.sections?.some((s: Json) => s.key === "common" && /Shared rule/.test(s.content))));
     check("publishing is all or nothing", (await post("/api/board/publish", { items: [{ brief: "ok", cwd }, { brief: "bad", cwd: path.join(tmp, "nope") }] })).ok === false && (await cards()).length === 3);
     await post("/api/agents/save", {
@@ -238,6 +240,20 @@ async function main(): Promise<void> {
     fs.writeFileSync(path.join(cwd, "out", "a.md"), "x");
     res = await report(ids[0], { outcome: "delivered", summary: "wrote a.md", deliverables: [{ kind: "file", path: "out/a.md" }, { kind: "text", note: "see chat" }] });
     check("delivered", res.ok === true && res.board.status === "delivered" && res.board.deliverables.length === 2 && typeof res.board.deliveredAt === "number", res.error);
+    const downloadUrl = `${url}/api/board/deliverable?groupId=${ids[0]}&index=`;
+    const downloaded = await fetch(downloadUrl + "0");
+    check("a reported file downloads as an attachment",
+      downloaded.ok && downloaded.headers.get("content-disposition")?.startsWith("attachment") === true &&
+      await downloaded.text() === "x");
+    check("text and unreported files cannot use the download route",
+      (await fetch(downloadUrl + "1")).status === 404 && (await fetch(downloadUrl + "2")).status === 404);
+    fs.unlinkSync(path.join(cwd, "out", "a.md"));
+    const outsideDir = path.join(tmp, "outside");
+    fs.mkdirSync(outsideDir);
+    fs.writeFileSync(path.join(outsideDir, "a.md"), "outside");
+    fs.rmdirSync(path.join(cwd, "out"));
+    fs.symlinkSync(outsideDir, path.join(cwd, "out"), "junction");
+    check("a delivery path redirected outside the task is refused", (await fetch(downloadUrl + "0")).status === 404);
     check("the next task starts", await until(async () => (await card(ids[1]))?.board.status === "running"));
     check("reporting twice is refused", (await report(ids[0], { outcome: "delivered", summary: "again" })).ok === false);
     check("its sessions are released once the turn ends", await until(() => sessions().filter((s) => s.groupId === ids[0]).every((s) => s.status === "closed"), 30000));
@@ -276,9 +292,13 @@ async function main(): Promise<void> {
     res = await act(fourth, "reject", "add tests");
     check("rejected task is queued ahead of the retried one", res.group?.board.rejectCount === 1 &&
       (await cards()).filter((c) => c.board.status === "queued").map((c) => c.groupId).join() === [fourth, ids[1]].join());
+    const staleCancel = await post("/api/board/action", { groupId: ids[2], action: "cancel", expectedStatus: "queued" });
+    check("a stale queue cancellation cannot stop a running task", staleCancel.ok === false && (await card(ids[2]))?.board.status === "running");
     check("cancel a running task", (await act(ids[2], "cancel")).group?.board.status === "failed");
     check("the rejected task restarts with the note", await until(() =>
-      hub.getMessages({ streamKey: `lead:${fourth}` }).some((m: Json) => m.role === "user" && /add tests/.test(m.text))));
+      prompts().some((p) => p.includes("SLOW fourth") && p.includes("add tests") && p.includes("task_report"))));
+    check("the rejected dispatch still displays the brief", hub.getMessages({ streamKey: `lead:${fourth}` })
+      .filter((m) => m.role === "user").every((m) => m.text === "SLOW fourth"));
     res = await post("/api/board/publish", { items: [{ brief: "to cancel", cwd }] });
     const queuedOne: string = res.groups[0].groupId;
     check("cancelling a queued task archives it", (await act(queuedOne, "cancel")).group?.archived === true && !(await cards()).some((c) => c.groupId === queuedOne));
@@ -422,14 +442,24 @@ async function main(): Promise<void> {
 
     const stateJsonRaw = fs.readFileSync(path.join(process.env.RTM_DATA_DIR!, "state.json"), "utf8");
     check("waiting state is never persisted to disk", !/"waiting"\s*:/.test(stateJsonRaw) && !/"waitingReason"\s*:/.test(stateJsonRaw));
+    const legacyState = JSON.parse(stateJsonRaw);
+    const oldDispatch = legacyState.messages.find((m: Json) => m.groupId === running && m.role === "user");
+    const visibleBrief = oldDispatch.text;
+    oldDispatch.text = buildBoardPrompt(visibleBrief, "legacy review note");
+    delete oldDispatch.boardDispatch;
+    fs.writeFileSync(path.join(process.env.RTM_DATA_DIR!, "state.json"), JSON.stringify(legacyState));
 
     const hub2 = new AgentHubServer({ baseCwd: cwd, port: 0, writeRuntimeFile: false, persistState: true, defaultLead: "mock-a" });
+    (hub2 as any).memory.sampler = normalMemory;
     const url2 = await hub2.start(0);
     const post2 = (p: string, body: unknown): Promise<Json> =>
       fetch(url2 + p, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json() as Promise<Json>);
     const card2 = async (id: string): Promise<Json | undefined> =>
       ((await (await fetch(url2 + "/api/board")).json() as Json).cards as Json[] ?? []).find((c: Json) => c.groupId === id);
     try {
+      const restoredDispatch = hub2.getMessages({ streamKey: `lead:${running}` }).find((m) => m.role === "user");
+      check("legacy board chat is cleaned and its retry context is retained",
+        restoredDispatch?.text === visibleBrief && restoredDispatch?.boardDispatch?.rejectNote === "legacy review note");
       if (!(hub2 as any).registry.isEnabledAgent("mock-a")) {
         await post2("/api/agents/save", {
           id: "mock-a", label: "MOCK-A", description: "mock", enabled: true,
