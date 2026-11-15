@@ -967,6 +967,11 @@ export class AgentHubServer {
     inspectWorkspace: (groupId, worktreePath) => this.inspectWorkflowStepWorkspace(groupId, worktreePath),
     runGate: (groupId, step, task, signal) => this.runWorkflowStepGate(groupId, step, task, signal),
     onSettled: (workflow) => this.reportWorkflowToLead(workflow),
+    onWaiting: (groupId, step) => this.notifyLead(groupId, {
+      taskId: step.taskId,
+      summary: t("noticeWorkflowWaiting", step.name),
+      detail: `Workflow step "${step.name}" (id ${step.id}, attempt ${step.taskId}, session ${step.sessionKey}) is waiting for an external decision.\n<result>\n${clipMiddle(step.output ?? "", 3000)}\n</result>`,
+    }),
     // Short on memory: finish what is running before starting anything else.
     maxParallel: () =>
       this.memory.get().level === "ok" ? clampWorkflowParallel(this.settings.workflowParallel) : 1,
@@ -3600,7 +3605,7 @@ export class AgentHubServer {
   private async runWorkflowStepGate(
     groupId: string,
     step: WorkflowStep,
-    task: TaskRecord,
+    task: Pick<TaskRecord, "outputText" | "worktreePath">,
     signal: AbortSignal,
   ): Promise<{ ok: boolean; reason?: string }> {
     const gate = step.gate;
@@ -5825,6 +5830,19 @@ export class AgentHubServer {
       if (method === "POST" && pathname === "/api/workflows/resume") {
         const body = WorkflowGroupSchema.parse(await readJsonBody(req));
         sendJson(res, 200, { ok: true, workflow: this.workflows.resume(body.groupId) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/workflows/resume-step") {
+        const body = WorkflowGroupSchema.extend({
+          stepId: z.string().min(1),
+          attemptId: z.string().min(1),
+          sessionId: z.string().min(1),
+          action: z.enum(["retry", "complete"]),
+          guidance: z.string().optional(),
+        }).parse(await readJsonBody(req));
+        const resumed = this.workflows.resumeStep(body);
+        sendJson(res, resumed ? 200 : 409, { ok: resumed, resumed });
         return;
       }
 

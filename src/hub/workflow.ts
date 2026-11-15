@@ -30,30 +30,31 @@ const STATUS_INSTRUCTION = [
   "`STATUS: DONE` if the task is finished and you checked it;",
   "`STATUS: BLOCKED - <what you need>` if you cannot go on without something;",
   "`STATUS: FAILED - <why>` if you could not do it.",
+  "`STATUS: WAITING - <what you are waiting for>` if an external workflow action will resume this step.",
   "Never write DONE for work you did not complete.",
 ].join("\n");
 
 /** The outcome an agent declared at the end of its reply; missing status bounces back via gate. */
 export function parseStepOutcome(output: string): {
   ok: boolean;
-  status?: "DONE" | "BLOCKED" | "FAILED";
+  status?: "DONE" | "BLOCKED" | "FAILED" | "WAITING";
   missingStatus?: boolean;
   reason?: string;
 } {
   const matches = [
-    ...(output ?? "").matchAll(/STATUS:\s*\**\s*(DONE|BLOCKED|FAILED)\b\**[ \t]*[-:：—]*[ \t]*([^\n]*)/gi),
+    ...(output ?? "").matchAll(/STATUS:\s*\**\s*(DONE|BLOCKED|FAILED|WAITING)\b\**[ \t]*[-:：—]*[ \t]*([^\n]*)/gi),
   ];
   const last = matches[matches.length - 1];
   if (!last) {
     return {
       ok: false,
       missingStatus: true,
-      reason: "Missing STATUS line (end your reply with STATUS: DONE, BLOCKED, or FAILED)",
+      reason: "Missing STATUS line (end your reply with STATUS: DONE, BLOCKED, FAILED, or WAITING)",
     };
   }
   const word = last[1]!.toUpperCase();
   if (word === "DONE") return { ok: true, status: "DONE" };
-  const status = word === "BLOCKED" ? "BLOCKED" : "FAILED";
+  const status = word as "BLOCKED" | "FAILED" | "WAITING";
   const detail = last[2]?.trim().replace(/[`*]+$/g, "").trim();
   return { ok: false, status, reason: `${status}${detail ? `: ${detail}` : ""}` };
 }
@@ -81,11 +82,13 @@ export interface WorkflowDeps {
   runGate?(
     groupId: string,
     step: WorkflowStep,
-    task: TaskRecord,
+    task: Pick<TaskRecord, "outputText" | "worktreePath">,
     signal: AbortSignal,
   ): Promise<{ ok: boolean; reason?: string }>;
   /** A run ended (every step finished, or nothing more can run). Not called for a user stop. */
   onSettled?(workflow: WorkflowRecord): void;
+  /** A step has released its execution slot while waiting for an external decision. */
+  onWaiting?(groupId: string, step: WorkflowStep): void;
   /** How many steps may run at once; the rest wait even when their dependencies are done. */
   maxParallel?(): number;
   /** Sections a step refers to that do not exist; publishing is refused while there are any. */
@@ -379,7 +382,7 @@ export class WorkflowManager {
       } else if (step.status === "running") {
         const activeSession =
           step.phase === "review" && step.reviewSessionKey ? step.reviewSessionKey : step.sessionKey;
-        if (step.phase !== "gate" && activeSession) {
+        if (step.phase !== "gate" && step.phase !== "waiting" && activeSession) {
           this.deps.cancel(activeSession);
         }
         step.status = "cancelled";
@@ -498,7 +501,7 @@ export class WorkflowManager {
   private async evaluateStepGate(
     workflow: WorkflowRecord,
     step: WorkflowStep,
-    task: TaskRecord,
+    task: Pick<TaskRecord, "outputText" | "worktreePath">,
     gateKey: string,
     token: symbol,
     ac: AbortController,
@@ -645,7 +648,7 @@ export class WorkflowManager {
       return;
     }
     const step = workflow.steps.find((s) => s.taskId === task.taskId);
-    if (!step || step.status !== "running") {
+    if (!step || step.status !== "running" || step.phase === "waiting" || step.phase === "gate") {
       return;
     }
     if (task.status === "failed") {
@@ -683,6 +686,13 @@ export class WorkflowManager {
     step.workspaceSummary = task.workspaceSummary;
 
     const declared = parseStepOutcome(task.outputText ?? "");
+    if (declared.status === "WAITING") {
+      step.phase = "waiting";
+      this.advance(workflow);
+      this.deps.onWaiting?.(workflow.groupId, this.cloneStep(step));
+      return;
+    }
+
     if (!declared.ok && !declared.missingStatus) {
       step.status = "failed";
       step.error = declared.reason;
@@ -696,6 +706,10 @@ export class WorkflowManager {
       return;
     }
 
+    this.finishWork(workflow, step);
+  }
+
+  private finishWork(workflow: WorkflowRecord, step: WorkflowStep): void {
     if (step.gate && this.deps.runGate) {
       const gateKey = `${workflow.groupId}:${step.id}`;
       this.activeGates.get(gateKey)?.ac.abort();
@@ -705,7 +719,10 @@ export class WorkflowManager {
       step.phase = "gate";
       workflow.updatedAt = Date.now();
       this.deps.onChange(this.clone(workflow)!);
-      void this.evaluateStepGate(workflow, step, task, gateKey, token, ac);
+      void this.evaluateStepGate(workflow, step, {
+        outputText: step.output ?? "",
+        worktreePath: step.worktreePath,
+      }, gateKey, token, ac);
       return;
     }
 
@@ -726,6 +743,32 @@ export class WorkflowManager {
     this.advance(workflow);
   }
 
+  /** Applies an external decision only to the matching attempt still waiting. */
+  resumeStep(input: {
+    groupId: string;
+    stepId: string;
+    attemptId: string;
+    sessionId: string;
+    action: "retry" | "complete";
+    guidance?: string;
+  }): boolean {
+    const workflow = this.workflows.get(input.groupId);
+    if (workflow?.status !== "running") return false;
+    const step = workflow.steps.find((item) => item.id === input.stepId);
+    if (step?.status !== "running" || step.phase !== "waiting"
+        || step.taskId !== input.attemptId || step.sessionKey !== input.sessionId) return false;
+    if (input.action === "complete") {
+      this.finishWork(workflow, step);
+    } else {
+      step.status = "pending";
+      step.phase = undefined;
+      step.taskId = undefined;
+      step.retryGuidance = input.guidance?.trim() || undefined;
+      this.advance(workflow);
+    }
+    return true;
+  }
+
   forget(groupId: string): void {
     this.abortGroupGates(groupId);
     if (this.workflows.delete(groupId)) {
@@ -734,13 +777,18 @@ export class WorkflowManager {
   }
 
   /**
-   * Loads workflows saved before a restart. Nothing is running any more, so a workflow that
-   * was mid-run is closed as failed and its unfinished steps as cancelled.
+   * Loads workflows saved before a restart. A workflow parked on an external decision can
+   * continue when it arrives. A workflow with interrupted work must be resumed explicitly.
    */
   restore(records: WorkflowRecord[]): void {
     for (const record of records) {
       const workflow = this.clone(record)!;
       if (workflow.status === "running") {
+        const runningSteps = workflow.steps.filter((step) => step.status === "running");
+        if (runningSteps.length && runningSteps.every((step) => step.phase === "waiting")) {
+          this.workflows.set(workflow.groupId, workflow);
+          continue;
+        }
         for (const step of workflow.steps) {
           if (step.status === "running" || step.status === "pending") {
             step.status = "cancelled";
@@ -771,7 +819,7 @@ export class WorkflowManager {
         }
         if (!deps.every((d) => d.status === "completed")) continue;
         // Ready, but every running step is a set of agent processes: wait for a free slot.
-        if (workflow.steps.filter((s) => s.status === "running").length >= limit) continue;
+        if (workflow.steps.filter((s) => s.status === "running" && s.phase !== "waiting").length >= limit) continue;
         try {
           const task = this.deps.dispatch({
             groupId: workflow.groupId,

@@ -554,7 +554,7 @@ export interface WorkflowStep {
    */
   review?: { agent: AgentId; model?: string; effort?: string; criteria?: string; maxRounds: number };
   /** While a step runs: whether its agent is working, a gate check is running, or the reviewer is reviewing. */
-  phase?: "work" | "gate" | "review";
+  phase?: "work" | "gate" | "review" | "waiting";
   /** Which gate retry attempt the step is on. */
   gateAttempt?: number;
   /** Output / failure reason from the last deterministic gate check. */

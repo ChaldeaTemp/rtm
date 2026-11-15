@@ -158,6 +158,8 @@ function answer(text, sess) {
     reply = "ack: handled the update";
   } else if (text.includes("FAILME")) {
     reply = text.includes("<lead_guidance>") ? "Did it the other way.\nSTATUS: DONE" : "Could not reach the service.\nSTATUS: FAILED - no access";
+  } else if (text.includes("WAIT_EXTERNAL")) {
+    reply = text.includes("<lead_guidance>") ? "Used the external input.\nSTATUS: DONE" : "Draft is ready.\nSTATUS: WAITING - external input";
   } else if (text.includes("CODEWORD?")) {
     reply = /OSPREY-\d+/.exec(text)?.[0] ?? "unknown";
   } else {
@@ -168,7 +170,7 @@ function answer(text, sess) {
     text.includes("End your reply with exactly one status line:") ||
     text.includes("did not accept your work") ||
     isGateRetry;
-  if (needsStatus && !omitStatus && !/^\s*\**\s*STATUS:\s*\**\s*(DONE|BLOCKED|FAILED)\b/im.test(reply)) {
+  if (needsStatus && !omitStatus && !/^\s*\**\s*STATUS:\s*\**\s*(DONE|BLOCKED|FAILED|WAITING)\b/im.test(reply)) {
     reply = `${reply}\nSTATUS: DONE`;
   }
   return reply;

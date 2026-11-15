@@ -940,6 +940,7 @@ export const messages = {
   noticeSubSessionFailed: ["子会话「{1}」失败了，已通知主导", "Sub-session \"{1}\" failed; the lead has been told"],
   noticeSubSessionAsks: ["子会话「{1}」在等待回答，已通知主导", "Sub-session \"{1}\" is waiting for an answer; the lead has been told"],
   noticeWorkflowFinished: ["工作流已完成（{1} 步），已通知主导汇总", "Workflow finished ({1} steps); the lead has been asked to sum up"],
+  noticeWorkflowWaiting: ["工作流步骤「{1}」等待外部条件", "Workflow step \"{1}\" is waiting on external input"],
   noticeWorkflowFailed: ["工作流中断：步骤「{1}」失败，已交主导决定后续", "Workflow stopped: step \"{1}\" failed; the lead has been asked to decide what to do"],
   leadAutoTurnsPaused: ["主导已连续自动处理 {1} 轮，先停下等你确认。发一条消息后会继续，积压的通知会一并交给它。", "The lead has taken {1} turns in a row on its own and now waits for you. Send a message to carry on; the updates that queued up go to it then."],
   questionFromSubSession: ["来自子会话 {1}", "From sub-session {1}"],
@@ -994,5 +995,6 @@ export const messages = {
   wfGatePatternPlaceholder: ["回复正则校验（可选）", "Output regex pattern (optional)"],
   wfGateRetries: ["门禁打回上限 {1} 次", "Up to {1} gate retries"],
   wfInGate: ["门禁检查中", "checking gate"],
+  wfWaiting: ["等待外部条件", "waiting on external input"],
   wfGateFeedback: ["门禁检查记录", "Gate output"],
 };

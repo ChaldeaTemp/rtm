@@ -827,6 +827,7 @@ function workflowErrorText(step) {
 function wfStepStatusText(live, status) {
   if (status === "running") {
     if (live?.phase === "gate") return t("wfInGate");
+    if (live?.phase === "waiting") return t("wfWaiting");
     if (live?.review) {
       if (live.phase === "review") return t("inReviewRound", live.round || 1);
       if ((live.round || 1) > 1) return t("reworkingRound", live.round);
@@ -2106,12 +2107,14 @@ function renderWorkflowPanel() {
         status === "pending" &&
         step.dependsOn.every((depId) => statusMap.get(depId) === "completed");
       const isReview = status === "running" && Boolean(live?.review && live?.phase === "review");
-      const isRework = status === "running" && Boolean(live?.review && (live?.round || 1) > 1 && live?.phase !== "review");
+      const isRework = status === "running" && Boolean(live?.review && (live?.round || 1) > 1 && live?.phase !== "review" && live?.phase !== "waiting");
       const isGate = status === "running" && Boolean(live?.phase === "gate");
       const isEmptyDraft = status === "draft" && !step.prompt.trim();
 
       let markHtml = `<span class="wf-status-mark is-draft">${index + 1}</span>`;
-      if (status === "running") {
+      if (live?.phase === "waiting") {
+        markHtml = `<span class="wf-status-mark is-pending" aria-hidden="true">⋯</span>`;
+      } else if (status === "running") {
         markHtml = `<span class="wf-status-mark is-running" aria-hidden="true"></span>`;
       } else if (status === "completed") {
         markHtml = `<span class="wf-status-mark is-completed" aria-hidden="true">✓</span>`;

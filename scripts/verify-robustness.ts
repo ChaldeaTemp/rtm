@@ -165,6 +165,38 @@ async function main(): Promise<void> {
     res = await post("/api/chat", { groupId: g.groupId, prompt: "/lead nobody" });
     check("/lead with an unknown agent is refused", res.ok === false);
 
+    console.log("=== 4b. External workflow wait and resume ===");
+    const externalGroup = (await post("/api/groups", { title: "external wait", leadAgent: "mock-a", cwd })).group;
+    const groupId = externalGroup.groupId;
+    const externalWorkflow = async (): Promise<Json> => (await get(`/api/workflows?groupId=${groupId}`)).workflow;
+    await post("/api/settings", { workflowParallel: 1 });
+    check("external workflow saved", (await post("/api/workflows/save", { groupId, steps: [
+      { id: "draft", agent: "mock-a", prompt: "WAIT_EXTERNAL" },
+      { id: "check", agent: "mock-a", prompt: "WAIT_EXTERNAL", gate: { outputPattern: "Draft is ready" } },
+      { id: "deliver", agent: "mock-a", prompt: "Deliver", dependsOn: ["draft", "check"] },
+    ] })).ok);
+    await post("/api/workflows/run", { groupId });
+    check("waiting releases the slot and holds dependent work", await until(async () => {
+      const { steps } = await externalWorkflow();
+      return steps[0]?.phase === "waiting" && steps[1]?.phase === "waiting" && steps[2]?.status === "pending";
+    }));
+    const [draft, gateStep] = (await externalWorkflow()).steps;
+    const retryInput = { groupId, stepId: "draft", attemptId: draft.taskId, sessionId: draft.sessionKey,
+      action: "retry", guidance: "The input is ready." };
+    const resumeStep = (input: Json) => post("/api/workflows/resume-step", input);
+    check("resume verifies attempt and session",
+      (await resumeStep({ ...retryInput, attemptId: "old" })).resumed === false &&
+      (await resumeStep({ ...retryInput, sessionId: "other" })).resumed === false);
+    check("resume retries once with guidance", (await resumeStep(retryInput)).resumed === true &&
+      (await resumeStep(retryInput)).resumed === false &&
+      await until(async () => {
+        const step = (await externalWorkflow()).steps[0];
+        return step.status === "completed" && step.taskId !== draft.taskId && step.output.includes("Used the external input");
+      }));
+    check("complete resumes through the configured gate", (await resumeStep({ groupId, stepId: "check",
+      attemptId: gateStep.taskId, sessionId: gateStep.sessionKey, action: "complete" })).resumed === true &&
+      await until(async () => (await externalWorkflow()).status === "completed"));
+
     console.log("=== 5. Per-agent resource switches ===");
     const skillDir = path.join(cwd, ".claude", "skills", "demo-skill");
     fs.mkdirSync(skillDir, { recursive: true });
