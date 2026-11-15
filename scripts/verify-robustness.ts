@@ -460,6 +460,17 @@ async function main(): Promise<void> {
     res = await post("/api/mcp/delete", { groupId: g3.groupId, name: "demo-tools" });
     check("server deleted", res.ok === true && !res.servers.some((s: Json) => s.id === "rtm:demo-tools"));
 
+    // The read can be scoped to a directory without a task; a task's directory still wins.
+    const scopedProj = path.join(tmp, "mcp-scoped");
+    fs.mkdirSync(scopedProj, { recursive: true });
+    fs.writeFileSync(path.join(scopedProj, ".mcp.json"), JSON.stringify({ mcpServers: { scoped: { command: "node" } } }), "utf8");
+    const hasScoped = (r: Json) => Array.isArray(r.servers) && r.servers.some((s: Json) => s.id === "project:scoped");
+    const scopedRes = await (await fetch(`${url}/api/mcp?cwd=${encodeURIComponent(scopedProj)}`)).json() as Json;
+    check("GET /api/mcp honours cwd", hasScoped(scopedRes) && path.resolve(scopedRes.cwd) === path.resolve(scopedProj));
+    check("GET /api/mcp without cwd keeps the hub directory", !hasScoped(await (await fetch(`${url}/api/mcp`)).json() as Json));
+    const groupFirst = await (await fetch(`${url}/api/mcp?groupId=${g3.groupId}&cwd=${encodeURIComponent(scopedProj)}`)).json() as Json;
+    check("a known task's directory takes precedence over cwd", !hasScoped(groupFirst) && path.resolve(groupFirst.cwd) === path.resolve(cwd));
+
     console.log("=== 8. Workflow worktree isolation (A2), deterministic gates (A4), model/effort (A3) ===");
     fs.rmSync(path.join(stateDir, "review.count"), { force: true });
     fs.writeFileSync(path.join(stateDir, "review-fails"), "0", "utf8");

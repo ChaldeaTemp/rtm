@@ -1,4 +1,5 @@
 import { apiFetch, displayTaskTitle, getLocale, t, th } from "./i18n.js";
+import { createClassicBoard } from "./board-classic.js";
 
 let nextDraftId = 1;
 
@@ -316,6 +317,7 @@ async function handlePublish() {
   renderBriefRows();
   renderPublisherStaticLabels();
 
+  let published = null;
   try {
     const items = nonEmptyBriefs.map((brief) => ({
       brief,
@@ -341,14 +343,19 @@ async function handlePublish() {
     if (dom.commonInput) dom.commonInput.value = "";
     if (dom.screen.classList.contains("board-simple")) dom.moreDetails.open = false;
     BOARD_STATE.errorText = "";
+    if (isClassicBoard()) {
+      // Blocks appear only from the authoritative card list; this just pins them into view.
+      published = (Array.isArray(data.groups) ? data.groups : []).map((group) => group?.groupId).filter(Boolean);
+    }
   } catch (err) {
     BOARD_STATE.errorText = err?.message || String(err);
   } finally {
     BOARD_STATE.submitting = false;
     updateErrorBanner();
     renderBriefRows();
-    updatePublishButtonLabel();
+    renderPublisherStaticLabels();
   }
+  if (published) classic.onPublished(published);
 }
 
 async function handleCardAction(card, action, detail = null) {
@@ -682,18 +689,47 @@ function renderSimpleFilters(allCards, filtered) {
   }
 }
 
-function openBoardOverlay(data, origin) {
-  BOARD_STATE.overlay = { ...data, origin, originColumn: origin.closest(".board-col")?.dataset.column };
-  dom.overlayMarkup = null;
-  renderBoardOverlay(filteredBoardCards(getBoardCards()));
-  dom.overlay.showModal();
-  dom.overlay.querySelector("#boardOverlayTitle").focus();
+function currentSkin() {
+  return document.body.dataset.skin || "modern";
 }
 
-function closeBoardOverlay() {
-  if (!dom.overlay.open) return;
-  const { origin, originColumn, originGroupId } = BOARD_STATE.overlay;
+function isClassicBoard() {
+  return dom.screen?.classList.contains("board-classic") === true;
+}
+
+function openBoardOverlay(data, origin) {
+  const skin = currentSkin();
+  BOARD_STATE.overlay = { ...data, skin, origin, originColumn: origin.closest?.(".board-col")?.dataset.column };
+  dom.overlayMarkup = null;
+  delete dom.overlay.dataset.classicView;
+  classic.cancelClosing();
+  renderBoardOverlay(filteredBoardCards(getBoardCards()));
+  if (!dom.overlay.open) dom.overlay.showModal();
+  if (skin === "classic") classic.animateOpen(dom.overlay, origin);
+  dom.overlay.querySelector("#boardOverlayTitle")?.focus();
+}
+
+// The classic intake shows the shared publisher inside the dialog; it returns home afterwards.
+function mountPublisher(host) {
+  host.append(dom.publisher);
+}
+
+function restorePublisher() {
+  if (dom.publisherAnchor && dom.publisher.parentNode !== dom.publisherAnchor.parentNode) {
+    dom.publisherAnchor.after(dom.publisher);
+  }
+}
+
+function closeBoardOverlay({ animate = false } = {}) {
+  if (!dom.overlay.open || !BOARD_STATE.overlay) return;
+  const overlay = BOARD_STATE.overlay;
   BOARD_STATE.overlay = null;
+  restorePublisher();
+  if (overlay.skin === "classic") {
+    void classic.closeOverlay(dom.overlay, overlay, animate && !dom.screen.hidden);
+    return;
+  }
+  const { origin, originColumn, originGroupId } = overlay;
   dom.overlay.close();
   const column = originColumn && dom.columnsWrap.querySelector(`[data-column="${originColumn}"]`);
   const replacement = originGroupId && column?.querySelector(`[data-board-task="${CSS.escape(originGroupId)}"]`);
@@ -759,7 +795,7 @@ function renderTaskDetail(detail, card) {
     : "";
   const decision = key === "waiting" ? getDecisionContext(card) : "";
   const deliverables = (key === "delivered" || key === "done") ? info.deliverables || [] : [];
-  const back = detail.bucket
+  const back = detail.bucket || detail.panel
     ? `<button type="button" class="board-card-btn" data-board-overlay-ui="back">${th("boardBackToList")}</button>`
     : "";
   return {
@@ -793,6 +829,11 @@ function renderTaskDetail(detail, card) {
 function renderBoardOverlay(filtered) {
   const detail = BOARD_STATE.overlay;
   if (!detail) return;
+  if (!detail.groupId && detail.panel) {
+    dom.overlayMarkup = null;
+    classic.renderPanel(detail, dom.overlay);
+    return;
+  }
   const selected = detail.groupId ? getBoardCards().find((card) => card.groupId === detail.groupId) : null;
   const model = detail.groupId ? renderTaskDetail(detail, selected) : {
     title: t(SIMPLE_COLUMN_LABELS[detail.bucket]),
@@ -819,6 +860,8 @@ function renderBoardOverlay(filtered) {
   const scroll = dom.overlay.querySelector(".board-overlay-body")?.scrollTop || 0;
   dom.overlayMarkup = markup;
   dom.overlayListKey = listKey;
+  restorePublisher();
+  delete dom.overlay.dataset.classicView;
   dom.overlay.innerHTML = markup;
   const body = dom.overlay.querySelector(".board-overlay-body");
   const note = dom.overlay.querySelector("#boardRejectNote");
@@ -852,7 +895,7 @@ function handleOverlayClick(event) {
   const control = event.target.closest("[data-board-overlay-ui], [data-board-action]");
   if (!detail || !control) return;
   const ui = control.dataset.boardOverlayUi;
-  if (ui === "close") return closeBoardOverlay();
+  if (ui === "close") return closeBoardOverlay({ animate: true });
   if (ui === "back") {
     const previous = detail.groupId;
     Object.assign(detail, { groupId: null, prompt: null, error: "" });
@@ -958,6 +1001,11 @@ function renderPublisherStaticLabels() {
 
 function renderColumns() {
   if (!dom.columnsWrap) return;
+  if (isClassicBoard()) {
+    classic.render();
+    renderBoardOverlay();
+    return;
+  }
   const simple = dom.screen.classList.contains("board-simple");
   const allCards = getBoardCards();
   const cards = simple ? filteredBoardCards(allCards) : allCards;
@@ -1136,7 +1184,7 @@ function mountBoardScreen() {
       </div>
       <section id="boardColumnsWrap" class="board-columns"></section>
     </div>
-    <dialog class="board-overlay board-simple-only" aria-labelledby="boardOverlayTitle"></dialog>
+    <dialog class="board-overlay" aria-labelledby="boardOverlayTitle"></dialog>
   `;
 
   dom.titleEl = screen.querySelector("#boardTitleText");
@@ -1169,6 +1217,8 @@ function mountBoardScreen() {
   dom.clearFilters = screen.querySelector("#boardClearFilters");
   dom.resultCount = screen.querySelector("#boardResultCount");
   dom.overlay = screen.querySelector(".board-overlay");
+  dom.publisherAnchor = document.createComment("board-publisher");
+  dom.publisher.before(dom.publisherAnchor);
 
   dom.settingsBtn?.addEventListener("click", () => {
     getApp().openSettings?.("general");
@@ -1220,19 +1270,19 @@ function mountBoardScreen() {
   });
   dom.overlay.addEventListener("cancel", (event) => {
     event.preventDefault();
-    closeBoardOverlay();
+    closeBoardOverlay({ animate: true });
   });
   let pointerOnBackdrop = false;
   dom.overlay.addEventListener("pointerdown", (event) => {
     pointerOnBackdrop = event.target === dom.overlay;
   });
   dom.overlay.addEventListener("click", (event) => {
-    if (event.target === dom.overlay && pointerOnBackdrop) closeBoardOverlay();
-    else handleOverlayClick(event);
+    if (event.target === dom.overlay && pointerOnBackdrop) closeBoardOverlay({ animate: true });
+    else if (!classic.onOverlayClick(event)) handleOverlayClick(event);
     pointerOnBackdrop = false;
   });
   dom.overlay.addEventListener("input", (event) => {
-    if (event.target.id !== "boardRejectNote") return;
+    if (event.target.id !== "boardRejectNote" || !BOARD_STATE.overlay) return;
     BOARD_STATE.rejectDrafts.set(BOARD_STATE.overlay.groupId, event.target.value);
     dom.overlay.querySelector('[data-board-overlay-ui="submit-prompt"]').disabled = !event.target.value.trim();
   });
@@ -1243,9 +1293,12 @@ function mountBoardScreen() {
 
 export function renderBoard() {
   if (!mountBoardScreen()) return;
-  const simple = !document.body.dataset.skin || document.body.dataset.skin === "modern";
-  if ((!simple || dom.screen.hidden) && dom.overlay.open) closeBoardOverlay();
+  const skin = currentSkin();
+  const simple = skin === "modern";
+  if (dom.overlay.open && BOARD_STATE.overlay && (dom.screen.hidden || BOARD_STATE.overlay.skin !== skin)) closeBoardOverlay();
   dom.screen.classList.toggle("board-simple", simple);
+  dom.screen.classList.toggle("board-classic", skin === "classic");
+  if (skin !== "classic") classic.deactivate();
   syncDefaultsFromState();
   renderTopbar();
   renderPublisherStaticLabels();
@@ -1254,12 +1307,47 @@ export function renderBoard() {
   renderColumns();
 }
 
+const classic = createClassicBoard({
+  get screen() {
+    return dom.screen;
+  },
+  getState: getHubState,
+  getCards: getBoardCards,
+  apiFetch,
+  escapeHtml,
+  getCardTitle,
+  getCardNumber,
+  getProjectLabel,
+  getWaitingBadgeInfo,
+  agentName: (id) => getApp().agentName?.(id) || id,
+  projectKey: (value) => getApp().projectKey?.(value) ?? String(value || ""),
+  getProject: () => BOARD_STATE.project,
+  setProject(value) {
+    BOARD_STATE.project = value;
+  },
+  getPublishCwd: () => BOARD_STATE.cwd,
+  getOverlay: () => BOARD_STATE.overlay,
+  getDialog: () => dom.overlay,
+  openOverlay: openBoardOverlay,
+  closeOverlay: closeBoardOverlay,
+  renderOverlay: () => renderBoardOverlay(filteredBoardCards(getBoardCards())),
+  renderBody: () => renderColumns(),
+  mountPublisher,
+  restorePublisher,
+  openSettings: (tab) => getApp().openSettings?.(tab),
+});
+
 window.HUB_BOARD = {
   render: renderBoard,
   resume: (card) => handleCardAction(card, "resume"),
   onProgress(groupId) {
     if (BOARD_STATE.overlay?.groupId === groupId) renderBoardOverlay();
   },
+  onConfigChanged() {
+    classic.onConfigChanged();
+  },
+  // Read-only view for browser checks of the classic scene.
+  classicDebug: () => classic.debug(),
 };
 
 if (document.readyState === "loading") {

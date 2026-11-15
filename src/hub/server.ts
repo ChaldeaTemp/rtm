@@ -5792,7 +5792,9 @@ export class AgentHubServer {
       if (pathname === "/api/mcp" || pathname.startsWith("/api/mcp/")) {
         const body = method === "POST" ? ((await readJsonBody(req)) as Record<string, unknown>) : {};
         const groupId = (method === "GET" ? reqUrl.searchParams.get("groupId") : (body.groupId as string | undefined)) || undefined;
-        const cwd = (groupId && this.groups.get(groupId)?.cwd) || this.baseCwd;
+        // Only the read can name a directory; writes keep resolving it from the task or the hub.
+        const cwdParam = method === "GET" ? reqUrl.searchParams.get("cwd")?.trim() : undefined;
+        const cwd = (groupId && this.groups.get(groupId)?.cwd) || (cwdParam ? path.resolve(cwdParam) : this.baseCwd);
         const reply = () => sendJson(res, 200, { ok: true, cwd, servers: this.mcpServers.list(cwd) });
         if (method === "GET" && pathname === "/api/mcp") {
           reply();

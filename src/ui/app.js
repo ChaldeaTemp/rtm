@@ -37,6 +37,8 @@ const STATE = {
   newTaskLead: "claude",
   settings: { autoTitle: false, boardParallel: 2, idleLeadMinutes: 0 },
   boardCards: [],
+  // True once a snapshot or board_updated has delivered the authoritative card list.
+  boardLoaded: false,
   workflows: new Map(),
   progress: new Map(),
   contexts: new Map(),
@@ -747,6 +749,8 @@ function openSettings(tab) {
 
 function closeSettings() {
   if (els.settingsBackdrop) els.settingsBackdrop.hidden = true;
+  // Agents, resources or MCP may have changed while settings were open.
+  window.HUB_BOARD?.onConfigChanged?.();
 }
 
 function applyLanguage() {
@@ -3781,6 +3785,7 @@ function connectWs() {
 
       if (Array.isArray(msg.boardCards)) {
         STATE.boardCards = msg.boardCards;
+        STATE.boardLoaded = true;
       } else {
         STATE.boardCards = [];
         void apiFetch("/api/board")
@@ -3788,6 +3793,7 @@ function connectWs() {
           .then((data) => {
             if (data && Array.isArray(data.cards)) {
               STATE.boardCards = data.cards;
+              STATE.boardLoaded = true;
               renderSidebarGroups();
               window.HUB_BOARD?.render?.();
             }
@@ -3799,6 +3805,7 @@ function connectWs() {
       window.HUB_BOARD?.render?.();
     } else if (msg.type === "board_updated") {
       STATE.boardCards = Array.isArray(msg.cards) ? msg.cards : [];
+      STATE.boardLoaded = true;
       renderSidebarGroups();
       window.HUB_BOARD?.render?.();
     } else if (msg.type === "models_updated") {
@@ -3883,6 +3890,7 @@ function connectWs() {
       STATE.resourceBudgets = msg.budgets || [];
       refreshHeaderMetrics();
       window.HUB_APP?.onResourcesUpdated?.();
+      window.HUB_BOARD?.onConfigChanged?.();
     } else if (msg.type === "group_created" || msg.type === "group_updated") {
       STATE.taskGroups.set(msg.group.groupId, msg.group);
       renderBoardResume();
