@@ -186,7 +186,7 @@ function knownInstallFor(commandName: string): string | undefined {
   return commandName.toLowerCase() === "devin" ? resolveDevinExecutable(loadLocalSecrets()) : undefined;
 }
 
-function resolveGenericCommand(
+export function resolveGenericCommand(
   rawCommand: string,
   args: string[],
   env?: Record<string, string>,

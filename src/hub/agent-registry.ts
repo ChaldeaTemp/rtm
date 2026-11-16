@@ -5,6 +5,7 @@ import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import type { AdapterHealth, AgentDefinition, AgentId, AgentModelCatalog } from "../types.js";
 import { extractModelCatalogFromNewSession } from "./model-catalog.js";
+import { supportsAgentQuota } from "./agent-quota.js";
 import {
   checkAdaptersHealth,
   findExecutableInPath,
@@ -443,6 +444,7 @@ export class AgentRegistry {
       return result;
     }).map((item) => ({
       ...item,
+      quotaSupported: defs.some((def) => def.id === item.agent && supportsAgentQuota(def)),
       modelCatalog: this.getModelCatalog(item.agent),
       discoveredModelIds: this.getDiscoveredModelIds(item.agent),
     }));

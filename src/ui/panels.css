@@ -1012,6 +1012,19 @@ main.stage[data-view="workflow"] #chatComposerWrap {
   color: var(--err);
 }
 
+.agent-quota {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.agent-quota-list {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 .agent-cfg-actions {
   display: flex;
   align-items: center;

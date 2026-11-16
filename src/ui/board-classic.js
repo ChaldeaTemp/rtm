@@ -911,7 +911,7 @@ export function createClassicBoard(api) {
         <span class="cb-row-title">${api.escapeHtml(api.getCardTitle(card))}</span>
         <span class="cb-row-project" title="${api.escapeHtml(card.cwd || "")}">${api.escapeHtml(api.getProjectLabel(card.cwd))}</span>
         ${tag}<span class="cb-row-arrow" aria-hidden="true">↗</span></button>`;
-    }).join("") : `<p class="cb-empty">${th(cards.length ? "classicNoMatches" : "boardEmptyColumn")}</p>`;
+    }).join("") : `<p class="cb-empty">${th(cards.length ? "classicNoMatches" : panel.type === "finished" ? "classicFinishedEmpty" : "boardEmptyColumn")}</p>`;
     if (rows.dataset.markup === markup) return;
     const focused = rows.contains(document.activeElement) ? document.activeElement.dataset.boardTask : "";
     const scroll = rows.scrollTop;

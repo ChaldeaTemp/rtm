@@ -43,6 +43,7 @@ import type { PersistedHubState } from "./state-store.js";
 import { openInteractiveWindow } from "../ui/launcher.js";
 import { AcpPool, buildSessionKey, type WarmSessionOptions } from "./acp-pool.js";
 import { AgentRegistry } from "./agent-registry.js";
+import { AgentQuotaReader } from "./agent-quota.js";
 import { ThreadLedger } from "./ledger.js";
 import { MemoryMonitor, type MemoryStatus } from "./memory.js";
 import { WorkflowTemplateStore } from "./workflow-templates.js";
@@ -902,6 +903,7 @@ export class AgentHubServer {
   }
   readonly pool = new AcpPool();
   readonly registry: AgentRegistry;
+  private readonly agentQuota = new AgentQuotaReader();
   private readonly settings: HubSettings = loadHubSettings();
   private readonly lastCostBySession = new Map<string, number>();
   private stateStore?: HubStateStore;
@@ -5689,6 +5691,14 @@ export class AgentHubServer {
         return;
       }
 
+      if (method === "GET" && pathname === "/api/agents/quota") {
+        const id = this.requireKnownAgent(reqUrl.searchParams.get("agent")?.trim() ?? "");
+        const def = this.registry.getDefinition(id)!;
+        res.setHeader("Cache-Control", "no-store");
+        sendJson(res, 200, { ok: true, quota: await this.agentQuota.read(def, this.baseCwd) });
+        return;
+      }
+
       if (method === "GET" && pathname === "/api/agents") {
         sendJson(res, 200, {
           ok: true,
@@ -5973,6 +5983,7 @@ export class AgentHubServer {
       if (method === "POST" && pathname === "/api/agents/save") {
         const input = AgentSaveSchema.parse(await readJsonBody(req));
         const agent = this.registry.upsertAgent(input);
+        this.agentQuota.invalidate(agent.id);
         if (!this.telemetryByAgent[agent.id]) {
           this.telemetryByAgent[agent.id] = createEmptyTotals();
         }
@@ -5994,6 +6005,7 @@ export class AgentHubServer {
       if (method === "POST" && pathname === "/api/agents/toggle") {
         const input = AgentToggleSchema.parse(await readJsonBody(req));
         const agent = this.registry.toggleAgent(input.id, input.enabled);
+        this.agentQuota.invalidate(agent.id);
         this.broadcastAgentsUpdated();
         sendJson(res, 200, {
           ok: true,

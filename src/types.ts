@@ -174,6 +174,7 @@ export interface AdapterHealth {
   authHintArgs?: string[];
   /** The hub knows this agent's sign-in command and can open it in a terminal window. */
   canLogin?: boolean;
+  quotaSupported?: boolean;
   command: string[];
   customCommand?: string;
   customArgs?: string[];

@@ -1,4 +1,4 @@
-import { apiFetch, th, t } from "./i18n.js";
+import { apiFetch, getLocale, th, t } from "./i18n.js";
 
 const app = window.HUB_APP;
 
@@ -21,6 +21,7 @@ const INTERACTIVE_STATE = {
   },
   probeResults: new Map(), // agentId -> { testing?: boolean, ok?: boolean, latencyMs?: number, sessionId?: string, error?: string }
   questionDrafts: new Map(), // questionId -> Map<fieldId, string | string[]>
+  quotas: new Map(),
 };
 
 // 预设（已知支持 ACP 的 CLI）由 hub 提供，并带上本机是否已安装
@@ -372,6 +373,10 @@ async function refreshAgentsList() {
         app.STATE.configuredDefaultLead = data.configuredDefaultLead || "";
       }
       app.renderAgentControls?.();
+      for (const [id, quota] of INTERACTIVE_STATE.quotas) {
+        if (quota.status !== "loading") INTERACTIVE_STATE.quotas.delete(id);
+      }
+      if (INTERACTIVE_STATE.showForm) captureAgentFormValues();
       renderAgentsView();
     }
   } catch (err) {
@@ -404,6 +409,7 @@ async function setDefaultLeadAgent(id) {
 }
 
 async function probeAgentHandshake(id) {
+  if (INTERACTIVE_STATE.showForm) captureAgentFormValues();
   INTERACTIVE_STATE.probeResults.set(id, { testing: true });
   renderAgentsView();
   try {
@@ -426,6 +432,7 @@ async function probeAgentHandshake(id) {
   } catch (err) {
     INTERACTIVE_STATE.probeResults.set(id, { testing: false, ok: false, error: err.message });
   }
+  if (INTERACTIVE_STATE.showForm) captureAgentFormValues();
   renderAgentsView();
 }
 
@@ -441,6 +448,7 @@ async function toggleAgentEnabled(id, enabled) {
       app.appendLog(t("couldNotChangeAgentStatus", data.error || res.status));
       return;
     }
+    INTERACTIVE_STATE.quotas.delete(id);
     app.STATE.agents = data.agents || app.STATE.agents;
     app.renderAgentControls?.();
     renderAgentsView();
@@ -514,6 +522,7 @@ async function saveAgentForm(e) {
       app.appendLog(t("couldNotSaveAgentSettings", data.error || res.status));
       return;
     }
+    INTERACTIVE_STATE.quotas.delete(payload.id.toLowerCase());
     INTERACTIVE_STATE.showForm = false;
     INTERACTIVE_STATE.editingId = null;
     app.STATE.agents = data.agents || app.STATE.agents;
@@ -568,6 +577,62 @@ function openFormForEdit(agentItem) {
   renderAgentsView();
 }
 
+function renderQuota(agent) {
+  const quota = INTERACTIVE_STATE.quotas.get(agent);
+  if (!quota || quota.status === "loading") return th("agentQuotaLoading");
+  if (quota.status !== "ok") {
+    return th(quota.status === "error" ? "agentQuotaError" : "agentQuotaUnavailable");
+  }
+  const locale = getLocale();
+  const esc = app.escapeHtml;
+  const date = new Intl.DateTimeFormat(locale, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const windows = quota.windows.map(({ name, minutes, usedPercent, resetsAt }) => {
+    let duration = "";
+    if (minutes) {
+      if (minutes % 1440 === 0) duration = t("agentQuotaDays", minutes / 1440);
+      else if (minutes % 60 === 0) duration = t("agentQuotaHours", minutes / 60);
+      else duration = t("agentQuotaMinutes", minutes);
+    }
+    if (name === "monthTotal") name = t("agentQuotaMonthTotal");
+    if (name === "monthCode") name = t("agentQuotaMonthCode");
+    const label = [name, duration].filter(Boolean).join(" · ") || t("agentSubscriptionQuota");
+    const remaining = Number((100 - usedPercent).toFixed(1));
+    const resetDate = new Date(resetsAt);
+    const reset = Number.isFinite(resetDate.getTime()) ? t("agentQuotaResetAt", date.format(resetDate)) : "";
+    return `<li>${th("agentQuotaRemaining", label, remaining)}${reset ? ` <span>· ${esc(reset)}</span>` : ""}</li>`;
+  });
+  if (quota.balance) {
+    const { amount, currency } = quota.balance;
+    const balance = currency
+      ? t("agentQuotaBalance", new Intl.NumberFormat(locale, { style: "currency", currency }).format(amount))
+      : t("agentQuotaCredits", new Intl.NumberFormat(locale).format(amount));
+    windows.push(`<li>${esc(balance)}</li>`);
+  }
+  return `<ul class="agent-quota-list">${windows.join("")}</ul>`;
+}
+
+async function loadQuota(row) {
+  const agent = row.dataset.agentQuota;
+  const quotas = INTERACTIVE_STATE.quotas;
+  const current = quotas.get(agent);
+  if (current?.status === "loading" || (current && Date.now() - current.checkedAt < (current.status === "ok" ? 60_000 : 15_000))) return;
+  const pending = { status: "loading" };
+  quotas.set(agent, pending);
+  row.innerHTML = renderQuota(agent);
+  let result;
+  try {
+    const response = await apiFetch(`/api/agents/quota?agent=${encodeURIComponent(agent)}`);
+    const data = await response.json();
+    if (response.ok) result = data.quota;
+  } catch {
+    // Show the row's retryable error state.
+  }
+  if (quotas.get(agent) !== pending) return;
+  quotas.set(agent, result || { status: "error", checkedAt: Date.now() });
+  const currentRow = app.els.agentsView.querySelector(`[data-agent-quota="${CSS.escape(agent)}"]`);
+  if (currentRow) currentRow.innerHTML = renderQuota(agent);
+}
+
 function renderAgentsView() {
   if (!app) return;
   const container = app.els.agentsView;
@@ -578,13 +643,9 @@ function renderAgentsView() {
 
   const fv = INTERACTIVE_STATE.formValues;
   const editing = Boolean(INTERACTIVE_STATE.editingId);
-  const formCatalog = fv.id ? app.STATE.modelCatalogs?.get(fv.id) : null;
-  const modelDatalist =
-    formCatalog?.models?.length > 0
-      ? `<datalist id="agentModelChoices">${formCatalog.models
-          .map((m) => `<option value="${esc(m.id)}">${esc(m.name || m.id)}</option>`)
-          .join("")}</datalist>`
-      : "";
+  const editingItem = editing ? list.find((a) => a.agent === INTERACTIVE_STATE.editingId) : null;
+  const formCatalog = (fv.id ? app.STATE.modelCatalogs?.get(fv.id) : null) || editingItem?.modelCatalog;
+  const modelOptions = formCatalog?.models || [];
   const effortDatalist =
     formCatalog?.effort?.options?.length > 0
       ? `<datalist id="agentEffortChoices">${formCatalog.effort.options
@@ -638,7 +699,6 @@ function renderAgentsView() {
       : "";
 
   const fullMode = INTERACTIVE_STATE.formMode === "full";
-  const editingItem = editing ? list.find((a) => a.agent === INTERACTIVE_STATE.editingId) : null;
   const discoveredIds = editingItem?.discoveredModelIds || [];
   const fullFieldsHtml = fullMode
     ? `
@@ -648,8 +708,13 @@ function renderAgentsView() {
             <input id="agentCfgLabel" class="text-input" type="text" value="${esc(fv.label)}" />
           </div>
           <div class="agent-form-field">
-            <label>${th("defaultModel")}</label>
-            <input id="agentCfgDefaultModel" class="text-input" type="text" ${modelDatalist ? 'list="agentModelChoices"' : ""} placeholder="${th("useCliDefault")}" value="${esc(fv.defaultModel || "")}" />
+            <label for="agentCfgDefaultModel">${th("defaultModel")}</label>
+            <input id="agentCfgDefaultModel" class="text-input" type="text" placeholder="${th("useCliDefault")}" value="${esc(fv.defaultModel || "")}" />
+            ${modelOptions.length ? `<select id="agentModelChoices" class="perm-select" aria-label="${th("pickDetectedModel")}">
+              <option value="" disabled selected>${th("pickDetectedModel")}</option>
+              <option value=" ">${th("useCliModelInPicker")}</option>
+              ${modelOptions.map((model) => `<option value="${esc(model.id)}">${esc(model.name && model.name !== model.id ? `${model.name} (${model.id})` : model.id)}</option>`).join("")}
+            </select>` : ""}
           </div>
           <div class="agent-form-field">
             <label>${th("defaultReasoningEffort")}</label>
@@ -680,7 +745,7 @@ function renderAgentsView() {
     ? `
       ${addPanelHtml}
       <form id="agentRegistryForm" class="rule-editor-box">
-        ${modelDatalist}${effortDatalist}
+        ${effortDatalist}
         <div class="panel-toolbar agent-form-head">
           <span class="agent-form-title">${editing ? t("configure", esc(fv.label || fv.id)) : t("addManually")}</span>
           <div class="settings-seg" id="agentFormModeSeg">
@@ -760,6 +825,8 @@ function renderAgentsView() {
           <div class="res-meta">${esc(defaultModelText)}${item.defaultEffort ? ` · ${esc(item.defaultEffort)}` : ""}${modelCount > 0 ? t("availableModels", modelCount, item.models?.length ? t("restricted") : "") : ""}</div>
           <div class="agent-cmd-line" title="${esc(cmdDisplay)}">${esc(cmdDisplay)}</div>
           ${probeText ? `<div class="${probeClass}">${esc(probeText)}</div>` : ""}
+          ${item.enabled && item.available && item.quotaSupported
+            ? `<div class="agent-quota" role="status" data-agent-quota="${esc(item.agent)}">${renderQuota(item.agent)}</div>` : ""}
           <div class="agent-cfg-actions">
             <div style="display:flex;gap:6px;flex-wrap:wrap">
               ${item.enabled !== false && item.available && !item.authReady && item.canLogin ? `<button type="button" class="alma-btn alma-btn-primary alma-btn-sm" data-login-agent="${esc(item.agent)}">${th("signIn")}</button>` : ""}
@@ -822,6 +889,15 @@ function renderAgentsView() {
 
   const form = document.getElementById("agentRegistryForm");
   if (form) form.onsubmit = saveAgentForm;
+  const modelChoices = document.getElementById("agentModelChoices");
+  if (modelChoices) {
+    modelChoices.onchange = () => {
+      const input = document.getElementById("agentCfgDefaultModel");
+      input.value = modelChoices.value.trim();
+      INTERACTIVE_STATE.formValues.defaultModel = input.value;
+      modelChoices.selectedIndex = 0;
+    };
+  }
 
   container.querySelectorAll("[data-form-mode]").forEach((btn) => {
     btn.onclick = () => {
@@ -887,6 +963,9 @@ function renderAgentsView() {
   container.querySelectorAll("[data-del-agent]").forEach((btn) => {
     btn.onclick = () => void deleteCustomAgent(btn.dataset.delAgent);
   });
+  if (app.isAgentsViewOpen?.()) {
+    container.querySelectorAll("[data-agent-quota]").forEach((row) => void loadQuota(row));
+  }
 }
 
 window.addEventListener("message", (event) => {
@@ -905,6 +984,7 @@ window.HUB_INTERACTIVE = {
   renderAgentsView,
   onAgentsUpdated: () => {
     if (app?.isAgentsViewOpen?.()) {
+      if (INTERACTIVE_STATE.showForm) captureAgentFormValues();
       renderAgentsView();
     }
   },
@@ -915,6 +995,7 @@ if (app) {
   app.onStateChange = () => {
     prevOnStateChange?.();
     if (app.isAgentsViewOpen?.()) {
+      if (INTERACTIVE_STATE.showForm) captureAgentFormValues();
       renderAgentsView();
     } else if (app.STATE.stageView === "chat") {
       renderQuestions();
