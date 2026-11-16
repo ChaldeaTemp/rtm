@@ -576,6 +576,7 @@ const UI_ICON_FILES: Record<string, string> = {
 const UI_SCENE_FILES: Record<string, string> = {
   "roundtable-room.jpg": "image/jpeg",
   "roundtable-globe.webp": "image/webp",
+  "roundtable-globe-map.webp": "image/webp",
 };
 
 /**

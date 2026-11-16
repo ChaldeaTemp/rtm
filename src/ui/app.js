@@ -343,11 +343,9 @@ function setScreenMode(mode) {
   document.body.dataset.screen = next;
   if (els.boardScreen) els.boardScreen.hidden = next !== "board";
   if (els.workbench) els.workbench.hidden = next === "board";
-  if (next === "board") {
-    window.HUB_BOARD?.render?.();
-  } else {
-    renderAll();
-  }
+  // The board also renders when it is hidden, so scene skins stop their animations.
+  window.HUB_BOARD?.render?.();
+  if (next !== "board") renderAll();
 }
 
 function setStageView(view) {

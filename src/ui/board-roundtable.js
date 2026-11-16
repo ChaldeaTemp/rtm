@@ -14,6 +14,7 @@ import {
   updateFeatured,
 } from "./board-classic-model.js";
 import { CONFIG_KEYS, createSceneConfig } from "./board-scene-config.js";
+import { createSpinningGlobe } from "./board-roundtable-globe.js";
 
 const NS = "http://www.w3.org/2000/svg";
 const ROOM_IMAGE = "/ui/scenes/roundtable-room.jpg";
@@ -98,6 +99,7 @@ function sceneMarkup() {
     <ellipse cx="824" cy="516" rx="185" ry="14" class="rt-projection-base" opacity=".45"/>
     <path d="M647 508 L673 404 M1001 508 L975 404" class="rt-cyan-line" opacity=".12"/>
     <image class="rt-globe-painting" href="${GLOBE_IMAGE}" x="598" y="79" width="452" height="452"/>
+    <foreignObject class="rt-globe-live" x="612.06" y="92.63" width="421.14" height="421.14" aria-hidden="true"><canvas xmlns="http://www.w3.org/1999/xhtml"></canvas></foreignObject>
     <ellipse cx="824" cy="305" rx="229" ry="229" fill="none" stroke="#a0edf3" stroke-opacity=".12" stroke-dasharray="1 19"/>
     <text x="824" y="72" text-anchor="middle" class="rt-eyebrow" data-rt-text="observation"></text>
     <text x="1058" y="295" class="rt-micro" transform="rotate(90 1058 295)">SPIRITRON OBSERVATION FIELD</text>
@@ -161,6 +163,7 @@ export function createRoundtableBoard(api) {
   const pendingPins = new Set();
   let pendingFocusId = "";
   let closing = null;
+  let globe = null;
 
   const config = createSceneConfig({
     getState: () => api.getState(),
@@ -211,6 +214,11 @@ export function createRoundtableBoard(api) {
     dom.fx = root.querySelector(".rt-fx");
     dom.flight = root.querySelector(".rt-flight");
     dom.tooltip = root.querySelector(".rt-tooltip");
+    // The globe turns while the room is on screen; dialogs pause it, reduced motion keeps the painting.
+    globe = createSpinningGlobe(root.querySelector(".rt-globe-live"), {
+      paused: () => Boolean(api.getOverlay()) || api.screen.hidden,
+      reducedMotion,
+    });
     for (const image of root.querySelectorAll("image")) {
       // A missing painting must not leave a broken image; objects remain recognisable.
       image.addEventListener("error", () => image.setAttribute("visibility", "hidden"), { once: true });
@@ -237,6 +245,7 @@ export function createRoundtableBoard(api) {
     if (!active) return;
     active = false;
     cancelAllFlights();
+    globe?.stop();
     prevIndex = null;
     lastSignature = "";
     hideTip();
@@ -255,6 +264,8 @@ export function createRoundtableBoard(api) {
     const becameVisible = !active;
     active = true;
     root.hidden = false;
+    if (reducedMotion()) globe.stop();
+    else globe.start();
 
     const state = api.getState();
     const loaded = state.boardLoaded === true;
@@ -1380,6 +1391,7 @@ export function createRoundtableBoard(api) {
       phase: dom.svg?.dataset.transferPhase || "idle",
       fxNodes: (dom.fx?.childElementCount || 0) + (dom.flight?.childElementCount || 0),
       scope: config.scope,
+      globe: globe?.debug(),
     }),
   };
 }
