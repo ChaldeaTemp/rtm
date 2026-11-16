@@ -571,6 +571,12 @@ const UI_ICON_FILES: Record<string, string> = {
   "icon.ico": "image/x-icon",
 };
 
+// Static scene paintings used by board skins (src/ui/scenes). Only listed files are served.
+const UI_SCENE_FILES: Record<string, string> = {
+  "roundtable-room.jpg": "image/jpeg",
+  "roundtable-globe.webp": "image/webp",
+};
+
 /**
  * Markup that renders a Mermaid diagram with the library served by the hub itself (no CDN).
  * If the source does not parse, the error and the source are shown instead of a blank card.
@@ -5125,6 +5131,20 @@ export class AgentHubServer {
           "Content-Type": "text/javascript; charset=utf-8",
           "Cache-Control": "public, max-age=86400",
         });
+        res.end(fs.readFileSync(file));
+        return;
+      }
+
+      if (method === "GET" && pathname.startsWith("/ui/scenes/")) {
+        const fileName = pathname.slice("/ui/scenes/".length);
+        const mime = UI_SCENE_FILES[fileName];
+        const file = mime ? this.getUiAssetPath(path.join("scenes", fileName)) : "";
+        if (!mime || !fs.existsSync(file)) {
+          res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("Not found");
+          return;
+        }
+        res.writeHead(200, { "Content-Type": mime, "Cache-Control": "public, max-age=86400" });
         res.end(fs.readFileSync(file));
         return;
       }

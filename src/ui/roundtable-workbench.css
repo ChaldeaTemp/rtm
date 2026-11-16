@@ -1,0 +1,279 @@
+/* =========================================================
+   Roundtable skin: command terminal (workbench, settings and shared dialogs)
+   Loaded after styles.css: it retunes the roundtable tokens to the operations-room palette
+   and adds materials. DOM, IDs and behaviour are untouched. Remove this file and
+   board-roundtable.css to fall back to the previous roundtable look.
+   ========================================================= */
+
+body.dark[data-skin="roundtable"] {
+  --rt-gold: #e8cfa0;
+  --rt-gold-bright: #f1d7a7;
+  --rt-gold-soft: rgba(232, 207, 160, 0.14);
+  --bg: #0b1628;
+  --bg-panel: #0d1b30;
+  --bg-elevated: #132439;
+  --ink: #dce7f1;
+  --muted: #a3b6c8;
+  --faint: #7d93a8;
+  --line: rgba(115, 148, 171, 0.26);
+  --line-strong: rgba(150, 184, 205, 0.42);
+  --line-soft: rgba(115, 148, 171, 0.14);
+  --soft: rgba(167, 212, 233, 0.06);
+  --accent: var(--rt-gold);
+  --accent-soft: var(--rt-gold-soft);
+  --on-ink: #10203a;
+  --rt-cyan-ui: #9cdce7;
+  --rt-glass: linear-gradient(145deg, #142a42f2, #0b182cf5);
+  --rt-glass-strong: linear-gradient(100deg, #1f3449, #0e1d31 70%);
+}
+
+body:not(.dark)[data-skin="roundtable"] {
+  --rt-gold: #8a642d;
+  --rt-gold-bright: #a57a39;
+  --rt-gold-soft: rgba(138, 100, 45, 0.12);
+  --bg: #edf1f2;
+  --bg-panel: #e1e9ec;
+  --bg-elevated: #f6f8f7;
+  --ink: #1f3a50;
+  --muted: #4c677c;
+  --faint: #7a8f9f;
+  --line: rgba(73, 111, 139, 0.24);
+  --line-strong: rgba(73, 111, 139, 0.44);
+  --line-soft: rgba(73, 111, 139, 0.12);
+  --soft: rgba(40, 108, 128, 0.06);
+  --accent: var(--rt-gold);
+  --accent-soft: var(--rt-gold-soft);
+  --on-ink: #f6f8f7;
+  --rt-cyan-ui: #286c80;
+  --rt-glass: linear-gradient(145deg, #dce7ebf2, #e8eef0f5);
+  --rt-glass-strong: linear-gradient(100deg, #d0dee5, #e9efef);
+}
+
+/* The terminal sits in front of the same room, kept low-contrast and still for reading. */
+body[data-skin="roundtable"] .workbench {
+  background:
+    linear-gradient(#081528ec, #09182cf7),
+    url("/ui/scenes/roundtable-room.jpg") center / cover;
+}
+
+body:not(.dark)[data-skin="roundtable"] .workbench {
+  background:
+    linear-gradient(#e4eceff7, #edf1f3f9),
+    url("/ui/scenes/roundtable-room.jpg") center / cover;
+}
+
+body[data-skin="roundtable"] .sidebar,
+body[data-skin="roundtable"] .inspector {
+  background: var(--rt-glass);
+  border-color: var(--line);
+}
+
+body.dark[data-skin="roundtable"] .stage,
+body:not(.dark)[data-skin="roundtable"] .stage {
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+}
+
+body[data-skin="roundtable"] .brand-bar {
+  background: var(--rt-glass-strong);
+  border-bottom-color: var(--line-strong);
+}
+
+body[data-skin="roundtable"] .brand-title {
+  font-family: var(--rt-serif);
+  letter-spacing: 2px;
+}
+
+body[data-skin="roundtable"] .cwd-line {
+  font-family: var(--mono);
+  color: var(--rt-cyan-ui);
+}
+
+/* Header of the mission channel: serif title, a gold rule beneath. */
+body[data-skin="roundtable"] .stage-header {
+  position: relative;
+  padding-top: 16px;
+  padding-bottom: 14px;
+  border-bottom-color: var(--line);
+}
+
+body[data-skin="roundtable"] .stage-header::after {
+  content: "";
+  position: absolute;
+  left: 22px;
+  bottom: -1px;
+  width: 64px;
+  height: 1px;
+  background: var(--rt-gold);
+}
+
+/* Terminal eyebrows: decorative English captions, the localised labels stay in the DOM. */
+body[data-skin="roundtable"] :is(.stage-header, .insp-head, .brand-bar) {
+  position: relative;
+}
+
+body[data-skin="roundtable"] .stage-header {
+  padding-top: 28px;
+}
+
+body[data-skin="roundtable"] .insp-head {
+  padding-top: 28px;
+}
+
+body[data-skin="roundtable"] .brand-bar {
+  padding-top: 26px;
+}
+
+body[data-skin="roundtable"] :is(.stage-header, .insp-head, .brand-bar)::before {
+  position: absolute;
+  top: 10px;
+  left: 22px;
+  font: 9px var(--mono);
+  letter-spacing: 2.4px;
+  color: var(--rt-cyan-ui);
+  pointer-events: none;
+}
+
+body[data-skin="roundtable"] .stage-header::before { content: "MISSION CHANNEL"; }
+body[data-skin="roundtable"] .insp-head::before { content: "MISSION STATUS"; left: 16px; }
+body[data-skin="roundtable"] .brand-bar::before { content: "CURRENT PROJECT"; left: 12px; }
+
+body[data-skin="roundtable"] .stage-task-title {
+  font-family: var(--rt-serif);
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: 1px;
+}
+
+body[data-skin="roundtable"] .stage-mode-bar {
+  background: transparent;
+  border-bottom-color: var(--line);
+}
+
+body[data-skin="roundtable"] .mode-tab {
+  font-size: 13px;
+}
+
+body[data-skin="roundtable"] .session-tabs {
+  border-bottom-color: var(--line);
+}
+
+/* Task tree: archive-like rows with a gold marker on the active task. */
+body[data-skin="roundtable"] .group-card {
+  border-radius: 0;
+  border-color: transparent;
+  border-bottom-color: var(--line-soft);
+  background: transparent;
+}
+
+body[data-skin="roundtable"] .group-card:hover {
+  background: var(--soft);
+}
+
+body[data-skin="roundtable"] .group-card.active {
+  background: color-mix(in srgb, var(--rt-gold) 9%, transparent);
+  border-color: color-mix(in srgb, var(--rt-gold) 55%, transparent);
+  border-left: 2px solid var(--rt-gold);
+}
+
+/* Messages read on glass; no ornaments that compete with text. */
+body[data-skin="roundtable"] .msg-bubble {
+  background: color-mix(in srgb, var(--bg-elevated) 82%, transparent);
+  border-color: var(--line);
+  border-radius: 0;
+}
+
+body[data-skin="roundtable"] .msg-entry.role-user .msg-bubble,
+body[data-skin="roundtable"] .msg-entry[data-role="user"] .msg-bubble {
+  background: color-mix(in srgb, var(--rt-cyan-ui) 9%, var(--bg-elevated));
+  border-color: color-mix(in srgb, var(--rt-cyan-ui) 30%, var(--line));
+}
+
+/* Things that need the user are gold and stand out from the conversation. */
+body[data-skin="roundtable"] .perm-banner {
+  border-radius: 0;
+  border-color: color-mix(in srgb, var(--rt-gold) 55%, var(--line));
+  border-left: 3px solid var(--rt-gold);
+  background: linear-gradient(100deg, color-mix(in srgb, var(--rt-gold) 14%, transparent), color-mix(in srgb, var(--rt-gold) 5%, transparent));
+  color: var(--ink);
+}
+
+body[data-skin="roundtable"] .perm-banner::before {
+  content: "DECISION REQUIRED";
+  font: 9px var(--mono);
+  letter-spacing: 2.2px;
+  color: var(--rt-gold);
+}
+
+/* Composer: a framed command input. */
+body[data-skin="roundtable"] .composer-box {
+  border-radius: 0;
+  background: color-mix(in srgb, var(--bg-elevated) 88%, transparent);
+  border-color: var(--line-strong);
+}
+
+body[data-skin="roundtable"] .composer-box:focus-within {
+  border-color: var(--rt-gold);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--rt-gold) 40%, transparent);
+}
+
+body[data-skin="roundtable"] .composer-wrap {
+  background: transparent;
+}
+
+body[data-skin="roundtable"] :is(.perm-select, .text-input, .text-area) {
+  border-radius: 0;
+}
+
+body.dark[data-skin="roundtable"] :is(.perm-select, .text-input, .text-area) {
+  background: #0716297a;
+}
+
+/* Buttons: gold primary, hairline outline. */
+body[data-skin="roundtable"] .alma-btn-primary,
+body[data-skin="roundtable"] .alma-btn-primary:hover:not(:disabled) {
+  color: #152135;
+  background: linear-gradient(130deg, #f1d7a7, #c5a46c);
+  border-color: #e7c68f;
+}
+
+body:not(.dark)[data-skin="roundtable"] .alma-btn-primary,
+body:not(.dark)[data-skin="roundtable"] .alma-btn-primary:hover:not(:disabled) {
+  color: #fdf8ec;
+  background: linear-gradient(130deg, #a57a39, #7d5823);
+  border-color: #7d5823;
+}
+
+/* Inspector: mission status panel. */
+body[data-skin="roundtable"] .insp-head {
+  background: var(--rt-glass-strong);
+  border-bottom: 1px solid var(--line-strong);
+}
+
+body[data-skin="roundtable"] .insp-sec {
+  border-color: var(--line);
+}
+
+body[data-skin="roundtable"] .insp-sec > summary {
+  color: var(--muted);
+}
+
+/* Workflow and usage panels share the glass. */
+body[data-skin="roundtable"] :is(.stat-card, .breakdown-card, .wf-node) {
+  background: color-mix(in srgb, var(--bg-elevated) 85%, transparent);
+  border-color: var(--line);
+}
+
+body[data-skin="roundtable"] .wf-canvas-wrap {
+  background: color-mix(in srgb, var(--bg-panel) 70%, transparent);
+}
+
+/* Settings and modal dialogs adopt the dossier frame. */
+body[data-skin="roundtable"] :is(.settings-dialog, .alma-modal-card) {
+  background: var(--rt-glass);
+  border: 1px solid #a98f65;
+  border-radius: 0;
+}
+
+body.dark[data-skin="roundtable"] *::-webkit-scrollbar-thumb {
+  background: rgba(150, 184, 205, 0.28);
+}
