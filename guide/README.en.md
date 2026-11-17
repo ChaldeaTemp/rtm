@@ -17,6 +17,34 @@ npm run desktop
 
 Choose a project directory on first launch. RTM opens an app window using a Chromium browser such as Edge, Chrome, or Brave when available and otherwise opens your default browser. After installing dependencies, you can also double-click `RTM.vbs` on Windows or `RTM.command` on macOS.
 
+## The board and the workbench
+
+RTM opens on the task board. Enter a brief, choose a directory and lead, and select **Publish to board**. Use **Batch / More** to publish several tasks. **New task** in the workbench creates a conversation task; it does not enter the board queue automatically.
+
+Choose Modern, Classic or Roundtable under **Settings → General → Style**. All three views share the same tasks and actions:
+
+| State | Modern | Classic / Roundtable |
+| --- | --- | --- |
+| Queued | Queue column | Queue area |
+| Executing | Running column | Running area |
+| Waiting for a question, approval or continuation | Decision column | Needs attention → Decision |
+| Agent delivered; awaiting your acceptance | Review column | Needs attention → Review |
+| Failed or cancelled | Failed column | Needs attention → Failed |
+| Accepted by you | Accepted foldout | Accepted / Finished entry |
+
+The scene boards' **Unaccepted tasks** count excludes accepted deliveries; the Modern result count includes them. The workbench also lists conversation tasks, so its total can exceed the board total. Delivery, acceptance and stopping execution are separate states.
+
+Open a task to inspect its brief and deliverables, then enter its workbench conversation. On first use, or after the last active task is archived, the workbench shows a home view with task creation, an overview and agent settings instead of the previous task.
+
+![Roundtable board with queued, running and attention tasks; demo data](screenshots/board-roundtable.png)
+
+## Archive, find and resume
+
+1. Select **Archive task** on a workbench task card. Archiving closes its sessions and cancels pending questions and approvals while preserving messages, shared context and delivery records.
+2. Open **Archive** from any board's top bar or the workbench sidebar. Search by title, directory or task ID and open a read-only conversation.
+3. Copy the full task ID from the button beside the conversation title, or **Export** the record as Markdown. The ID locates a task in this RTM installation; it is not a portable context credential.
+4. Select **Restore task** to return it to the active list. A board task archived while running waits for **Resume**; a restored queued task rejoins scheduling. Messages remain available, and a new agent session receives reconstructed context. This does not restore the original CLI process or an unlimited context window.
+
 ## From a new task to review
 
 1. Open **Settings → Agent** to see which agents are ready. If an agent offers **Sign in**, follow the instructions in the terminal window. For other agents, sign in or configure credentials in their own CLI.
@@ -50,6 +78,23 @@ Choose a project directory on first launch. RTM opens an app window using a Chro
 
 Set the default lead for new tasks under **Settings → Agent**. Each agent uses its own authentication configuration.
 
+### Models and AI subscriptions
+
+Open **Configure → Advanced** on an agent to set its default model. Choose a detected model or enter a full model ID. Built-in Claude also offers `opus`, `sonnet`, `haiku`, `fable` and `opusplan` aliases when the detected catalog is incomplete. These follow [Claude Code's model configuration](https://code.claude.com/docs/en/model-config); account and CLI restrictions still apply. Defaults affect new sessions; use the conversation's model selector for the current session.
+
+Claude automatically prefers ReClaude when detected. To use the native adapter, add `RTM_CLAUDE_PROVIDER=native` to the agent's advanced environment settings. An explicit `CLAUDE_CODE_EXECUTABLE` takes precedence: clear it or point it at the native CLI if it still names ReClaude. RTM does not switch or sign out accounts automatically.
+
+| Agent | Subscription source |
+| --- | --- |
+| Codex | CLI app-server quota windows and balance |
+| Kimi | Local CLI Web service quota windows and balance |
+| Native Claude | OAuth usage for the configured account; API-key or custom gateway accounts do not borrow another login's quota |
+| ReClaude | The selected binding's local `usage.json` snapshot, with its source timestamp; ReClaude owns refresh |
+
+Cards show remaining percentages, reset times and update times. Failed queries have an explicit retry state rather than appearing as zero allowance. ReClaude snapshots can lag; check the account in ReClaude if none is available. Claude / ReClaude integration has not been tested against live accounts in this release. Native OAuth usage is not a stable public API and may need adapting after CLI or service changes. The workbench's **Usage** page counts session tokens, a different metric from subscription allowance.
+
+![Subscription cards with allowance, reset and update times; synthetic demo data](screenshots/subscriptions.png)
+
 ## Commands and appearance
 
 | Command | Purpose |
@@ -67,7 +112,9 @@ The desktop launcher also accepts `--port <port>` and `--lead <agent>`. If the r
 
 Under **Settings → General**, choose Simplified Chinese, English, or the browser language. The Minimal, Classic, and Roundtable skins each have light and dark variants. Markdown exports use the interface language. Set `RTM_LANG` to `zh-CN` or `en` for terminal output.
 
-![RTM chat in the dark Roundtable skin](screenshots/skin-roundtable.png)
+The Roundtable workbench carries the operations room's navy and gold into framed task navigation, a mission channel and status panels. Gold highlights the selected task and composer; the light theme uses blue-gray surfaces and darker gold text.
+
+![Roundtable workbench with its mission channel and task status; demo data](screenshots/workbench-roundtable.png)
 
 ## Permissions and local data
 

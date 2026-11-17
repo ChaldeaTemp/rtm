@@ -36,10 +36,11 @@ export function findExecutableInPath(names: string[]): string | undefined {
 }
 
 function resolveReclaudeExecutable(localSecrets: Record<string, string>): string | undefined {
-  const explicit = process.env.CLAUDE_CODE_EXECUTABLE || localSecrets.CLAUDE_CODE_EXECUTABLE;
+  const explicit = localSecrets.CLAUDE_CODE_EXECUTABLE || process.env.CLAUDE_CODE_EXECUTABLE;
   if (explicit?.trim() && fs.existsSync(explicit.trim())) {
     return explicit.trim();
   }
+  if ((localSecrets.RTM_CLAUDE_PROVIDER || process.env.RTM_CLAUDE_PROVIDER) === "native") return undefined;
   if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
     const defaultWin = path.join(localAppData, "Programs", "reclaude", "bin", "reclaude.exe");
@@ -271,7 +272,7 @@ export function resolveAdapterCommand(agent: AgentId, customDef?: AgentDefinitio
       "index.js",
     );
     const entry = fs.existsSync(reclaudeShim) ? reclaudeShim : fallbackEntry;
-    const reclaudeExe = resolveReclaudeExecutable(localSecrets);
+    const reclaudeExe = resolveReclaudeExecutable(mergedEnv);
     const env: Record<string, string> = { ...mergedEnv };
     if (reclaudeExe) {
       env.CLAUDE_CODE_EXECUTABLE = reclaudeExe;
@@ -513,6 +514,7 @@ export function planAgentAuth(
   customDef?: AgentDefinition,
 ): AgentAuthPlan {
   if (agent === "claude") {
+    localSecrets = { ...localSecrets, ...customDef?.env };
     const claudeEnv = readClaudeSettingsEnv();
     const hasKey = Boolean(
       process.env.ANTHROPIC_API_KEY ||
@@ -527,7 +529,7 @@ export function planAgentAuth(
     }
 
     const reclaudeExe = resolveReclaudeExecutable(localSecrets);
-    if (reclaudeExe) {
+    if (reclaudeExe && /^(?:rec|reclaude)(?:\.exe)?$/i.test(path.basename(reclaudeExe))) {
       return {
         probe: {
           key: `claude:reclaude:${reclaudeExe}`,
@@ -548,12 +550,12 @@ export function planAgentAuth(
       };
     }
 
-    const viaCmd = process.platform === "win32";
+    const nativeCommand = resolveGenericCommand(reclaudeExe || "claude", ["auth", "status"]);
     return {
       probe: {
-        key: "claude:cli-auth-status",
-        command: viaCmd ? "cmd.exe" : "claude",
-        args: viaCmd ? ["/d", "/c", "claude", "auth", "status"] : ["auth", "status"],
+        key: `claude:cli-auth-status:${nativeCommand.command}`,
+        command: nativeCommand.command,
+        args: nativeCommand.args,
         timeoutMs: 4000,
         interpret: (stdout) => (JSON.parse(stdout) as { loggedIn?: boolean }).loggedIn === true,
         failHintKey: "authClaude",

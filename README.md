@@ -2,7 +2,7 @@
   <img src="src/ui/icon-192.png" width="56" height="56" alt="">
   <h1>RTM · Round Table Meeting</h1>
   <p><strong>Connect your coding agents. Let them talk.</strong></p>
-  <p>Claude Code, Codex, and OpenCode run in separate sessions. RTM connects them and other ACP-compatible agents in one local workbench, where they can ask each other questions, delegate work, and pass back results.</p>
+  <p>Bring Claude Code, Codex, OpenCode, Kimi, and other ACP-compatible agents into one local workbench. Publish tasks, follow their progress, review deliveries, and let agents delegate work and share context.</p>
   <p>
     <a href="#get-started"><strong>Get started ↓</strong></a>
     &nbsp;·&nbsp;
@@ -20,9 +20,22 @@
 
 ## Connect and collaborate
 
+### One task board, three ways to see your work
+
+Publish a brief and choose a lead. RTM queues tasks, shows decisions that need you, and keeps deliveries open until you accept them. Switch between **Modern**, the **Classic task register**, and the **Roundtable operations room** without changing task state.
+
+<p align="center">
+  <img src="guide/screenshots/board-roundtable.png" width="100%" alt="Roundtable operations room showing queued tasks, running agents, decisions and deliveries">
+  <br><sub>Roundtable board · demo data</sub>
+</p>
+
+The workbench opens the same task's conversation, workflow and files. When there is no active task, a home view offers a fresh start. **Archive** is available from every board and the workbench: review history, copy a task ID, export it, or restore it to continue.
+
 ### Connect your CLI agents
 
 Set up Claude Code, Codex, OpenCode, and other ACP-compatible agents in the same workbench. Pick which one leads new tasks.
+
+Subscription cards show remaining allowance and reset times for supported accounts, separately from the workbench's token usage. Codex and Kimi use their CLI services; native Claude uses OAuth usage, while ReClaude displays the selected account's local usage snapshot with its timestamp. Claude also offers model aliases when the detected list is incomplete. See [account and model setup](guide/README.en.md#models-and-ai-subscriptions) for configuration and limitations.
 
 <p align="center">
   <img src="guide/screenshots/agent-connections.png" width="100%" alt="Agent settings with Claude, Codex, and OpenCode enabled and Codex selected as the default lead">

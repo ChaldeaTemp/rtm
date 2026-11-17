@@ -841,6 +841,13 @@ export class AcpPool extends EventEmitter {
     const resolvedCmd = this.registry
       ? this.registry.resolveCommand(options.agent)
       : resolveAdapterCommand(options.agent);
+    const definition = this.registry?.getDefinition(options.agent);
+    const launchModel = options.model?.trim() || definition?.defaultModel?.trim();
+    if (options.agent === "claude" && !definition?.command?.trim() && launchModel) {
+      // Set the launch preference too: some CLI catalogs only list the running
+      // family, so post-handshake selection alone can silently leave the old default.
+      resolvedCmd.env = { ...resolvedCmd.env, ANTHROPIC_MODEL: launchModel };
+    }
     const now = Date.now();
     const record: SessionRecord = {
       sessionKey,

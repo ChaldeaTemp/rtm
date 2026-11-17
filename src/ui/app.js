@@ -2,6 +2,7 @@ import {
   apiFetch, displayMessageSender, displayMessageText, displayTaskTitle, getLanguagePreference, getLocale,
   localizeDocument, setLanguagePreference, th, t,
 } from "./i18n.js";
+import { boardStatus, isPlaceholderGroup, nextActiveGroupId, visibleTaskGroups } from "./task-view.js";
 
 import {
   renderMarkdown,
@@ -31,8 +32,8 @@ const STATE = {
   pendingQuestions: new Map(),
   artifacts: new Map(),
   messagesByStream: new Map(),
-  activeGroupId: "grp-default",
-  activeStreamKey: "lead:grp-default",
+  activeGroupId: "",
+  activeStreamKey: "",
   sendingStreams: new Set(),
   newTaskLead: "claude",
   settings: { autoTitle: false, boardParallel: 2, idleLeadMinutes: 0 },
@@ -349,6 +350,7 @@ function setScreenMode(mode) {
 }
 
 function setStageView(view) {
+  if (!getActiveGroup() && view !== "resources") view = "chat";
   if (view === "resources") {
     openSettings("resources");
     return;
@@ -422,11 +424,7 @@ function flushLogFeed() {
 }
 
 function getActiveGroup() {
-  return (
-    STATE.taskGroups.get(STATE.activeGroupId) ||
-    STATE.taskGroups.get(STATE.defaultGroupId) ||
-    [...STATE.taskGroups.values()][0]
-  );
+  return STATE.taskGroups.get(STATE.activeGroupId);
 }
 
 function getGroupSessions(groupId) {
@@ -528,7 +526,7 @@ const warmedGroupLeads = new Set();
 
 function warmGroupSession(groupId) {
   const group = STATE.taskGroups.get(groupId);
-  if (!group || groupHasLeadSession(group)) return;
+  if (!group || group.archived || group.board || groupHasLeadSession(group)) return;
   const key = `${groupId}|${group.leadAgent}`;
   if (warmedGroupLeads.has(key)) return;
   warmedGroupLeads.add(key);
@@ -556,6 +554,7 @@ function selectGroup(groupId, streamKey) {
     }
   }
   STATE.activeGroupId = groupId;
+  STATE.showArchivedGroups = Boolean(group.archived);
   STATE.activeStreamKey = nextStreamKey;
   if (els.promptInput) {
     const restored = STATE.draftsByStream.get(nextStreamKey) || "";
@@ -948,11 +947,17 @@ async function renameTaskGroup(group) {
 async function toggleArchiveTaskGroup(group) {
   if (!group) return;
   const nextArchived = !group.archived;
-  await apiFetch("/api/groups/update", {
+  const response = await apiFetch("/api/groups/update", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ groupId: group.groupId, archived: nextArchived }),
   });
+  const data = await response.json();
+  if (!response.ok || data.ok === false) {
+    appendLog(data.error || `HTTP ${response.status}`);
+    return;
+  }
+  STATE.taskGroups.set(group.groupId, data.group || { ...group, archived: nextArchived });
   appendLog(nextArchived ? t("archivedTask", displayTaskTitle(group)) : t("restoredTask", displayTaskTitle(group)));
   // 恢复后回到活跃列表，否则刚恢复的任务会从眼前消失
   if (!nextArchived && STATE.showArchivedGroups) {
@@ -960,13 +965,10 @@ async function toggleArchiveTaskGroup(group) {
     renderSidebarGroups();
   }
   if (nextArchived && STATE.activeGroupId === group.groupId && !STATE.showArchivedGroups) {
-    const nextActive = [...STATE.taskGroups.values()].find(
-      (g) => g.groupId !== group.groupId && !g.archived,
-    );
-    if (nextActive) {
-      selectGroup(nextActive.groupId, `lead:${nextActive.groupId}`);
-    }
+    clearTaskSelection();
   }
+  if (!nextArchived) selectGroup(group.groupId);
+  renderAll();
 }
 
 async function deleteTaskGroup(group) {
@@ -1162,10 +1164,8 @@ function openDirsDialog(group) {
 function renderSidebarBoardBadge() {
   if (!els.openBoardBadge) return;
   const cards = Array.isArray(STATE.boardCards) ? STATE.boardCards : [];
-  const activeCount = cards.filter(
-    (c) => c.board && (c.board.status === "queued" || c.board.status === "running" || c.board.status === "delivered"),
-  ).length;
-  const needsAttention = cards.some((c) => Boolean(c.waiting) || c.board?.status === "delivered");
+  const activeCount = cards.length;
+  const needsAttention = cards.some((c) => Boolean(c.waiting) || c.board?.status === "delivered" || c.board?.status === "failed");
   els.openBoardBadge.hidden = activeCount === 0;
   els.openBoardBadge.textContent = String(activeCount);
   els.openBoardBadge.classList.toggle("is-attention", needsAttention);
@@ -1173,34 +1173,31 @@ function renderSidebarBoardBadge() {
 
 function buildSidebarBoardPillHtml(group) {
   if (!group?.board) return "";
-  const card = (STATE.boardCards || []).find((c) => c.groupId === group.groupId);
-  const isWaiting = Boolean(card?.waiting || group.board.interrupted || group.board.stalled);
-  const rawStatus = group.board.status;
-  const state = rawStatus === "running" && isWaiting ? "waiting" : rawStatus;
+  const state = boardStatus(group, STATE.boardCards || []);
   const labelKey =
     state === "queued"
       ? "boardColQueued"
       : state === "running"
         ? "boardColRunning"
         : state === "waiting"
-          ? "boardColWaiting"
+          ? "boardColDecision"
           : state === "delivered"
-            ? "boardColDelivered"
+            ? "boardColReview"
             : state === "failed"
               ? "boardColFailed"
-              : "completed";
+              : "boardColConfirmed";
   return `<span class="board-status-pill is-${escapeHtml(state)}" data-board-status="${escapeHtml(state)}">${th(labelKey)}</span>`;
 }
 
 function renderSidebarGroups() {
   renderSidebarBoardBadge();
-  const allGroups = [...STATE.taskGroups.values()].sort((a, b) => a.createdAt - b.createdAt);
+  const allGroups = visibleTaskGroups(STATE).sort((a, b) => a.createdAt - b.createdAt);
   const archivedCount = allGroups.filter((g) => Boolean(g.archived)).length;
   const activeCount = allGroups.length - archivedCount;
   els.groupCountBadge.textContent = String(activeCount);
 
   if (els.toggleArchivedBtn) {
-    els.toggleArchivedBtn.hidden = archivedCount === 0 && !STATE.showArchivedGroups;
+    els.toggleArchivedBtn.hidden = false;
     els.toggleArchivedBtn.textContent = STATE.showArchivedGroups
       ? t("active", activeCount)
       : t("archivedTaskCount", archivedCount);
@@ -1209,10 +1206,12 @@ function renderSidebarGroups() {
 
   const query = STATE.groupSearchQuery.trim().toLowerCase();
   const groups = allGroups.filter((g) => {
+    if (Boolean(g.archived) !== STATE.showArchivedGroups) return false;
     if (query) {
       const subs = getGroupSubSessions(g.groupId);
       const haystack = [
         displayTaskTitle(g),
+        g.groupId,
         g.leadAgent,
         g.cwd || "",
         ...subs.map((s) => `${s.agent} ${s.label || s.name}`),
@@ -1649,6 +1648,16 @@ function renderModelSelectorBar() {
 
 function renderStageHeaderAndTabs() {
   const group = getActiveGroup();
+  els.workbench.classList.toggle("has-no-task", !group);
+  els.chatStageHeader.hidden = !group || STATE.stageView !== "chat";
+  els.chatComposerWrap.hidden = !group || STATE.stageView !== "chat";
+  if (!group) {
+    els.stageTaskTitle.textContent = "";
+    els.sessionTabs.innerHTML = "";
+    els.sessionTabs.hidden = true;
+    document.getElementById("subWorktreeBar")?.remove();
+    document.querySelector("main.stage")?.classList.remove("is-busy");
+  }
   if (!group) return;
 
   const subMode = isSubStream(STATE.activeStreamKey);
@@ -1656,6 +1665,14 @@ function renderStageHeaderAndTabs() {
   const subSession = subSessionKey ? STATE.sessions.get(subSessionKey) : null;
 
   els.stageTaskTitle.textContent = displayTaskTitle(group);
+  const reference = document.getElementById("taskReferenceBtn");
+  reference.textContent = `#${group.groupId.slice(-6)}`;
+  reference.title = t("copyTaskReference", group.groupId);
+  reference.setAttribute("aria-label", reference.title);
+  reference.onclick = async () => {
+    try { await navigator.clipboard.writeText(group.groupId); appendLog(t("taskReferenceCopied")); }
+    catch { await showPromptModal({ title: t("taskReference"), message: group.groupId, defaultValue: group.groupId }); }
+  };
   if (subMode && subSession) {
     els.streamBadge.textContent = t("subsession", agentName(subSession.agent), subSession.label || subSession.name);
     els.streamBadge.className = "stream-badge sub";
@@ -1980,6 +1997,16 @@ async function resolvePerm(requestId, optionId) {
 }
 
 function renderEmptyStage(group) {
+  if (!group) return renderWorkbenchHome();
+  if (group.archived) {
+    const empty = document.createElement("div");
+    empty.className = "alma-box empty-stage";
+    empty.innerHTML = `<div class="empty-inner"><h2>${th("archivedConversationTitle")}</h2>
+      <p>${th("archivedConversationHint")}</p>
+      ${group.board?.brief ? `<p>${escapeHtml(group.board.brief)}</p>` : ""}
+      ${group.board?.summary ? `<p>${escapeHtml(group.board.summary)}</p>` : ""}</div>`;
+    return empty;
+  }
   const box = document.createElement("div");
   box.className = "alma-box empty-stage";
   box.innerHTML = `
@@ -2198,6 +2225,7 @@ function findPrecedingPromptForMessage(streamKey, messageId) {
 }
 
 async function regenerateAssistantMessage(streamKey, messageId) {
+  if (getActiveGroup()?.archived) return;
   if (!streamKey || STATE.sendingStreams.has(streamKey)) {
     appendLog(t("thisSessionIsRunningStopItOr"));
     return;
@@ -2388,6 +2416,7 @@ function buildMessageElement(msg, linkedTasks) {
 
   const canCopy = Boolean(msg.text && msg.text.trim() && msg.status !== "streaming");
   const canRegen =
+    !getActiveGroup()?.archived &&
     msg.role === "assistant" &&
     msg.status !== "streaming" &&
     Boolean(findPrecedingPromptForMessage(msg.streamKey, msg.messageId));
@@ -3154,10 +3183,56 @@ async function changeActiveWorkspaceCwd() {
   appendLog(t("switchedWorkspaceTo", data.group?.cwd || data.baseCwd || picked));
 }
 
+function clearTaskSelection() {
+  if (STATE.activeStreamKey && els.promptInput.value) STATE.draftsByStream.set(STATE.activeStreamKey, els.promptInput.value);
+  STATE.activeGroupId = "";
+  STATE.activeStreamKey = "";
+  els.promptInput.value = "";
+  closeComposerSuggest();
+  if (STATE.stageView !== "chat") setStageView("chat");
+}
+
+function openArchive() {
+  STATE.showArchivedGroups = true;
+  STATE.groupSearchQuery = "";
+  els.groupSearchInput.value = "";
+  clearTaskSelection();
+  setStageView("chat");
+  setScreenMode("workbench");
+}
+
+function renderWorkbenchHome() {
+  const box = document.createElement("section");
+  box.className = "workbench-home";
+  const groups = visibleTaskGroups(STATE);
+  const archived = groups.filter((g) => g.archived).length;
+  const active = groups.length - archived;
+  box.innerHTML = `<div class="home-kicker">ROUNDTABLE MEETING</div>
+    <h1>${th(STATE.showArchivedGroups ? "archiveHomeTitle" : "workbenchHomeTitle")}</h1>
+    <p class="home-description">${th(STATE.showArchivedGroups ? "archiveHomeDescription" : "workbenchHomeDescription")}</p>
+    <div class="home-actions">
+      <button class="alma-btn alma-btn-primary" data-home="new">${th("newTask")}</button>
+      <button class="alma-btn alma-btn-outline" data-home="board">${th("taskBoard")}</button>
+      <button class="alma-btn alma-btn-outline" data-home="archive">${th("archivedTaskCount", archived)}</button>
+    </div>
+    <div class="home-overview">
+      <div><strong>${active}</strong><span>${th("homeActiveTasks")}</span></div>
+      <div><strong>${archived}</strong><span>${th("homeArchivedTasks")}</span></div>
+      <div><strong>${getEnabledAgents().length}</strong><span>${th("homeEnabledAgents")}</span></div>
+    </div>
+    <button class="home-agent-link" data-home="agents">${th("homeManageAgents")}</button>`;
+  box.querySelector('[data-home="new"]').onclick = openNewTaskPopover;
+  box.querySelector('[data-home="board"]').onclick = () => setScreenMode("board");
+  box.querySelector('[data-home="archive"]').onclick = openArchive;
+  box.querySelector('[data-home="agents"]').onclick = () => openSettings("agents");
+  return box;
+}
+
 function renderAll() {
-  if (!STATE.taskGroups.has(STATE.activeGroupId)) {
-    STATE.activeGroupId = STATE.defaultGroupId;
-    STATE.activeStreamKey = `lead:${STATE.defaultGroupId}`;
+  if (!STATE.taskGroups.has(STATE.activeGroupId) || isPlaceholderGroup(getActiveGroup(), STATE)) {
+    STATE.activeGroupId = STATE.showArchivedGroups ? "" : nextActiveGroupId(STATE);
+    STATE.activeStreamKey = STATE.activeGroupId ? `lead:${STATE.activeGroupId}` : "";
+    els.promptInput.value = STATE.draftsByStream.get(STATE.activeStreamKey) || "";
   }
   renderDesktopControls();
   renderAgentControls();
@@ -3741,10 +3816,12 @@ function connectWs() {
 
       STATE.taskGroups.clear();
       (msg.taskGroups || []).forEach((g) => STATE.taskGroups.set(g.groupId, g));
-      if (!STATE.taskGroups.has(STATE.activeGroupId)) {
-        STATE.activeGroupId = STATE.defaultGroupId;
-        STATE.activeStreamKey = `lead:${STATE.defaultGroupId}`;
+      if (!STATE.boardLoaded && initialGroupParam && STATE.taskGroups.has(initialGroupParam)) {
+        STATE.activeGroupId = initialGroupParam;
+        STATE.activeStreamKey = `lead:${initialGroupParam}`;
+        STATE.showArchivedGroups = Boolean(getActiveGroup()?.archived);
       }
+      if (!STATE.taskGroups.has(STATE.activeGroupId) || (getActiveGroup()?.archived && !STATE.showArchivedGroups)) clearTaskSelection();
 
       STATE.sessions.clear();
       (msg.sessions || []).forEach((s) => STATE.sessions.set(s.sessionKey, s));
@@ -3805,6 +3882,7 @@ function connectWs() {
       STATE.boardCards = Array.isArray(msg.cards) ? msg.cards : [];
       STATE.boardLoaded = true;
       renderSidebarGroups();
+      renderBoardResume();
       window.HUB_BOARD?.render?.();
     } else if (msg.type === "models_updated") {
       if (msg.agent && msg.catalog) {
@@ -3890,14 +3968,14 @@ function connectWs() {
       window.HUB_APP?.onResourcesUpdated?.();
       window.HUB_BOARD?.onConfigChanged?.();
     } else if (msg.type === "group_created" || msg.type === "group_updated") {
+      const wasArchived = STATE.taskGroups.get(msg.group.groupId)?.archived;
       STATE.taskGroups.set(msg.group.groupId, msg.group);
-      renderBoardResume();
+      if (msg.group.archived && !wasArchived && STATE.activeGroupId === msg.group.groupId) {
+        clearTaskSelection();
+      }
       renderPendingRequestSelect();
-      renderDesktopControls();
-      renderSidebarGroups();
-      renderStageHeaderAndTabs();
-      // 标题、主导变了：工作流、用量等面板上也显示着这些信息
-      scheduleUiRender(UI_REGION.inspector | UI_REGION.stateChange);
+      renderAll();
+      window.HUB_BOARD?.render?.();
     } else if (msg.type === "workspace_changed") {
       if (msg.baseCwd) STATE.baseCwd = msg.baseCwd;
       if (msg.group) STATE.taskGroups.set(msg.group.groupId, msg.group);
@@ -3914,11 +3992,7 @@ function connectWs() {
         }
       }
       if (STATE.activeGroupId === msg.groupId) {
-        const first = [...STATE.taskGroups.values()][0];
-        if (first) {
-          STATE.activeGroupId = first.groupId;
-          STATE.activeStreamKey = `lead:${first.groupId}`;
-        }
+        clearTaskSelection();
       }
       renderAll();
       appendLog(t("deletedTaskGroup", msg.groupId));
@@ -4579,7 +4653,7 @@ function openNewTaskPopover() {
 
 function buildQuickSwitcherItems(queryRaw) {
   const q = String(queryRaw || "").trim().toLowerCase();
-  const groups = [...STATE.taskGroups.values()].sort((a, b) => {
+  const groups = visibleTaskGroups(STATE).sort((a, b) => {
     if (Boolean(a.archived) !== Boolean(b.archived)) return a.archived ? 1 : -1;
     return b.updatedAt - a.updatedAt;
   });
@@ -4633,8 +4707,7 @@ function buildQuickSwitcherItems(queryRaw) {
       dotClass: "idle",
       searchText: "归档 archive 任务列表",
       run: () => {
-        STATE.showArchivedGroups = !STATE.showArchivedGroups;
-        renderSidebarGroups();
+        els.toggleArchivedBtn.click();
       },
     },
     {
@@ -4726,7 +4799,11 @@ if (els.groupSearchInput) {
 if (els.toggleArchivedBtn) {
   els.toggleArchivedBtn.onclick = () => {
     STATE.showArchivedGroups = !STATE.showArchivedGroups;
-    renderSidebarGroups();
+    STATE.groupSearchQuery = "";
+    els.groupSearchInput.value = "";
+    clearTaskSelection();
+    setStageView("chat");
+    renderAll();
   };
 }
 
@@ -5132,6 +5209,7 @@ window.HUB_APP = {
   renderMarkdown,
   appendLog,
   selectGroup,
+  openArchive,
   openPendingTask,
   projectKey,
   buildArtifactUrl,

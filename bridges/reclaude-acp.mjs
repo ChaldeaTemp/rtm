@@ -18,7 +18,7 @@ function findExecutableInPath(names) {
   return undefined;
 }
 
-if (!process.env.CLAUDE_CODE_EXECUTABLE || !process.env.CLAUDE_CODE_EXECUTABLE.trim()) {
+if (process.env.RTM_CLAUDE_PROVIDER !== "native" && (!process.env.CLAUDE_CODE_EXECUTABLE || !process.env.CLAUDE_CODE_EXECUTABLE.trim())) {
   let found;
   if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");

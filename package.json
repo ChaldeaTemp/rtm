@@ -29,8 +29,9 @@
     "verify:board": "tsx scripts/verify-board.ts",
     "verify:classic-board": "tsx scripts/verify-classic-board.ts",
     "verify:scene-config": "tsx scripts/verify-scene-config.ts",
+    "verify:release": "tsx scripts/verify-release.ts",
     "fixture:classic-board": "tsx scripts/fixture-classic-board.ts",
-    "verify:mock": "tsc --noEmit && tsx scripts/verify-walkthrough.ts && tsx scripts/verify-robustness.ts && tsx scripts/verify-board.ts && tsx scripts/verify-classic-board.ts && tsx scripts/verify-scene-config.ts"
+    "verify:mock": "tsc --noEmit && tsx scripts/verify-walkthrough.ts && tsx scripts/verify-robustness.ts && tsx scripts/verify-board.ts && tsx scripts/verify-classic-board.ts && tsx scripts/verify-scene-config.ts && tsx scripts/verify-release.ts"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "^0.106.0",

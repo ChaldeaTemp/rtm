@@ -1013,13 +1013,33 @@ main.stage[data-view="workflow"] #chatComposerWrap {
 }
 
 .agent-quota {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  padding: 14px 16px;
   font-size: 12px;
-  color: var(--ink-2);
+  color: var(--ink);
 }
+
+.agent-quota-heading { color: var(--muted); font-size: 11px; letter-spacing: .04em; margin-bottom: 12px; }
+.agent-quota-line { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.agent-quota-line strong { font: 24px var(--mono); white-space: nowrap; }
+.agent-quota-line small { font: 11px var(--ui); color: var(--muted); }
+.agent-quota-window { --quota-color: var(--accent); }
+.agent-quota-window.is-warning { --quota-color: var(--warn); }
+.agent-quota-window.is-low { --quota-color: var(--err); }
+.agent-quota-window meter { display: block; width: 100%; height: 6px; margin: 8px 0; appearance: none; border: 0; background: var(--soft); border-radius: 4px; overflow: hidden; }
+.agent-quota-window meter::-webkit-meter-bar { background: var(--soft); border: 0; border-radius: 4px; }
+.agent-quota-window meter::-webkit-meter-optimum-value { background: var(--quota-color); }
+.agent-quota-window meter::-moz-meter-bar { background: var(--quota-color); }
+.agent-quota-reset, .agent-quota-updated, .agent-quota-state { color: var(--muted); font-size: 11px; line-height: 1.6; }
+.agent-quota-updated { margin-top: 14px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+.agent-quota-state { padding: 6px 0 10px; }
+.agent-quota-state.is-loading { min-height: 65px; }
 
 .agent-quota-list {
   display: grid;
-  gap: 3px;
+  gap: 16px;
   margin: 0;
   padding: 0;
   list-style: none;

@@ -579,9 +579,11 @@ function openFormForEdit(agentItem) {
 
 function renderQuota(agent) {
   const quota = INTERACTIVE_STATE.quotas.get(agent);
-  if (!quota || quota.status === "loading") return th("agentQuotaLoading");
+  const heading = `<div class="agent-quota-heading">${th("agentSubscriptionQuota")}</div>`;
+  if (!quota || quota.status === "loading") return `${heading}<div class="agent-quota-state is-loading">${th("agentQuotaLoading")}</div>`;
   if (quota.status !== "ok") {
-    return th(quota.status === "error" ? "agentQuotaError" : "agentQuotaUnavailable");
+    return `${heading}<div class="agent-quota-state">${th(quota.status === "error" ? "agentQuotaError" : "agentQuotaUnavailable")}</div>
+      <button type="button" class="link-btn" data-quota-retry="${app.escapeHtml(agent)}">${th("agentQuotaRetry")}</button>`;
   }
   const locale = getLocale();
   const esc = app.escapeHtml;
@@ -599,7 +601,11 @@ function renderQuota(agent) {
     const remaining = Number((100 - usedPercent).toFixed(1));
     const resetDate = new Date(resetsAt);
     const reset = Number.isFinite(resetDate.getTime()) ? t("agentQuotaResetAt", date.format(resetDate)) : "";
-    return `<li>${th("agentQuotaRemaining", label, remaining)}${reset ? ` <span>· ${esc(reset)}</span>` : ""}</li>`;
+    const tone = remaining <= 10 ? "is-low" : remaining <= 30 ? "is-warning" : "";
+    return `<li class="agent-quota-window ${tone}">
+      <div class="agent-quota-line"><span>${esc(label)}</span><strong>${remaining}<small>% ${th("agentQuotaLeft")}</small></strong></div>
+      <meter min="0" max="100" value="${remaining}" aria-label="${esc(t("agentQuotaRemaining", label, remaining))}">${remaining}%</meter>
+      ${reset ? `<div class="agent-quota-reset">${esc(reset)}</div>` : ""}</li>`;
   });
   if (quota.balance) {
     const { amount, currency } = quota.balance;
@@ -608,7 +614,9 @@ function renderQuota(agent) {
       : t("agentQuotaCredits", new Intl.NumberFormat(locale).format(amount));
     windows.push(`<li>${esc(balance)}</li>`);
   }
-  return `<ul class="agent-quota-list">${windows.join("")}</ul>`;
+  const updated = quota.sourceUpdatedAt || quota.checkedAt;
+  return `${heading}<ul class="agent-quota-list">${windows.join("")}</ul>
+    <div class="agent-quota-updated">${th(quota.source === "reclaude-cache" ? "agentQuotaCached" : "agentQuotaChecked", date.format(new Date(updated)))}</div>`;
 }
 
 async function loadQuota(row) {
@@ -646,6 +654,8 @@ function renderAgentsView() {
   const editingItem = editing ? list.find((a) => a.agent === INTERACTIVE_STATE.editingId) : null;
   const formCatalog = (fv.id ? app.STATE.modelCatalogs?.get(fv.id) : null) || editingItem?.modelCatalog;
   const modelOptions = formCatalog?.models || [];
+  const claudeAliases = fv.id === "claude" && editingItem?.builtin && !fv.command?.trim()
+    ? ["opus", "sonnet", "haiku", "fable", "opusplan"].filter((id) => !modelOptions.some((m) => m.id === id)) : [];
   const effortDatalist =
     formCatalog?.effort?.options?.length > 0
       ? `<datalist id="agentEffortChoices">${formCatalog.effort.options
@@ -710,11 +720,13 @@ function renderAgentsView() {
           <div class="agent-form-field">
             <label for="agentCfgDefaultModel">${th("defaultModel")}</label>
             <input id="agentCfgDefaultModel" class="text-input" type="text" placeholder="${th("useCliDefault")}" value="${esc(fv.defaultModel || "")}" />
-            ${modelOptions.length ? `<select id="agentModelChoices" class="perm-select" aria-label="${th("pickDetectedModel")}">
+            ${modelOptions.length || claudeAliases.length ? `<select id="agentModelChoices" class="perm-select" aria-label="${th("pickDetectedModel")}">
               <option value="" disabled selected>${th("pickDetectedModel")}</option>
               <option value=" ">${th("useCliModelInPicker")}</option>
               ${modelOptions.map((model) => `<option value="${esc(model.id)}">${esc(model.name && model.name !== model.id ? `${model.name} (${model.id})` : model.id)}</option>`).join("")}
+              ${claudeAliases.length ? `<optgroup label="${th("agentModelAliases")}">${claudeAliases.map((id) => `<option value="${id}">${id}</option>`).join("")}</optgroup>` : ""}
             </select>` : ""}
+            ${claudeAliases.length ? `<small class="res-meta">${th("agentModelAliasHint")}</small>` : ""}
           </div>
           <div class="agent-form-field">
             <label>${th("defaultReasoningEffort")}</label>
@@ -851,6 +863,12 @@ function renderAgentsView() {
     ${formHtml}
     <div class="agents-grid">${cardsHtml}</div>
   `;
+  container.onclick = (event) => {
+    const retry = event.target.closest("[data-quota-retry]");
+    if (!retry) return;
+    INTERACTIVE_STATE.quotas.delete(retry.dataset.quotaRetry);
+    void loadQuota(retry.closest("[data-agent-quota]"));
+  };
 
   const refreshBtn = document.getElementById("refreshAgentsBtn");
   if (refreshBtn) refreshBtn.onclick = () => void refreshAgentsList();

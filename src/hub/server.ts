@@ -2043,7 +2043,7 @@ export class AgentHubServer {
             prompt: startedBoard.brief,
             boardDispatch: { rejectNote: startedBoard.rejectNote },
           }).catch((err) => {
-            if (group.board === startedBoard && group.board.status === "running") {
+            if (!group.archived && group.board === startedBoard && group.board.status === "running" && !group.board.interrupted) {
               group.board.status = "failed";
               group.board.failReason = err instanceof Error ? err.message : String(err);
               group.board.closedAt = Date.now();
@@ -2236,7 +2236,7 @@ export class AgentHubServer {
       delete group.board.stalled;
       this.autoLeadTurns.delete(group.groupId);
       const baseDetail =
-        "The workbench was restarted while this task was running, and the user has now asked you to continue. Your previous session is gone; the history above is what was said. Check what is already done in the working directory, finish the task, and call `task_report` when done.";
+        "This task was interrupted (for example by a restart or archiving), and the user has now asked you to continue. Your previous session is gone; the history above is what was said. Check what is already done in the working directory, finish the task, and call `task_report` when done.";
       const hasTurns = (this.ledgers.get(group.groupId)?.getAllTurns().length ?? 0) > 0;
       const detail = hasTurns
         ? baseDetail
@@ -2339,6 +2339,17 @@ export class AgentHubServer {
       changed = true;
       if (input.archived) {
         // An archived task holds no agent processes and runs nothing.
+        if (group.board?.status === "running") {
+          group.board = { ...group.board, interrupted: true };
+          delete group.board.stalled;
+        }
+        for (const [questionId, entry] of this.pendingQuestions) {
+          if (entry.info.groupId !== group.groupId) continue;
+          clearTimeout(entry.timer);
+          this.pendingQuestions.delete(questionId);
+          entry.resolve({ cancelled: true, answers: {} });
+          this.broadcast({ type: "question_resolved", questionId, cancelled: true, answers: {}, timestamp: Date.now() });
+        }
         this.leadInbox.delete(group.groupId);
         this.workflows.cancel(group.groupId);
         this.cancelGroupPermissions(group.groupId);

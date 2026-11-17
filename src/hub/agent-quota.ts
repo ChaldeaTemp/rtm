@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -23,6 +24,8 @@ interface QuotaWindow {
 interface Quota {
   windows: QuotaWindow[];
   balance?: { amount: number; currency?: string };
+  source?: "claude-oauth" | "reclaude-cache";
+  sourceUpdatedAt?: number;
 }
 
 type QuotaResult =
@@ -31,7 +34,84 @@ type QuotaResult =
 
 export function supportsAgentQuota(def: AgentDefinition): boolean {
   return def.builtin === true && !def.command?.trim() &&
-    (def.id === "codex" || (def.id === "kimi" && (!def.args?.length || def.args.join(" ") === "acp")));
+    (def.id === "claude" || def.id === "codex" || (def.id === "kimi" && (!def.args?.length || def.args.join(" ") === "acp")));
+}
+
+const claudeWindow = z.object({ utilization: percent, resets_at: z.string().nullish() });
+
+function parseClaudeQuota(value: unknown): Quota {
+  const raw = z.record(z.string(), z.unknown()).parse(value);
+  const windows: QuotaWindow[] = [];
+  for (const [key, entry] of Object.entries(raw)) {
+    // These windows are percentages, not the local token / cost counters.
+    if (!/^five_hour$|^seven_day(?:_|$)/.test(key) || key === "seven_day_breakdown") continue;
+    const window = claudeWindow.safeParse(entry).data;
+    if (!window) continue;
+    const reset = window.resets_at ? Date.parse(window.resets_at) : NaN;
+    windows.push({
+      name: key.startsWith("seven_day_") ? key.slice(10).replaceAll("_", " ") : undefined,
+      minutes: key === "five_hour" ? 300 : 10080,
+      usedPercent: window.utilization,
+      resetsAt: Number.isFinite(reset) ? reset : undefined,
+    });
+  }
+  return { windows };
+}
+
+async function queryClaude(def: AgentDefinition, cwd: string): Promise<Quota> {
+  const env = { ...process.env, ...resolveAdapterCommand(def.id, def).env };
+  const executable = path.basename(env.CLAUDE_CODE_EXECUTABLE || "").toLowerCase();
+  if (/^(reclaude|rec)(\.exe)?$/.test(executable)) {
+    // ReClaude owns refresh and account switching. Read only the selected binding's
+    // usage snapshot; never fall back to an unrelated native Claude account.
+    const home = env.RECLAUDE_HOME || path.join(os.homedir(), ".rec");
+    const currentPath = path.join(home, "claude", "current");
+    const account = (await fs.readFile(currentPath, "utf8")).trim();
+    if (!/^[a-zA-Z0-9_-]+$/.test(account)) throw new Error("Invalid ReClaude binding");
+    const record = z.object({
+      available: z.boolean(),
+      fetched_at_ms: z.number().positive().optional(),
+      usage_updated_at_ms: z.number().positive().optional(),
+      usage: z.unknown(),
+    }).parse(JSON.parse(await fs.readFile(path.join(home, "claude", "accounts", account, "usage.json"), "utf8")));
+    if ((await fs.readFile(currentPath, "utf8")).trim() !== account) throw new Error("ReClaude account changed");
+    const timestamp = record.usage_updated_at_ms || record.fetched_at_ms;
+    if (!record.available || !timestamp) return { windows: [] };
+    return { ...parseClaudeQuota(record.usage), source: "reclaude-cache", sourceUpdatedAt: timestamp };
+  }
+  // An API-key / gateway account is not a Claude subscription. Do not attribute a
+  // different native login's quota to it, and never forward OAuth to a custom URL.
+  const configDir = env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+  const settingsFiles = [path.join(configDir, "settings.json"), path.join(cwd, ".claude", "settings.json"), path.join(cwd, ".claude", "settings.local.json")];
+  for (const file of settingsFiles) {
+    const raw = await fs.readFile(file, "utf8").catch(() => "");
+    if (!raw) continue;
+    const configured = z.object({ env: z.record(z.string(), z.string()).optional() }).parse(JSON.parse(raw)).env;
+    if (configured?.ANTHROPIC_API_KEY || configured?.ANTHROPIC_AUTH_TOKEN ||
+        (configured?.ANTHROPIC_BASE_URL && configured.ANTHROPIC_BASE_URL.replace(/\/$/, "") !== "https://api.anthropic.com")) return { windows: [] };
+  }
+  if (env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN ||
+      (env.ANTHROPIC_BASE_URL && env.ANTHROPIC_BASE_URL.replace(/\/$/, "") !== "https://api.anthropic.com")) return { windows: [] };
+  let token = env.CLAUDE_CODE_OAUTH_TOKEN?.trim();
+  if (!token) {
+    let raw = await fs.readFile(path.join(configDir, ".credentials.json"), "utf8").catch(() => "");
+    if (!raw && process.platform === "darwin" && !env.CLAUDE_CONFIG_DIR) {
+      raw = (await promisify(execFile)("security", ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
+        { timeout: TIMEOUT_MS, maxBuffer: 1024 * 1024 })).stdout;
+    }
+    if (!raw) return { windows: [] };
+    const credentials = z.object({ claudeAiOauth: z.object({ accessToken: z.string(), expiresAt: z.number().optional() }).optional() })
+      .parse(JSON.parse(raw)).claudeAiOauth;
+    if (!credentials || (credentials.expiresAt && credentials.expiresAt <= Date.now())) return { windows: [] };
+    token = credentials.accessToken;
+  }
+  const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
+    headers: { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20" },
+    signal: AbortSignal.timeout(TIMEOUT_MS), redirect: "error",
+  });
+  if (response.status === 401 || response.status === 403) return { windows: [] };
+  if (!response.ok) throw new Error("Claude quota request failed");
+  return { ...parseClaudeQuota(await response.json()), source: "claude-oauth" };
 }
 
 const codexWindow = z.object({
@@ -233,7 +313,7 @@ export class AgentQuotaReader {
 
   private async query(def: AgentDefinition, cwd: string): Promise<QuotaResult> {
     try {
-      const quota = await (def.id === "codex" ? queryCodex(def, cwd) : queryKimi(def, cwd));
+      const quota = await (def.id === "claude" ? queryClaude(def, cwd) : def.id === "codex" ? queryCodex(def, cwd) : queryKimi(def, cwd));
       const checkedAt = Date.now();
       return quota.windows.length || quota.balance
         ? { status: "ok", checkedAt, ...quota }
