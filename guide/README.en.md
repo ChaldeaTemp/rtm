@@ -8,10 +8,15 @@ This guide uses a CSV export task to show how to connect agents, delegate work, 
 
 You need **Node.js 22 or newer** and at least one agent ready to use. Set up two agents to try cross-agent delegation or review. RTM currently runs from source. Development and CI use Windows. The repository also includes a macOS launcher that has yet to be tested on a Mac.
 
+Download `rtm-0.1.0-source.zip` from [Release v0.1.0](https://github.com/ChaldeaTemp/rtm/releases/tag/v0.1.0), extract the whole archive, and open a terminal in `rtm-0.1.0`. Run `npm ci`, `npm run build`, then `npm run desktop`. Node.js, dependencies and agent credentials are not included; the initial dependency installation needs internet access.
+
+On Windows, run `Get-FileHash .\rtm-0.1.0-source.zip -Algorithm SHA256` in the download directory and compare it with the release's `SHA256SUMS.txt`. Or check out the same version with Git:
+
 ```bash
-git clone https://github.com/ChaldeaTemp/rtm.git
+git clone --branch v0.1.0 --depth 1 https://github.com/ChaldeaTemp/rtm.git
 cd rtm
 npm ci
+npm run build
 npm run desktop
 ```
 

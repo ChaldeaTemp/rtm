@@ -8,10 +8,15 @@
 
 需要 **Node.js 22 或更高版本**，以及至少一个能正常使用的 Agent。要体验跨 Agent 委派或验收，请准备两个。RTM 当前从源码运行。开发和 CI 主要在 Windows 上进行，仓库也提供 macOS 启动脚本，尚未在 Mac 真机上验证。
 
+从 [v0.1.0 Release](https://github.com/ChaldeaTemp/rtm/releases/tag/v0.1.0) 下载 `rtm-0.1.0-source.zip`，完整解压后，在 `rtm-0.1.0` 文件夹打开终端，依次运行 `npm ci`、`npm run build`、`npm run desktop`。源码包不包含 Node.js、依赖或 Agent 登录信息；首次安装依赖需要联网。
+
+Windows 可在下载目录运行 `Get-FileHash .\rtm-0.1.0-source.zip -Algorithm SHA256`，将结果与 Release 附件 `SHA256SUMS.txt` 比对。也可以通过 Git 获取同一版本：
+
 ```bash
-git clone https://github.com/ChaldeaTemp/rtm.git
+git clone --branch v0.1.0 --depth 1 https://github.com/ChaldeaTemp/rtm.git
 cd rtm
 npm ci
+npm run build
 npm run desktop
 ```
 

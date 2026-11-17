@@ -86,10 +86,15 @@ See which skills each agent loads natively or gets through RTM. Enable or disabl
 
 You'll need Node.js 22+ and at least one configured agent. Connect two to try agent-to-agent communication. RTM runs locally from source and connects to agents through the Agent Client Protocol (ACP).
 
+Download **`rtm-0.1.0-source.zip`** from [Release v0.1.0](https://github.com/ChaldeaTemp/rtm/releases/tag/v0.1.0), extract it, and open a terminal in the extracted `rtm-0.1.0` folder. Run `npm ci`, `npm run build`, then `npm run desktop`. The release includes `SHA256SUMS.txt` to verify the download. Node.js, dependencies and agent credentials are not included.
+
+Or check out the same release with Git:
+
 ```bash
-git clone https://github.com/ChaldeaTemp/rtm.git
+git clone --branch v0.1.0 --depth 1 https://github.com/ChaldeaTemp/rtm.git
 cd rtm
 npm ci
+npm run build
 npm run desktop
 ```
 
